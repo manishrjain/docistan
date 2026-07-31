@@ -1,0 +1,20 @@
+services:
+  typesense:
+    image: typesense/typesense:30.2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8108:8108"
+    # No volume on purpose: docistan rebuilds the whole collection from the
+    # JSON sidecars on every boot, so a persisted index would only be a second
+    # source of truth that can drift.
+    tmpfs:
+      - /data
+    command: >
+      --data-dir /data
+      --api-key=${TYPESENSE_API_KEY:-docistan-dev-key}
+      --enable-cors=false
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8108/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

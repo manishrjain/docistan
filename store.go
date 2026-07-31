@@ -1,0 +1,279 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Document status values.
+const (
+	StatusProcessing = "processing"
+	StatusReady      = "ready"
+	StatusFailed     = "failed"
+	// StatusDeleted marks a tombstone. The sidecar is kept after deletion so
+	// the id it consumed can never be handed out to a different document.
+	StatusDeleted = "deleted"
+)
+
+// OCR source values, recorded so the UI can explain where text came from.
+const (
+	OCRNone         = "none"         // the PDF already had a text layer
+	OCRTesseract    = "tesseract"    // ocrmypdf produced the text layer
+	OCRLLM          = "llm"          // vision rescue transcribed it
+	OCRSkippedSigned = "skipped-signed" // signed PDF, left untouched
+)
+
+// Doc is one document. The JSON form of this struct is the sidecar written to
+// docs/<id>.json, which is the source of truth for the whole system.
+type Doc struct {
+	ID            int      `json:"id"`
+	SHA256        string   `json:"sha256"`
+	OriginalName  string   `json:"original_name"`
+	OriginalExt   string   `json:"original_ext"`
+	Status        string   `json:"status"`
+	Error         string   `json:"error,omitempty"`
+	FailedStage   string   `json:"failed_stage,omitempty"`
+	AddedTS       int64    `json:"added_ts"`
+	FileSize      int64    `json:"file_size"`
+	PageCount     int      `json:"page_count"`
+	Title         string   `json:"title"`
+	Tags          []string `json:"tags"`
+	Correspondent string   `json:"correspondent"`
+	DocType       string   `json:"doc_type"`
+	CreatedDate   string   `json:"created_date"`
+	CreatedTS     int64    `json:"created_ts"`
+	DeletedTS     int64    `json:"deleted_ts,omitempty"`
+	OCRSource     string   `json:"ocr_source"`
+	// NativeText records that the source PDF had its own text layer. That text
+	// is exact, so it must never be replaced by a transcription of an image.
+	NativeText    bool     `json:"native_text"`
+	// NeedsRescue marks a scanned document whose OCR output still looks poor,
+	// making it a candidate for the model to re-read.
+	NeedsRescue   bool     `json:"needs_rescue,omitempty"`
+	Signed        bool     `json:"signed"`
+	Confidence    int      `json:"confidence"`
+	Enriched      bool     `json:"enriched"`
+	Content       string   `json:"content"`
+}
+
+// Store owns the data directory. Sidecars are the durable state; the only
+// in-memory state is the id counter and the set of hashes being ingested.
+type Store struct {
+	dir string
+
+	mu       sync.Mutex
+	nextID   int
+	inflight map[string]bool
+}
+
+func NewStore(dir string) (*Store, error) {
+	s := &Store{dir: dir, inflight: map[string]bool{}}
+	for _, sub := range []string{"consume", "docs", "originals", "archive", "thumbs", "duplicates"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.initNextID(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) path(parts ...string) string {
+	return filepath.Join(append([]string{s.dir}, parts...)...)
+}
+
+func (s *Store) DocPath(id int) string      { return s.path("docs", strconv.Itoa(id)+".json") }
+func (s *Store) ArchivePath(id int) string  { return s.path("archive", strconv.Itoa(id)+".pdf") }
+func (s *Store) ThumbPath(id int) string    { return s.path("thumbs", strconv.Itoa(id)+".jpg") }
+func (s *Store) ConsumeDir() string         { return s.path("consume") }
+func (s *Store) DuplicatesDir() string      { return s.path("duplicates") }
+func (s *Store) DuplicatesLog() string      { return s.path("duplicates.jsonl") }
+func (s *Store) OriginalPath(id int, ext string) string {
+	return s.path("originals", strconv.Itoa(id)+ext)
+}
+
+// OriginalGlob finds the original regardless of extension, for the paths that
+// know an id but not the file type.
+func (s *Store) OriginalGlob(id int) (string, error) {
+	matches, err := filepath.Glob(s.path("originals", strconv.Itoa(id)+".*"))
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no original for doc %d", id)
+	}
+	return matches[0], nil
+}
+
+// initNextID derives the counter from the sidecars on disk. There is no
+// counter file: deletion leaves a tombstone sidecar behind, so the highest id
+// present is a complete record of what has ever been issued.
+func (s *Store) initNextID() error {
+	ids, err := s.SidecarIDs()
+	if err != nil {
+		return err
+	}
+	s.nextID = 1
+	for _, id := range ids {
+		if id >= s.nextID {
+			s.nextID = id + 1
+		}
+	}
+	return nil
+}
+
+// AllocID hands out the next id from memory.
+func (s *Store) AllocID() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := s.nextID
+	s.nextID++
+	return id
+}
+
+// ClaimHash reserves a content hash for ingestion. It returns false when
+// another worker is already ingesting identical bytes, which closes the race
+// that a Typesense-only dedup check would leave open.
+func (s *Store) ClaimHash(sha string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inflight[sha] {
+		return false
+	}
+	s.inflight[sha] = true
+	return true
+}
+
+func (s *Store) ReleaseHash(sha string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.inflight, sha)
+}
+
+func (s *Store) Save(d *Doc) error {
+	b, err := json.MarshalIndent(d, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(s.DocPath(d.ID), append(b, '\n'))
+}
+
+func (s *Store) Load(id int) (*Doc, error) {
+	b, err := os.ReadFile(s.DocPath(id))
+	if err != nil {
+		return nil, err
+	}
+	var d Doc
+	if err := json.Unmarshal(b, &d); err != nil {
+		return nil, fmt.Errorf("sidecar %d: %w", id, err)
+	}
+	return &d, nil
+}
+
+// Delete removes a document's files but replaces its sidecar with a tombstone
+// rather than erasing it. That keeps the id permanently spoken for — ids get
+// written on paper — and leaves a record of what used to be there.
+func (s *Store) Delete(id int) error {
+	prev, err := s.Load(id)
+	if err != nil {
+		return err
+	}
+
+	paths := []string{s.ArchivePath(id), s.ThumbPath(id)}
+	if orig, err := s.OriginalGlob(id); err == nil {
+		paths = append(paths, orig)
+	}
+	for _, p := range paths {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	// Keep identity and timestamps, drop the bulk.
+	tomb := &Doc{
+		ID:           prev.ID,
+		SHA256:       prev.SHA256,
+		OriginalName: prev.OriginalName,
+		OriginalExt:  prev.OriginalExt,
+		Status:       StatusDeleted,
+		AddedTS:      prev.AddedTS,
+		DeletedTS:    time.Now().Unix(),
+		Title:        prev.Title,
+		Tags:         []string{},
+	}
+	return s.Save(tomb)
+}
+
+// SidecarIDs lists document ids present on disk, ascending.
+func (s *Store) SidecarIDs() ([]int, error) {
+	matches, err := filepath.Glob(s.path("docs", "*.json"))
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int, 0, len(matches))
+	for _, m := range matches {
+		base := strings.TrimSuffix(filepath.Base(m), ".json")
+		if id, err := strconv.Atoi(base); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	sort.Ints(ids)
+	return ids, nil
+}
+
+// Each walks every sidecar in id order. A single unreadable sidecar is
+// reported and skipped rather than aborting the whole replay, so one bad file
+// can't stop the server from starting.
+func (s *Store) Each(fn func(*Doc) error) error {
+	ids, err := s.SidecarIDs()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		d, err := s.Load(id)
+		if err != nil {
+			logf("skipping unreadable sidecar %d: %v", id, err)
+			continue
+		}
+		if err := fn(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeFileAtomic writes via a temp file in the same directory and renames, so
+// readers never observe a partially written file.
+func writeFileAtomic(path string, b []byte) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
