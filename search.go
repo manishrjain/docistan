@@ -239,17 +239,17 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 	}
 
 	params := &api.SearchCollectionParams{
-		Q:                     pointer.String(text),
-		QueryBy:               pointer.String("title,content,tags,original_name"),
-		QueryByWeights:        pointer.String("10,4,8,2"),
-		FacetBy:               pointer.String("tags,status"),
-		MaxFacetValues:        pointer.Int(30),
-		HighlightFields:       pointer.String("content"),
-		HighlightStartTag:     pointer.String(hlStart),
-		HighlightEndTag:       pointer.String(hlEnd),
+		Q:                       pointer.String(text),
+		QueryBy:                 pointer.String("title,content,tags,original_name"),
+		QueryByWeights:          pointer.String("10,4,8,2"),
+		FacetBy:                 pointer.String("tags,status"),
+		MaxFacetValues:          pointer.Int(30),
+		HighlightFields:         pointer.String("content"),
+		HighlightStartTag:       pointer.String(hlStart),
+		HighlightEndTag:         pointer.String(hlEnd),
 		HighlightAffixNumTokens: pointer.Int(8),
-		PerPage:               pointer.Int(perPage),
-		Page:                  pointer.Int(q.Page),
+		PerPage:                 pointer.Int(perPage),
+		Page:                    pointer.Int(q.Page),
 	}
 	if len(filters) > 0 {
 		params.FilterBy = pointer.String(strings.Join(filters, " && "))
@@ -378,21 +378,21 @@ func docFromMap(m map[string]any) *Doc {
 	}
 
 	d := &Doc{
-		OriginalName:  str("original_name"),
-		Title:         str("title"),
-		Status:        str("status"),
-		SHA256:        str("sha256"),
-		CreatedDate:   str("created_date"),
-		OCRSource:     str("ocr_source"),
-		Content:       str("content"),
-		CreatedTS:     num("created_ts"),
-		AddedTS:       num("added_ts"),
-		FileSize:      num("file_size"),
-		PageCount:     int(num("page_count")),
-		Confidence:    int(num("confidence")),
-		Signed:        boolean("signed"),
-		Enriched:      boolean("enriched"),
-		NativeText:    boolean("native_text"),
+		OriginalName: str("original_name"),
+		Title:        str("title"),
+		Status:       str("status"),
+		SHA256:       str("sha256"),
+		CreatedDate:  str("created_date"),
+		OCRSource:    str("ocr_source"),
+		Content:      str("content"),
+		CreatedTS:    num("created_ts"),
+		AddedTS:      num("added_ts"),
+		FileSize:     num("file_size"),
+		PageCount:    int(num("page_count")),
+		Confidence:   int(num("confidence")),
+		Signed:       boolean("signed"),
+		Enriched:     boolean("enriched"),
+		NativeText:   boolean("native_text"),
 	}
 	d.ID, _ = strconv.Atoi(str("id"))
 	if tags, ok := m["tags"].([]any); ok {

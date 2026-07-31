@@ -31,10 +31,10 @@ type Pipeline struct {
 	app  *App
 	jobs chan string
 
-	mu      sync.Mutex
-	active  map[string]*Job
-	queued  map[string]bool
-	dupes   []DupeEvent
+	mu     sync.Mutex
+	active map[string]*Job
+	queued map[string]bool
+	dupes  []DupeEvent
 }
 
 type DupeEvent struct {
@@ -394,24 +394,16 @@ func (p *Pipeline) stages(ctx context.Context, path string, job *Job, doc *Doc) 
 		doc.NeedsRescue = true
 	}
 
-	p.setStage(path, job, "heuristics")
-	applyHeuristics(ctx, p.app, doc, archive)
+	if doc.Title == "" {
+		doc.Title = doc.OriginalName
+	}
+	if doc.Tags == nil {
+		doc.Tags = []string{}
+	}
 
-	p.setStage(path, job, "llm")
-	p.maybeEnrich(ctx, doc, archive)
+	p.setStage(path, job, "metadata")
+	p.maybeEnrich(ctx, doc)
 	return nil
-}
-
-// maybeEnrich is filled in with the LLM call; until then the heuristics result
-// stands on its own, which is exactly the fallback behaviour we want anyway.
-func (p *Pipeline) maybeEnrich(ctx context.Context, doc *Doc, archive string) {
-	if p.app.cfg.LLMMode == "off" {
-		return
-	}
-	if p.app.cfg.LLMMode == "auto" && doc.Confidence >= p.app.cfg.LLMThreshold {
-		return
-	}
-	// TODO(M4): call the enricher and merge its result.
 }
 
 func (p *Pipeline) rejectUnsupported(ctx context.Context, name, ext, sum string, size int64) {

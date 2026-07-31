@@ -42,6 +42,20 @@
     <p class="quiet">No failures.</p>
   {{end}}
 
+  {{with .Spend}}
+    <h2>Model usage</h2>
+    {{if .Calls}}
+      <p>
+        {{.Calls}} document{{if ne .Calls 1}}s{{end}} enriched ·
+        {{.In}} input + {{.Out}} output tokens ·
+        <strong>${{printf "%.4f" .USD}}</strong>
+        <span class="quiet">({{printf "$%.5f" .PerDoc}} per document)</span>
+      </p>
+    {{else}}
+      <p class="quiet">No model calls yet this session.</p>
+    {{end}}
+  {{end}}
+
   <h2>Duplicates rejected</h2>
   {{if .Dupes}}
     <table>

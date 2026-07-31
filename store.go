@@ -24,41 +24,41 @@ const (
 
 // OCR source values, recorded so the UI can explain where text came from.
 const (
-	OCRNone         = "none"         // the PDF already had a text layer
-	OCRTesseract    = "tesseract"    // ocrmypdf produced the text layer
-	OCRLLM          = "llm"          // vision rescue transcribed it
+	OCRNone          = "none"           // the PDF already had a text layer
+	OCRTesseract     = "tesseract"      // ocrmypdf produced the text layer
+	OCRLLM           = "llm"            // vision rescue transcribed it
 	OCRSkippedSigned = "skipped-signed" // signed PDF, left untouched
 )
 
 // Doc is one document. The JSON form of this struct is the sidecar written to
 // docs/<id>.json, which is the source of truth for the whole system.
 type Doc struct {
-	ID            int      `json:"id"`
-	SHA256        string   `json:"sha256"`
-	OriginalName  string   `json:"original_name"`
-	OriginalExt   string   `json:"original_ext"`
-	Status        string   `json:"status"`
-	Error         string   `json:"error,omitempty"`
-	FailedStage   string   `json:"failed_stage,omitempty"`
-	AddedTS       int64    `json:"added_ts"`
-	FileSize      int64    `json:"file_size"`
-	PageCount     int      `json:"page_count"`
-	Title         string   `json:"title"`
-	Tags          []string `json:"tags"`
-	CreatedDate   string   `json:"created_date"`
-	CreatedTS     int64    `json:"created_ts"`
-	DeletedTS     int64    `json:"deleted_ts,omitempty"`
-	OCRSource     string   `json:"ocr_source"`
+	ID           int      `json:"id"`
+	SHA256       string   `json:"sha256"`
+	OriginalName string   `json:"original_name"`
+	OriginalExt  string   `json:"original_ext"`
+	Status       string   `json:"status"`
+	Error        string   `json:"error,omitempty"`
+	FailedStage  string   `json:"failed_stage,omitempty"`
+	AddedTS      int64    `json:"added_ts"`
+	FileSize     int64    `json:"file_size"`
+	PageCount    int      `json:"page_count"`
+	Title        string   `json:"title"`
+	Tags         []string `json:"tags"`
+	CreatedDate  string   `json:"created_date"`
+	CreatedTS    int64    `json:"created_ts"`
+	DeletedTS    int64    `json:"deleted_ts,omitempty"`
+	OCRSource    string   `json:"ocr_source"`
 	// NativeText records that the source PDF had its own text layer. That text
 	// is exact, so it must never be replaced by a transcription of an image.
-	NativeText    bool     `json:"native_text"`
+	NativeText bool `json:"native_text"`
 	// NeedsRescue marks a scanned document whose OCR output still looks poor,
 	// making it a candidate for the model to re-read.
-	NeedsRescue   bool     `json:"needs_rescue,omitempty"`
-	Signed        bool     `json:"signed"`
-	Confidence    int      `json:"confidence"`
-	Enriched      bool     `json:"enriched"`
-	Content       string   `json:"content"`
+	NeedsRescue bool   `json:"needs_rescue,omitempty"`
+	Signed      bool   `json:"signed"`
+	Confidence  int    `json:"confidence"`
+	Enriched    bool   `json:"enriched"`
+	Content     string `json:"content"`
 }
 
 // Store owns the data directory. Sidecars are the durable state; the only
@@ -88,12 +88,12 @@ func (s *Store) path(parts ...string) string {
 	return filepath.Join(append([]string{s.dir}, parts...)...)
 }
 
-func (s *Store) DocPath(id int) string      { return s.path("docs", strconv.Itoa(id)+".json") }
-func (s *Store) ArchivePath(id int) string  { return s.path("archive", strconv.Itoa(id)+".pdf") }
-func (s *Store) ThumbPath(id int) string    { return s.path("thumbs", strconv.Itoa(id)+".jpg") }
-func (s *Store) ConsumeDir() string         { return s.path("consume") }
-func (s *Store) DuplicatesDir() string      { return s.path("duplicates") }
-func (s *Store) DuplicatesLog() string      { return s.path("duplicates.jsonl") }
+func (s *Store) DocPath(id int) string     { return s.path("docs", strconv.Itoa(id)+".json") }
+func (s *Store) ArchivePath(id int) string { return s.path("archive", strconv.Itoa(id)+".pdf") }
+func (s *Store) ThumbPath(id int) string   { return s.path("thumbs", strconv.Itoa(id)+".jpg") }
+func (s *Store) ConsumeDir() string        { return s.path("consume") }
+func (s *Store) DuplicatesDir() string     { return s.path("duplicates") }
+func (s *Store) DuplicatesLog() string     { return s.path("duplicates.jsonl") }
 func (s *Store) OriginalPath(id int, ext string) string {
 	return s.path("originals", strconv.Itoa(id)+ext)
 }

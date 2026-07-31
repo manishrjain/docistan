@@ -171,3 +171,13 @@ code { background: var(--accent-soft); padding: .05rem .3rem; border-radius: 4px
 }
 .toast.bad { background: var(--bad); }
 .toast a { color: #ffd9a8; }
+
+.extracted { margin: 1rem 0; border-top: 1px solid var(--line); padding-top: .8rem; }
+.extracted summary { cursor: pointer; font-size: .85rem; color: var(--muted); }
+.extracted[data-empty] summary { color: var(--bad); }
+.extracted pre {
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 22rem; overflow: auto; margin: .6rem 0 0;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  padding: .6rem; font-size: .8rem; line-height: 1.45;
+}

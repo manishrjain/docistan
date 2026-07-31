@@ -57,10 +57,19 @@ func templateFuncs() template.FuncMap {
 			return time.Unix(ts, 0).Format("2 Jan 2006")
 		},
 		"joinTags": func(tags []string) string { return strings.Join(tags, ", ") },
+		// Document dates are month precision: the day on a statement is rarely
+		// meaningful and rarely unambiguous.
+		"monthLabel": func(s string) string {
+			t, err := time.Parse("2006-01", s)
+			if err != nil {
+				return s
+			}
+			return t.Format("Jan 2006")
+		},
 		// Go's built-in "slice" slices an existing value; it cannot build a
 		// literal list, which is what the templates actually want.
 		"list": func(items ...string) []string { return items },
-		"add":      func(a, b int) int { return a + b },
+		"add":  func(a, b int) int { return a + b },
 		"facetLabel": func(field string) string {
 			switch field {
 			case "tags":
@@ -116,7 +125,17 @@ type page struct {
 	Dupes  []DupeEvent
 	Failed []Hit
 	Flash  []Flash
+	Spend  *SpendSummary
 	URL    *url.URL
+}
+
+// SpendSummary reports actual model usage rather than an estimate.
+type SpendSummary struct {
+	Calls  int64
+	In     int64
+	Out    int64
+	USD    float64
+	PerDoc float64
 }
 
 func (a *App) render(w http.ResponseWriter, name string, data page) {
@@ -234,7 +253,7 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	doc.Title = strings.TrimSpace(r.FormValue("title"))
-	doc.CreatedDate = strings.TrimSpace(r.FormValue("created_date"))
+	doc.CreatedDate = normalizeMonth(r.FormValue("created_date"))
 	doc.CreatedTS = parseDateTS(doc.CreatedDate)
 	doc.Tags = splitTags(r.FormValue("tags"))
 
@@ -434,11 +453,20 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "search unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	var spend *SpendSummary
+	if a.enricher != nil {
+		calls, in, out, usd := a.enricher.Spend()
+		spend = &SpendSummary{Calls: calls, In: in, Out: out, USD: usd}
+		if calls > 0 {
+			spend.PerDoc = usd / float64(calls)
+		}
+	}
 	a.render(w, "status.html", page{
 		Title:  "Status",
 		Jobs:   a.pipeline.ActiveJobs(),
 		Dupes:  a.pipeline.RecentDupes(20),
 		Failed: failed.Hits,
+		Spend:  spend,
 		URL:    r.URL,
 	})
 }
@@ -468,13 +496,27 @@ func splitTags(s string) []string {
 	return out
 }
 
+// parseDateTS turns a YYYY-MM document month into a sortable timestamp. A
+// full YYYY-MM-DD is accepted and truncated so older sidecars still load.
 func parseDateTS(s string) int64 {
 	if s == "" {
 		return 0
 	}
-	t, err := time.Parse("2006-01-02", s)
-	if err != nil {
-		return 0
+	if len(s) >= 7 {
+		if t, err := time.Parse("2006-01", s[:7]); err == nil {
+			return t.Unix()
+		}
 	}
-	return t.Unix()
+	return 0
+}
+
+// normalizeMonth clamps any date-ish string to YYYY-MM.
+func normalizeMonth(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 7 {
+		if _, err := time.Parse("2006-01", s[:7]); err == nil {
+			return s[:7]
+		}
+	}
+	return ""
 }

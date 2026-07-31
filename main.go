@@ -17,8 +17,7 @@ type Config struct {
 	TypesenseKey string
 	Workers      int
 	LLMModel     string
-	LLMThreshold int
-	LLMMode      string
+	LLMEnabled   bool
 	Dev          bool
 }
 
@@ -28,6 +27,7 @@ type App struct {
 	store    *Store
 	search   *Search
 	pipeline *Pipeline
+	enricher *OpenAIEnricher
 }
 
 func main() {
@@ -38,8 +38,7 @@ func main() {
 	flag.StringVar(&cfg.TypesenseKey, "typesense-key", envOr("TYPESENSE_API_KEY", "docistan-dev-key"), "Typesense API key")
 	flag.IntVar(&cfg.Workers, "workers", 2, "ingest workers")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
-	flag.IntVar(&cfg.LLMThreshold, "llm-threshold", 60, "enrich documents scoring below this confidence")
-	flag.StringVar(&cfg.LLMMode, "llm", "auto", "LLM usage: off | auto | all")
+	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
 	flag.BoolVar(&cfg.Dev, "dev", false, "reload templates from disk on each request")
 	flag.Parse()
 
@@ -55,6 +54,14 @@ func run(cfg Config) error {
 	}
 	search := NewSearch(cfg.TypesenseURL, cfg.TypesenseKey)
 	app := &App{cfg: cfg, store: store, search: search}
+	if cfg.LLMEnabled {
+		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+			app.enricher = NewOpenAIEnricher(cfg.LLMModel, key)
+			logf("metadata enrichment on, model %s", cfg.LLMModel)
+		} else {
+			logf("OPENAI_API_KEY not set: documents will keep filename-derived titles and no tags")
+		}
+	}
 
 	ctx := context.Background()
 	// Typesense answers every read, so refuse to start rather than serve a

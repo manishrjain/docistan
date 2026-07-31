@@ -61,7 +61,7 @@
             <a class="title" href="/doc/{{$d.ID}}">{{$d.Title}}</a>
             <p class="sub">
               <span class="id">#{{$d.ID}}</span>
-              {{if $d.CreatedDate}}<span>{{$d.CreatedDate}}</span>{{end}}
+              {{if $d.CreatedDate}}<span>{{monthLabel $d.CreatedDate}}</span>{{end}}
               {{if $d.PageCount}}<span>{{$d.PageCount}}p</span>{{end}}
               {{if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>{{end}}
             </p>

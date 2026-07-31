@@ -29,8 +29,8 @@
       <label>Title
         <input type="text" name="title" value="{{$d.Title}}">
       </label>
-      <label>Document date
-        <input type="date" name="created_date" value="{{$d.CreatedDate}}">
+      <label>Document month
+        <input type="month" name="created_date" value="{{$d.CreatedDate}}">
       </label>
       <label>Tags <small>comma separated — tags are the only classifier</small>
         <input type="text" name="tags" value="{{joinTags $d.Tags}}">
@@ -43,6 +43,15 @@
       <dt>Text</dt><dd>{{if $d.NativeText}}native text layer{{else if eq $d.OCRSource "tesseract"}}OCR (tesseract){{else if eq $d.OCRSource "llm"}}OCR (model){{else if eq $d.OCRSource "skipped-signed"}}not OCR'd (signed){{else}}none{{end}}</dd>
       {{if $d.Confidence}}<dt>Confidence</dt><dd>{{$d.Confidence}}</dd>{{end}}
     </dl>
+
+    <details class="extracted"{{if not $d.Content}} data-empty="1"{{end}}>
+      <summary>Extracted text {{if $d.Content}}<span class="quiet">({{len $d.Content}} characters)</span>{{end}}</summary>
+      {{if $d.Content}}
+        <pre>{{$d.Content}}</pre>
+      {{else}}
+        <p class="quiet">No text was extracted from this document.</p>
+      {{end}}
+    </details>
 
     <div class="actions">
       <a href="/doc/{{$d.ID}}/original" class="button">Download original</a>
