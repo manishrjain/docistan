@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -23,9 +24,9 @@ import (
 // Flash is a one-off message shown after an upload. DocID, when set, links to
 // the document a duplicate collided with.
 type Flash struct {
-	Text  string
-	DocID int
-	Bad   bool
+	Text  string `json:"text"`
+	DocID int    `json:"doc_id,omitempty"`
+	Bad   bool   `json:"bad,omitempty"`
 }
 
 //go:embed templates static
@@ -64,10 +65,6 @@ func templateFuncs() template.FuncMap {
 			switch field {
 			case "tags":
 				return "Tags"
-			case "correspondent":
-				return "Correspondent"
-			case "doc_type":
-				return "Type"
 			case "status":
 				return "Status"
 			}
@@ -160,10 +157,6 @@ func (p page) Active(field, value string) bool {
 	switch field {
 	case "tags":
 		return p.Query.Tag == value
-	case "correspondent":
-		return p.Query.Correspondent == value
-	case "doc_type":
-		return p.Query.DocType == value
 	case "status":
 		return p.Query.Status == value
 	}
@@ -171,15 +164,8 @@ func (p page) Active(field, value string) bool {
 }
 
 func (p page) ParamFor(field string) string {
-	switch field {
-	case "tags":
+	if field == "tags" {
 		return "tag"
-	case "correspondent":
-		return "corr"
-	case "doc_type":
-		return "type"
-	case "status":
-		return "status"
 	}
 	return field
 }
@@ -187,12 +173,10 @@ func (p page) ParamFor(field string) string {
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
 	q := Query{
-		Q:             v.Get("q"),
-		Tag:           v.Get("tag"),
-		Correspondent: v.Get("corr"),
-		DocType:       v.Get("type"),
-		Status:        v.Get("status"),
-		Sort:          v.Get("sort"),
+		Q:      v.Get("q"),
+		Tag:    v.Get("tag"),
+		Status: v.Get("status"),
+		Sort:   v.Get("sort"),
 	}
 	q.Page, _ = strconv.Atoi(v.Get("page"))
 
@@ -250,8 +234,6 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	doc.Title = strings.TrimSpace(r.FormValue("title"))
-	doc.Correspondent = strings.TrimSpace(r.FormValue("correspondent"))
-	doc.DocType = strings.TrimSpace(r.FormValue("doc_type"))
 	doc.CreatedDate = strings.TrimSpace(r.FormValue("created_date"))
 	doc.CreatedTS = parseDateTS(doc.CreatedDate)
 	doc.Tags = splitTags(r.FormValue("tags"))
@@ -354,14 +336,20 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	files := r.MultipartForm.File["files"]
-	if len(files) == 0 {
-		a.render(w, "upload.html", page{Title: "Upload", Flash: []Flash{{Text: "No files selected.", Bad: true}}, URL: r.URL})
-		return
-	}
-
 	var flash []Flash
+	if len(files) == 0 {
+		flash = []Flash{{Text: "No files selected.", Bad: true}}
+	}
 	for _, fh := range files {
 		flash = append(flash, a.acceptUpload(r.Context(), fh))
+	}
+
+	// Drag-and-drop posts from any page and stays where it is, so it asks for
+	// JSON rather than a whole rendered upload page.
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"flash": flash})
+		return
 	}
 	a.render(w, "upload.html", page{Title: "Upload", Flash: flash, URL: r.URL})
 }

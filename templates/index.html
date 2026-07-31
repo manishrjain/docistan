@@ -2,17 +2,15 @@
 {{$page := .}}
 <div class="layout">
   <aside class="facets">
-    {{if or .Query.Tag .Query.Correspondent .Query.DocType .Query.Status}}
+    {{if or .Query.Tag .Query.Status}}
       <div class="active-filters">
         <h3>Filters</h3>
-        {{if .Query.Tag}}<a class="chip remove" href="{{$page.WithParam "tag" ""}}">tag: {{.Query.Tag}} ×</a>{{end}}
-        {{if .Query.Correspondent}}<a class="chip remove" href="{{$page.WithParam "corr" ""}}">from: {{.Query.Correspondent}} ×</a>{{end}}
-        {{if .Query.DocType}}<a class="chip remove" href="{{$page.WithParam "type" ""}}">type: {{.Query.DocType}} ×</a>{{end}}
+        {{if .Query.Tag}}<a class="chip remove" href="{{$page.WithParam "tag" ""}}">{{.Query.Tag}} ×</a>{{end}}
         {{if .Query.Status}}<a class="chip remove" href="{{$page.WithParam "status" ""}}">status: {{.Query.Status}} ×</a>{{end}}
       </div>
     {{end}}
 
-    {{range $field := list "tags" "correspondent" "doc_type" "status"}}
+    {{range $field := list "tags" "status"}}
       {{$values := index $page.Result.Facets $field}}
       {{if $values}}
         <section class="facet">
@@ -63,7 +61,6 @@
             <a class="title" href="/doc/{{$d.ID}}">{{$d.Title}}</a>
             <p class="sub">
               <span class="id">#{{$d.ID}}</span>
-              {{if $d.Correspondent}}<span>{{$d.Correspondent}}</span>{{end}}
               {{if $d.CreatedDate}}<span>{{$d.CreatedDate}}</span>{{end}}
               {{if $d.PageCount}}<span>{{$d.PageCount}}p</span>{{end}}
               {{if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>{{end}}

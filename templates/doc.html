@@ -29,21 +29,10 @@
       <label>Title
         <input type="text" name="title" value="{{$d.Title}}">
       </label>
-      <label>Correspondent
-        <input type="text" name="correspondent" value="{{$d.Correspondent}}" list="correspondents">
-      </label>
-      <label>Type
-        <select name="doc_type">
-          <option value=""{{if eq $d.DocType ""}} selected{{end}}>—</option>
-          {{range list "invoice" "receipt" "statement" "contract" "letter" "tax" "medical" "insurance" "legal" "id" "manual" "report" "other"}}
-            <option value="{{.}}"{{if eq $d.DocType .}} selected{{end}}>{{.}}</option>
-          {{end}}
-        </select>
-      </label>
       <label>Document date
         <input type="date" name="created_date" value="{{$d.CreatedDate}}">
       </label>
-      <label>Tags <small>comma separated</small>
+      <label>Tags <small>comma separated — tags are the only classifier</small>
         <input type="text" name="tags" value="{{joinTags $d.Tags}}">
       </label>
       <button type="submit" class="primary">Save</button>

@@ -9,8 +9,8 @@
   {{end}}
 
   <form method="post" action="/upload" enctype="multipart/form-data" id="upload-form">
-    <div class="dropzone" id="dropzone">
-      <p>Drop files here, or choose them below.</p>
+    <div class="dropzone">
+      <p>Drop files anywhere in the app, or choose them here.</p>
       <input type="file" name="files" id="file-input" multiple
              accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,.webp,.txt,.md">
     </div>
@@ -23,5 +23,3 @@
   </p>
 </section>
 {{end}}
-
-{{define "head"}}<script src="/static/upload.js" defer></script>{{end}}

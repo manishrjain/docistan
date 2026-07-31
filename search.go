@@ -62,8 +62,6 @@ func schema() *api.CollectionSchema {
 			f("content", "string"),
 			f("original_name", "string"),
 			f("tags", "string[]", facet),
-			f("correspondent", "string", facet),
-			f("doc_type", "string", facet),
 			f("status", "string", facet),
 			f("sha256", "string"),
 			f("created_ts", "int64", sortable),
@@ -113,8 +111,6 @@ func tsDoc(d *Doc) map[string]any {
 		"content":       content,
 		"original_name": d.OriginalName,
 		"tags":          tags,
-		"correspondent": d.Correspondent,
-		"doc_type":      d.DocType,
 		"status":        d.Status,
 		"sha256":        d.SHA256,
 		"created_ts":    d.CreatedTS,
@@ -173,13 +169,11 @@ func (s *Search) Import(ctx context.Context, docs []*Doc) error {
 
 // Query is a parsed search request from the URL.
 type Query struct {
-	Q             string
-	Tag           string
-	Correspondent string
-	DocType       string
-	Status        string
-	Sort          string
-	Page          int
+	Q      string
+	Tag    string
+	Status string
+	Sort   string
+	Page   int
 }
 
 // Result is everything a results page needs, already shaped for templates.
@@ -232,8 +226,6 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 		}
 	}
 	add("tags", q.Tag)
-	add("correspondent", q.Correspondent)
-	add("doc_type", q.DocType)
 	add("status", q.Status)
 
 	sortBy := "_text_match:desc,added_ts:desc"
@@ -248,9 +240,9 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 
 	params := &api.SearchCollectionParams{
 		Q:                     pointer.String(text),
-		QueryBy:               pointer.String("title,content,tags,correspondent,original_name"),
-		QueryByWeights:        pointer.String("10,4,8,8,2"),
-		FacetBy:               pointer.String("tags,correspondent,doc_type,status"),
+		QueryBy:               pointer.String("title,content,tags,original_name"),
+		QueryByWeights:        pointer.String("10,4,8,2"),
+		FacetBy:               pointer.String("tags,status"),
 		MaxFacetValues:        pointer.Int(30),
 		HighlightFields:       pointer.String("content"),
 		HighlightStartTag:     pointer.String(hlStart),
@@ -388,8 +380,6 @@ func docFromMap(m map[string]any) *Doc {
 	d := &Doc{
 		OriginalName:  str("original_name"),
 		Title:         str("title"),
-		Correspondent: str("correspondent"),
-		DocType:       str("doc_type"),
 		Status:        str("status"),
 		SHA256:        str("sha256"),
 		CreatedDate:   str("created_date"),

@@ -45,8 +45,6 @@ type Doc struct {
 	PageCount     int      `json:"page_count"`
 	Title         string   `json:"title"`
 	Tags          []string `json:"tags"`
-	Correspondent string   `json:"correspondent"`
-	DocType       string   `json:"doc_type"`
 	CreatedDate   string   `json:"created_date"`
 	CreatedTS     int64    `json:"created_ts"`
 	DeletedTS     int64    `json:"deleted_ts,omitempty"`
