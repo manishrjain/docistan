@@ -14,8 +14,9 @@ services:
       --api-key=${TYPESENSE_API_KEY:-docistan-dev-key}
       --enable-cors=false
     healthcheck:
-      # The image has no curl; wget is what it ships with.
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8108/health"]
+      # The image ships no HTTP client at all — no curl, no wget, no nc — so
+      # the check speaks HTTP over bash's /dev/tcp.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8108 && printf 'GET /health HTTP/1.0\r\n\r\n' >&3 && grep -q '\"ok\":true' <&3"]
       interval: 5s
       timeout: 3s
       retries: 10
