@@ -19,6 +19,7 @@ type Config struct {
 	LLMModel     string
 	LLMEnabled   bool
 	Dev          bool
+	Sweep        bool
 }
 
 // App holds everything the handlers and the pipeline need.
@@ -40,6 +41,7 @@ func main() {
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
 	flag.BoolVar(&cfg.Dev, "dev", false, "reload templates from disk on each request")
+	flag.BoolVar(&cfg.Sweep, "sweep", false, "enrich documents that have no model metadata yet, then exit")
 	flag.Parse()
 
 	if err := run(cfg); err != nil {
@@ -91,6 +93,10 @@ func run(cfg Config) error {
 	}
 	if len(unfinished) > 0 {
 		logf("resuming %d unfinished documents", len(unfinished))
+	}
+
+	if cfg.Sweep {
+		return app.sweep(ctx)
 	}
 
 	mux := http.NewServeMux()

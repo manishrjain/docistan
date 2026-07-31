@@ -274,3 +274,78 @@ func appendTag(tags []string, t string) []string {
 	}
 	return append(tags, t)
 }
+
+// sweep enriches every document that has no model metadata yet, then exits.
+// It exists because a backfill is a different shape of work from ingestion:
+// thousands of calls against a request budget, needing pacing and the ability
+// to stop and resume without redoing what it already paid for.
+//
+// Resumability is free — the enriched flag lives in the sidecar, so re-running
+// simply skips what succeeded last time.
+func (a *App) sweep(ctx context.Context) error {
+	if a.enricher == nil {
+		return errors.New("no enricher: set OPENAI_API_KEY, or drop -sweep")
+	}
+
+	var pending []int
+	if err := a.store.Each(func(d *Doc) error {
+		if d.Status == StatusReady && !d.Enriched && strings.TrimSpace(d.Content) != "" {
+			pending = append(pending, d.ID)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if len(pending) == 0 {
+		logf("sweep: nothing to enrich")
+		return nil
+	}
+	logf("sweep: %d documents need metadata", len(pending))
+
+	var done, failed int
+	for i, id := range pending {
+		// Wait out a rate limit rather than burning the rest of the queue
+		// against an empty budget.
+		for wait := a.enricher.PausedFor(); wait > 0; wait = a.enricher.PausedFor() {
+			logf("sweep: rate limited, waiting %s (%d/%d done)", wait.Round(time.Second), done, len(pending))
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait + time.Second):
+			}
+		}
+
+		doc, err := a.store.Load(id)
+		if err != nil {
+			logf("sweep: doc %d: %v", id, err)
+			failed++
+			continue
+		}
+
+		before := doc.Enriched
+		a.pipeline.maybeEnrich(ctx, doc)
+		if !doc.Enriched && !before {
+			failed++
+			continue
+		}
+
+		if err := a.store.Save(doc); err != nil {
+			return fmt.Errorf("doc %d: %w", id, err)
+		}
+		if err := a.search.Upsert(ctx, doc); err != nil {
+			logf("sweep: doc %d indexing: %v", id, err)
+		}
+		done++
+
+		if done%25 == 0 || i == len(pending)-1 {
+			calls, in, out, usd := a.enricher.Spend()
+			logf("sweep: %d/%d enriched, %d skipped · %d calls, %d+%d tokens, $%.4f",
+				done, len(pending), failed, calls, in, out, usd)
+		}
+	}
+
+	calls, in, out, usd := a.enricher.Spend()
+	logf("sweep complete: %d enriched, %d left for a later run · %d calls, %d+%d tokens, $%.4f",
+		done, failed, calls, in, out, usd)
+	return nil
+}
