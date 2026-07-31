@@ -14,7 +14,8 @@ services:
       --api-key=${TYPESENSE_API_KEY:-docistan-dev-key}
       --enable-cors=false
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8108/health"]
+      # The image has no curl; wget is what it ships with.
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8108/health"]
       interval: 5s
       timeout: 3s
       retries: 10
