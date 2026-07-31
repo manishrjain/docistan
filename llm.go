@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,11 @@ const (
 	maxTags = 5
 )
 
+// ErrRateLimited means the account's request budget is exhausted. Enrichment
+// backs off as a whole rather than per document: once the budget is gone,
+// every further call would just burn more of it on a guaranteed failure.
+var ErrRateLimited = errors.New("rate limited")
+
 type OpenAIEnricher struct {
 	client openai.Client
 	model  string
@@ -50,14 +56,57 @@ type OpenAIEnricher struct {
 	inTokens  atomic.Int64
 	outTokens atomic.Int64
 	calls     atomic.Int64
+
+	// Unix seconds until which calls are skipped outright.
+	pausedUntil atomic.Int64
 }
 
 func NewOpenAIEnricher(model, apiKey string) *OpenAIEnricher {
-	var opts []option.RequestOption
+	opts := []option.RequestOption{
+		// The SDK retries 429s on its own. Combined with a caller-side retry
+		// that turns one document into six requests against a budget counted
+		// in requests, so keep it to a single attempt and let the circuit
+		// breaker below handle backoff.
+		option.WithMaxRetries(0),
+	}
 	if apiKey != "" {
 		opts = append(opts, option.WithAPIKey(apiKey))
 	}
 	return &OpenAIEnricher{client: openai.NewClient(opts...), model: model}
+}
+
+// PausedFor reports how long enrichment is backed off, for the status page.
+func (e *OpenAIEnricher) PausedFor() time.Duration {
+	until := e.pausedUntil.Load()
+	if until == 0 {
+		return 0
+	}
+	d := time.Until(time.Unix(until, 0))
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+// pause backs off until the rate limit resets, preferring the server's own
+// Retry-After when it offers one.
+func (e *OpenAIEnricher) pause(err error) {
+	wait := 60 * time.Second
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) && apiErr.Response != nil {
+		if v := apiErr.Response.Header.Get("Retry-After"); v != "" {
+			if secs, perr := strconv.Atoi(v); perr == nil && secs > 0 {
+				wait = time.Duration(secs) * time.Second
+			}
+		}
+		if v := apiErr.Response.Header.Get("x-ratelimit-reset-requests"); v != "" {
+			if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+				wait = d
+			}
+		}
+	}
+	e.pausedUntil.Store(time.Now().Add(wait).Unix())
+	logf("model rate limit reached; pausing enrichment for %s", wait.Round(time.Second))
 }
 
 // Spend reports cumulative usage. Prices are Luna's published rates; they are
@@ -94,6 +143,10 @@ func metaSchema() map[string]any {
 func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, error) {
 	var meta Meta
 
+	if e.PausedFor() > 0 {
+		return meta, ErrRateLimited
+	}
+
 	text := strings.TrimSpace(in.Text)
 	if text == "" {
 		return meta, errors.New("no text to work from")
@@ -129,6 +182,11 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, erro
 		},
 	})
 	if err != nil {
+		var apiErr *openai.Error
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 429 {
+			e.pause(err)
+			return meta, ErrRateLimited
+		}
 		return meta, err
 	}
 
@@ -185,12 +243,12 @@ func (p *Pipeline) maybeEnrich(ctx context.Context, doc *Doc) {
 
 	meta, err := p.app.enricher.Enrich(ctx, in)
 	if err != nil {
-		// One retry: a rate limit or a blip shouldn't cost the metadata.
-		time.Sleep(10 * time.Second)
-		meta, err = p.app.enricher.Enrich(ctx, in)
-	}
-	if err != nil {
-		logf("doc %d: enrichment failed, keeping filename title: %v", doc.ID, err)
+		// A rate limit is not this document's fault and will not improve by
+		// trying again now, so it is tagged for a later sweep rather than
+		// retried into an already-empty budget.
+		if !errors.Is(err, ErrRateLimited) {
+			logf("doc %d: enrichment failed: %v", doc.ID, err)
+		}
 		doc.Tags = appendTag(doc.Tags, "needs-review")
 		return
 	}
