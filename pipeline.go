@@ -31,6 +31,8 @@ type Pipeline struct {
 	app  *App
 	jobs chan string
 
+	wg sync.WaitGroup
+
 	mu     sync.Mutex
 	active map[string]*Job
 	queued map[string]bool
@@ -54,6 +56,7 @@ func NewPipeline(app *App) *Pipeline {
 
 func (p *Pipeline) Start(ctx context.Context) error {
 	for i := 0; i < p.app.cfg.Workers; i++ {
+		p.wg.Add(1)
 		go p.worker(ctx)
 	}
 	if err := p.watch(ctx); err != nil {
@@ -174,6 +177,7 @@ func waitForStableSize(path string) bool {
 }
 
 func (p *Pipeline) worker(ctx context.Context) {
+	defer p.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
@@ -198,6 +202,23 @@ func (p *Pipeline) clearJob(path string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.active, path)
+}
+
+// Drain waits for workers to finish the document they are on. A document
+// killed mid-OCR is recoverable — its sidecar still says processing, so the
+// next boot re-enqueues it — but finishing costs a few seconds and avoids
+// throwing away work that was nearly done.
+func (p *Pipeline) Drain(limit time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(limit):
+		logf("shutdown: %d document(s) still in flight, leaving them for the next start", len(p.ActiveJobs()))
+	}
 }
 
 // ActiveJobs returns a snapshot for the status page.

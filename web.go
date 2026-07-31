@@ -100,6 +100,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /doc/{id}", a.handleDocUpdate)
 	mux.HandleFunc("POST /doc/{id}/delete", a.handleDocDelete)
 	mux.HandleFunc("POST /doc/{id}/retry", a.handleDocRetry)
+	mux.HandleFunc("POST /doc/{id}/enrich", a.handleDocEnrich)
 	mux.HandleFunc("GET /doc/{id}/pdf", a.handleDocPDF)
 	mux.HandleFunc("GET /doc/{id}/original", a.handleDocOriginal)
 	mux.HandleFunc("GET /doc/{id}/thumb", a.handleDocThumb)
@@ -285,17 +286,65 @@ func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// handleDocRetry rebuilds a document from its original: OCR, thumbnail, text
+// and metadata are all redone. Unlike startup recovery, which deliberately
+// skips finished stages, this clears them first so the work actually happens.
 func (a *App) handleDocRetry(w http.ResponseWriter, r *http.Request) {
 	id, err := docID(r)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
+	doc, err := a.store.Load(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if err := a.store.ClearDerived(id); err != nil {
+		http.Error(w, "clearing derived files: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	doc.Status = StatusProcessing
+	doc.Enriched = false
+	if err := a.store.Save(doc); err != nil {
+		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if err := a.pipeline.EnqueueDoc(id); err != nil {
-		http.Error(w, "cannot retry: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "cannot reprocess: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	http.Redirect(w, r, "/status", http.StatusSeeOther)
+}
+
+// handleDocEnrich re-runs just the metadata call, leaving OCR alone. Useful
+// when a document was ingested while the model was unavailable or rate
+// limited, without paying to redo the OCR.
+func (a *App) handleDocEnrich(w http.ResponseWriter, r *http.Request) {
+	id, err := docID(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if a.enricher == nil {
+		http.Error(w, "no model configured: set OPENAI_API_KEY", http.StatusPreconditionFailed)
+		return
+	}
+	doc, err := a.store.Load(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	doc.Enriched = false
+	a.pipeline.maybeEnrich(r.Context(), doc)
+	if err := a.store.Save(doc); err != nil {
+		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.search.Upsert(r.Context(), doc); err != nil {
+		logf("doc %d: indexing after enrich: %v", id, err)
+	}
+	http.Redirect(w, r, fmt.Sprintf("/doc/%d", id), http.StatusSeeOther)
 }
 
 func (a *App) handleDocPDF(w http.ResponseWriter, r *http.Request) {

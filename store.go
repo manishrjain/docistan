@@ -210,6 +210,18 @@ func (s *Store) Delete(id int) error {
 	return s.Save(tomb)
 }
 
+// ClearDerived removes everything regenerable from the original, so the next
+// pass rebuilds it. Stage skipping makes crash recovery cheap but also makes a
+// user-initiated reprocess a no-op; this is what gives that button meaning.
+func (s *Store) ClearDerived(id int) error {
+	for _, p := range []string{s.ArchivePath(id), s.ThumbPath(id)} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // SidecarIDs lists document ids present on disk, ascending.
 func (s *Store) SidecarIDs() ([]int, error) {
 	matches, err := filepath.Glob(s.path("docs", "*.json"))

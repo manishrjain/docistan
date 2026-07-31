@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -65,7 +68,8 @@ func run(cfg Config) error {
 		}
 	}
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	// Typesense answers every read, so refuse to start rather than serve a
 	// site whose pages are all mysteriously empty.
 	if err := waitForSearch(ctx, search, 30*time.Second); err != nil {
@@ -101,8 +105,25 @@ func run(cfg Config) error {
 
 	mux := http.NewServeMux()
 	app.routes(mux)
+	srv := &http.Server{Addr: cfg.Listen, Handler: mux}
+
+	go func() {
+		<-ctx.Done()
+		logf("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logf("http shutdown: %v", err)
+		}
+	}()
+
 	logf("listening on http://%s", cfg.Listen)
-	return http.ListenAndServe(cfg.Listen, mux)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	app.pipeline.Drain(30 * time.Second)
+	logf("stopped cleanly")
+	return nil
 }
 
 // replaySidecars rebuilds the whole index from disk. Documents are streamed in

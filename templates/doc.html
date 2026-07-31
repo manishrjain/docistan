@@ -55,7 +55,11 @@
 
     <div class="actions">
       <a href="/doc/{{$d.ID}}/original" class="button">Download original</a>
-      <form method="post" action="/doc/{{$d.ID}}/retry"><button type="submit">Reprocess</button></form>
+      <form method="post" action="/doc/{{$d.ID}}/enrich"><button type="submit">Re-tag with AI</button></form>
+      <form method="post" action="/doc/{{$d.ID}}/retry"
+            onsubmit="return confirm('Redo OCR and metadata for #{{$d.ID}}? This re-runs the model.')">
+        <button type="submit">Reprocess</button>
+      </form>
       <form method="post" action="/doc/{{$d.ID}}/delete"
             onsubmit="return confirm('Delete document #{{$d.ID}}? The original file will be removed.')">
         <button type="submit" class="danger">Delete</button>
