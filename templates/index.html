@@ -1,0 +1,95 @@
+{{define "content"}}
+{{$page := .}}
+<div class="layout">
+  <aside class="facets">
+    {{if or .Query.Tag .Query.Correspondent .Query.DocType .Query.Status}}
+      <div class="active-filters">
+        <h3>Filters</h3>
+        {{if .Query.Tag}}<a class="chip remove" href="{{$page.WithParam "tag" ""}}">tag: {{.Query.Tag}} ×</a>{{end}}
+        {{if .Query.Correspondent}}<a class="chip remove" href="{{$page.WithParam "corr" ""}}">from: {{.Query.Correspondent}} ×</a>{{end}}
+        {{if .Query.DocType}}<a class="chip remove" href="{{$page.WithParam "type" ""}}">type: {{.Query.DocType}} ×</a>{{end}}
+        {{if .Query.Status}}<a class="chip remove" href="{{$page.WithParam "status" ""}}">status: {{.Query.Status}} ×</a>{{end}}
+      </div>
+    {{end}}
+
+    {{range $field := list "tags" "correspondent" "doc_type" "status"}}
+      {{$values := index $page.Result.Facets $field}}
+      {{if $values}}
+        <section class="facet">
+          <h3>{{facetLabel $field}}</h3>
+          <ul>
+            {{range $v := $values}}
+              {{$param := $page.ParamFor $field}}
+              <li>
+                {{if $page.Active $field $v.Value}}
+                  <a class="on" href="{{$page.WithParam $param ""}}">{{$v.Value}} <span class="count">{{$v.Count}}</span></a>
+                {{else}}
+                  <a href="{{$page.WithParam $param $v.Value}}">{{$v.Value}} <span class="count">{{$v.Count}}</span></a>
+                {{end}}
+              </li>
+            {{end}}
+          </ul>
+        </section>
+      {{end}}
+    {{end}}
+  </aside>
+
+  <section class="results">
+    <div class="results-head">
+      <p class="count">{{.Result.Found}} document{{if ne .Result.Found 1}}s{{end}}</p>
+      <p class="sort">
+        Sort:
+        <a href="{{$page.WithParam "sort" ""}}"{{if eq .Query.Sort ""}} class="on"{{end}}>relevance</a>
+        <a href="{{$page.WithParam "sort" "created"}}"{{if eq .Query.Sort "created"}} class="on"{{end}}>document date</a>
+        <a href="{{$page.WithParam "sort" "oldest"}}"{{if eq .Query.Sort "oldest"}} class="on"{{end}}>oldest added</a>
+      </p>
+    </div>
+
+    {{if not .Result.Hits}}
+      <div class="empty">
+        <p>Nothing here yet.</p>
+        <p>Drop files into the consume folder, or <a href="/upload">upload some</a>.</p>
+      </div>
+    {{end}}
+
+    <ul class="cards">
+      {{range .Result.Hits}}
+        {{$d := .Doc}}
+        <li class="card">
+          <a class="thumb" href="/doc/{{$d.ID}}">
+            <img src="/doc/{{$d.ID}}/thumb" alt="" loading="lazy">
+          </a>
+          <div class="meta">
+            <a class="title" href="/doc/{{$d.ID}}">{{$d.Title}}</a>
+            <p class="sub">
+              <span class="id">#{{$d.ID}}</span>
+              {{if $d.Correspondent}}<span>{{$d.Correspondent}}</span>{{end}}
+              {{if $d.CreatedDate}}<span>{{$d.CreatedDate}}</span>{{end}}
+              {{if $d.PageCount}}<span>{{$d.PageCount}}p</span>{{end}}
+              {{if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>{{end}}
+            </p>
+            {{if .Snippet}}<p class="snippet">{{.Snippet}}</p>{{end}}
+            {{if $d.Tags}}
+              <p class="tags">
+                {{range $d.Tags}}<a class="chip" href="{{$page.WithParam "tag" .}}">{{.}}</a>{{end}}
+              </p>
+            {{end}}
+          </div>
+        </li>
+      {{end}}
+    </ul>
+
+    {{if gt .Result.Pages 1}}
+      <nav class="pager">
+        {{if gt .Result.Page 1}}
+          <a href="{{$page.WithParam "page" (printf "%d" (add .Result.Page -1))}}">← Previous</a>
+        {{end}}
+        <span>Page {{.Result.Page}} of {{.Result.Pages}}</span>
+        {{if lt .Result.Page .Result.Pages}}
+          <a href="{{$page.WithParam "page" (printf "%d" (add .Result.Page 1))}}">Next →</a>
+        {{end}}
+      </nav>
+    {{end}}
+  </section>
+</div>
+{{end}}

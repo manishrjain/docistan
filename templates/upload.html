@@ -1,0 +1,27 @@
+{{define "content"}}
+<section class="narrow">
+  <h1>Upload documents</h1>
+
+  {{range .Flash}}
+    <p class="flash{{if .Bad}} bad{{end}}">
+      {{.Text}}{{if .DocID}} — <a href="/doc/{{.DocID}}">see document #{{.DocID}}</a>{{end}}
+    </p>
+  {{end}}
+
+  <form method="post" action="/upload" enctype="multipart/form-data" id="upload-form">
+    <div class="dropzone" id="dropzone">
+      <p>Drop files here, or choose them below.</p>
+      <input type="file" name="files" id="file-input" multiple
+             accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,.webp,.txt,.md">
+    </div>
+    <button type="submit" class="primary">Upload</button>
+  </form>
+
+  <p class="hint">
+    PDFs, images (jpg, png, tiff, webp) and plain text. Files are also picked up
+    automatically if you copy them into the consume folder.
+  </p>
+</section>
+{{end}}
+
+{{define "head"}}<script src="/static/upload.js" defer></script>{{end}}

@@ -131,16 +131,6 @@ func (a *App) replaySidecars(ctx context.Context) (indexed int, unfinished []int
 	return indexed, unfinished, flush()
 }
 
-func (a *App) routes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := a.search.Health(r.Context()); err != nil {
-			http.Error(w, "typesense: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintln(w, "ok")
-	})
-}
-
 func waitForSearch(ctx context.Context, s *Search, limit time.Duration) error {
 	deadline := time.Now().Add(limit)
 	var err error

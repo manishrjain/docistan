@@ -1,0 +1,68 @@
+{{define "content"}}
+{{$d := .Doc}}
+<div class="doc-layout">
+  <section class="preview">
+    <iframe src="/doc/{{$d.ID}}/pdf" title="{{$d.Title}}"></iframe>
+  </section>
+
+  <aside class="doc-meta">
+    <h1>{{$d.Title}}</h1>
+    <p class="sub">
+      <span class="id">#{{$d.ID}}</span>
+      <span>{{$d.OriginalName}}</span>
+      {{if $d.PageCount}}<span>{{$d.PageCount}} page{{if ne $d.PageCount 1}}s{{end}}</span>{{end}}
+      {{if $d.FileSize}}<span>{{humanSize $d.FileSize}}</span>{{end}}
+    </p>
+
+    {{if ne $d.Status "ready"}}
+      <p class="banner {{$d.Status}}">
+        {{$d.Status}}{{if $d.FailedStage}} at {{$d.FailedStage}}{{end}}
+        {{if $d.Error}}<br><small>{{$d.Error}}</small>{{end}}
+      </p>
+    {{end}}
+
+    {{if $d.Signed}}
+      <p class="banner info">Digitally signed — the signature was preserved, so this document was not OCR'd.</p>
+    {{end}}
+
+    <form method="post" action="/doc/{{$d.ID}}">
+      <label>Title
+        <input type="text" name="title" value="{{$d.Title}}">
+      </label>
+      <label>Correspondent
+        <input type="text" name="correspondent" value="{{$d.Correspondent}}" list="correspondents">
+      </label>
+      <label>Type
+        <select name="doc_type">
+          <option value=""{{if eq $d.DocType ""}} selected{{end}}>—</option>
+          {{range list "invoice" "receipt" "statement" "contract" "letter" "tax" "medical" "insurance" "legal" "id" "manual" "report" "other"}}
+            <option value="{{.}}"{{if eq $d.DocType .}} selected{{end}}>{{.}}</option>
+          {{end}}
+        </select>
+      </label>
+      <label>Document date
+        <input type="date" name="created_date" value="{{$d.CreatedDate}}">
+      </label>
+      <label>Tags <small>comma separated</small>
+        <input type="text" name="tags" value="{{joinTags $d.Tags}}">
+      </label>
+      <button type="submit" class="primary">Save</button>
+    </form>
+
+    <dl class="provenance">
+      <dt>Added</dt><dd>{{shortDate $d.AddedTS}}</dd>
+      <dt>Text</dt><dd>{{if $d.NativeText}}native text layer{{else if eq $d.OCRSource "tesseract"}}OCR (tesseract){{else if eq $d.OCRSource "llm"}}OCR (model){{else if eq $d.OCRSource "skipped-signed"}}not OCR'd (signed){{else}}none{{end}}</dd>
+      {{if $d.Confidence}}<dt>Confidence</dt><dd>{{$d.Confidence}}</dd>{{end}}
+    </dl>
+
+    <div class="actions">
+      <a href="/doc/{{$d.ID}}/original" class="button">Download original</a>
+      <form method="post" action="/doc/{{$d.ID}}/retry"><button type="submit">Reprocess</button></form>
+      <form method="post" action="/doc/{{$d.ID}}/delete"
+            onsubmit="return confirm('Delete document #{{$d.ID}}? The original file will be removed.')">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    </div>
+  </aside>
+</div>
+{{end}}
