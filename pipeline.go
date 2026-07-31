@@ -324,6 +324,13 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	doc.FailedStage = ""
 	p.persist(ctx, doc)
 	logf("doc %d ready: %q (%s)", doc.ID, doc.Title, doc.OCRSource)
+
+	// The document is complete and usable now. Metadata is a separate concern
+	// that depends on a remote service with its own budget, so it is queued
+	// rather than waited on.
+	if !doc.Enriched && p.app.enrichq != nil {
+		p.app.enrichq.Add(doc.ID)
+	}
 }
 
 func (p *Pipeline) intake(ctx context.Context, path, name, ext, sum string, size int64) (*Doc, error) {
@@ -422,8 +429,6 @@ func (p *Pipeline) stages(ctx context.Context, path string, job *Job, doc *Doc) 
 		doc.Tags = []string{}
 	}
 
-	p.setStage(path, job, "metadata")
-	p.maybeEnrich(ctx, doc)
 	return nil
 }
 

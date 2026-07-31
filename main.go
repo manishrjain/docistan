@@ -22,7 +22,6 @@ type Config struct {
 	LLMModel     string
 	LLMEnabled   bool
 	Dev          bool
-	Sweep        bool
 }
 
 // App holds everything the handlers and the pipeline need.
@@ -32,6 +31,7 @@ type App struct {
 	search   *Search
 	pipeline *Pipeline
 	enricher *OpenAIEnricher
+	enrichq  *EnrichQueue
 }
 
 func main() {
@@ -44,7 +44,6 @@ func main() {
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
 	flag.BoolVar(&cfg.Dev, "dev", false, "reload templates from disk on each request")
-	flag.BoolVar(&cfg.Sweep, "sweep", false, "enrich documents that have no model metadata yet, then exit")
 	flag.Parse()
 
 	if err := run(cfg); err != nil {
@@ -78,6 +77,8 @@ func run(cfg Config) error {
 	if err := search.EnsureFreshCollection(ctx); err != nil {
 		return fmt.Errorf("create collection: %w", err)
 	}
+	app.enrichq = NewEnrichQueue(app)
+
 	n, unfinished, err := app.replaySidecars(ctx)
 	if err != nil {
 		return fmt.Errorf("replay sidecars: %w", err)
@@ -99,9 +100,10 @@ func run(cfg Config) error {
 		logf("resuming %d unfinished documents", len(unfinished))
 	}
 
-	if cfg.Sweep {
-		return app.sweep(ctx)
+	if pending, _, _ := app.enrichq.Stats(); pending > 0 {
+		logf("%d document(s) awaiting metadata", pending)
 	}
+	go app.enrichq.Run(ctx)
 
 	mux := http.NewServeMux()
 	app.routes(mux)
@@ -152,6 +154,11 @@ func (a *App) replaySidecars(ctx context.Context) (indexed int, unfinished []int
 		}
 		if d.Status == StatusProcessing {
 			unfinished = append(unfinished, d.ID)
+		}
+		// Anything ready but untagged joins the queue, so a restart picks up
+		// whatever the budget did not cover last time.
+		if d.Status == StatusReady && !d.Enriched && d.Content != "" {
+			a.enrichq.Add(d.ID)
 		}
 		batch = append(batch, d)
 		if len(batch) >= batchSize {

@@ -43,16 +43,24 @@
   {{end}}
 
   {{with .Spend}}
-    <h2>Model usage</h2>
+    <h2>Tagging</h2>
+    {{if .Stopped}}
+      <p class="flash bad">Enrichment stopped: {{.Stopped}}</p>
+    {{end}}
+    <p>
+      {{if .Pending}}<strong>{{.Pending}}</strong> waiting{{else}}Nothing waiting{{end}}
+      · {{.Done}} tagged this session
+      {{if .Failed}}· {{.Failed}} failed{{end}}
+      {{if ge .Budget 0}}
+        · <span class="quiet">{{.Budget}} request{{if ne .Budget 1}}s{{end}} left in budget{{if .ResetIn}}, resets in {{.ResetIn}}{{end}}</span>
+      {{end}}
+    </p>
     {{if .Calls}}
-      <p>
-        {{.Calls}} document{{if ne .Calls 1}}s{{end}} enriched ·
+      <p class="quiet">
         {{.In}} input + {{.Out}} output tokens ·
         <strong>${{printf "%.4f" .USD}}</strong>
-        <span class="quiet">({{printf "$%.5f" .PerDoc}} per document)</span>
+        ({{printf "$%.5f" .PerDoc}} per document)
       </p>
-    {{else}}
-      <p class="quiet">No model calls yet this session.</p>
     {{end}}
   {{end}}
 

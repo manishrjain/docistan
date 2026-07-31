@@ -130,13 +130,20 @@ type page struct {
 	URL    *url.URL
 }
 
-// SpendSummary reports actual model usage rather than an estimate.
+// SpendSummary reports actual model usage rather than an estimate, alongside
+// the state of the enrichment queue and the remaining request budget.
 type SpendSummary struct {
-	Calls  int64
-	In     int64
-	Out    int64
-	USD    float64
-	PerDoc float64
+	Calls   int64
+	In      int64
+	Out     int64
+	USD     float64
+	PerDoc  float64
+	Pending int
+	Done    int
+	Failed  int
+	Budget  int
+	ResetIn string
+	Stopped string
 }
 
 func (a *App) render(w http.ResponseWriter, name string, data page) {
@@ -336,14 +343,13 @@ func (a *App) handleDocEnrich(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	doc.Enriched = false
-	a.pipeline.maybeEnrich(r.Context(), doc)
 	if err := a.store.Save(doc); err != nil {
 		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := a.search.Upsert(r.Context(), doc); err != nil {
-		logf("doc %d: indexing after enrich: %v", id, err)
-	}
+	// Queued rather than run inline: the request should not hang waiting on a
+	// rate limit that may be hours from resetting.
+	a.enrichq.Add(id)
 	http.Redirect(w, r, fmt.Sprintf("/doc/%d", id), http.StatusSeeOther)
 }
 
@@ -508,6 +514,12 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		spend = &SpendSummary{Calls: calls, In: in, Out: out, USD: usd}
 		if calls > 0 {
 			spend.PerDoc = usd / float64(calls)
+		}
+		spend.Pending, spend.Done, spend.Failed = a.enrichq.Stats()
+		remaining, resetIn, stopped := a.enricher.Budget()
+		spend.Budget, spend.Stopped = remaining, stopped
+		if resetIn > 0 {
+			spend.ResetIn = resetIn.Round(time.Second).String()
 		}
 	}
 	a.render(w, "status.html", page{
