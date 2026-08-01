@@ -532,10 +532,10 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
       const data = await res.json();
       if (onAccepted && onAccepted(data) === false) return;
-      const done = await watch();
-      if (done && window.toast) {
-        toast(done.title ? `Done — ${done.title}` : "Done", { kind: "ok" });
-      }
+      // No success message: the timeline says it finished, and saying so
+      // twice over the top of it is noise. A failure still gets a toast,
+      // because nothing changed on the page to show it.
+      await watch();
     } catch (err) {
       if (window.toast) {
         toast(String(err.message || err).slice(0, 160), { kind: "bad" });
