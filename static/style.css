@@ -181,3 +181,21 @@ code { background: var(--accent-soft); padding: .05rem .3rem; border-radius: 4px
   background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
   padding: .6rem; font-size: .8rem; line-height: 1.45;
 }
+
+/* ---- processing stages ---- */
+.stages { margin: 1rem 0; border-top: 1px solid var(--line); padding-top: .8rem; }
+.stages h2 { font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 .5rem; }
+.stages ul { list-style: none; margin: 0; padding: 0; }
+.stages li {
+  display: grid; grid-template-columns: 1.2rem 1fr;
+  gap: .1rem .5rem; margin-bottom: .45rem; font-size: .87rem;
+}
+.stages .mark { font-weight: 700; line-height: 1.4; }
+.stages .what { font-weight: 500; }
+.stages .detail { grid-column: 2; color: var(--muted); font-size: .8rem; }
+.stages li.done .mark { color: #3f7d4e; }
+.stages li.pending .mark { color: var(--accent); }
+.stages li.failed .mark { color: var(--bad); }
+.stages li.skipped .mark { color: var(--line); }
+.stages li.failed .what { color: var(--bad); }
+.stages .added { margin: .6rem 0 0; font-size: .8rem; }

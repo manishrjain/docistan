@@ -336,6 +336,14 @@ func (q *EnrichQueue) requeue(id int) {
 	q.pending = append([]int{id}, q.pending...)
 }
 
+// Has reports whether a document is waiting in the queue, so its page can say
+// "queued" rather than leaving the user guessing why it has no tags yet.
+func (q *EnrichQueue) Has(id int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.queued[id]
+}
+
 func (q *EnrichQueue) Stats() (pending, done, failed int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()

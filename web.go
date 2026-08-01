@@ -116,12 +116,142 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 }
 
+// Stage is one step of processing as shown on a document page. The point is
+// to make it obvious what ran, what did not, and crucially which steps were
+// local and which involved the model.
+type Stage struct {
+	Name   string
+	State  string // done | pending | skipped | failed
+	Detail string
+}
+
+func (s Stage) Symbol() string {
+	switch s.State {
+	case "done":
+		return "✓"
+	case "pending":
+		return "◷"
+	case "failed":
+		return "✗"
+	}
+	return "–"
+}
+
+// stagesFor reconstructs what happened to a document from what is on disk and
+// in the sidecar, rather than from a stored log, so it cannot drift.
+func (a *App) stagesFor(doc *Doc) []Stage {
+	var out []Stage
+
+	orig := Stage{Name: "Original stored", State: "done", Detail: doc.OriginalName}
+	if doc.FileSize > 0 {
+		orig.Detail += " · " + humanSize(doc.FileSize)
+	}
+	out = append(out, orig)
+
+	archive := Stage{Name: "Converted to archival PDF", State: "failed", Detail: "not produced"}
+	if _, err := os.Stat(a.store.ArchivePath(doc.ID)); err == nil {
+		archive.State, archive.Detail = "done", "PDF/A"
+		if doc.PageCount > 0 {
+			archive.Detail = fmt.Sprintf("PDF/A · %d page%s", doc.PageCount, plural(doc.PageCount))
+		}
+	}
+	out = append(out, archive)
+
+	// Success here is whether text exists, not which tool produced it. Driving
+	// this off the OCR source instead would report a document that came
+	// through the Ghostscript fallback as failed despite having good text.
+	// The source is worth stating plainly though, since "did AI read this?"
+	// is not otherwise answerable from the page.
+	text := Stage{Name: "Text extracted"}
+	if n := len(strings.TrimSpace(doc.Content)); n == 0 {
+		text.State = "failed"
+		text.Detail = "no text could be extracted"
+	} else {
+		text.State = "done"
+		switch {
+		case doc.NativeText:
+			text.Detail = "local · the PDF already had a text layer"
+		case doc.OCRSource == OCRTesseract:
+			text.Detail = "local · OCR by tesseract"
+		case doc.OCRSource == OCRSkippedSigned:
+			text.Detail = "local · digitally signed, left as-is"
+		case doc.OCRSource == OCRLLM:
+			text.Detail = "model · transcribed from page images"
+		default:
+			text.Detail = "local"
+		}
+		text.Detail += fmt.Sprintf(" · %d characters", n)
+	}
+	out = append(out, text)
+
+	thumb := Stage{Name: "Thumbnail", State: "skipped", Detail: "not generated"}
+	if _, err := os.Stat(a.store.ThumbPath(doc.ID)); err == nil {
+		thumb.State, thumb.Detail = "done", ""
+	}
+	out = append(out, thumb)
+
+	index := Stage{Name: "Indexed for search", State: "pending", Detail: doc.Status}
+	if doc.Status == StatusReady {
+		index.State, index.Detail = "done", "full text searchable"
+	}
+	out = append(out, index)
+
+	out = append(out, a.taggingStage(doc))
+	return out
+}
+
+func (a *App) taggingStage(doc *Doc) Stage {
+	s := Stage{Name: "Titled and tagged by AI"}
+	switch {
+	case doc.Enriched:
+		s.State = "done"
+		s.Detail = "model · " + a.cfg.LLMModel
+	case a.enricher == nil:
+		s.State = "skipped"
+		s.Detail = "no model configured — set OPENAI_API_KEY"
+	case a.enrichq != nil && a.enrichq.Has(doc.ID):
+		s.State = "pending"
+		s.Detail = "queued"
+		if _, resetIn, stopped := a.enricher.Budget(); stopped != "" {
+			s.Detail = "stopped: " + stopped
+		} else if resetIn > 0 {
+			if remaining, _, _ := a.enricher.Budget(); remaining == 0 {
+				s.Detail = "waiting for rate limit to reset in " + resetIn.Round(time.Second).String()
+			}
+		}
+	case hasTag(doc.Tags, "needs-review"):
+		s.State = "failed"
+		s.Detail = "the model call did not succeed — use Re-tag with AI"
+	default:
+		s.State = "skipped"
+		s.Detail = "not run"
+	}
+	return s
+}
+
+func hasTag(tags []string, want string) bool {
+	for _, t := range tags {
+		if t == want {
+			return true
+		}
+	}
+	return false
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 // page is the data every template receives.
 type page struct {
 	Title  string
 	Query  Query
 	Result *Result
 	Doc    *Doc
+	Stages []Stage
 	Jobs   []Job
 	Dupes  []DupeEvent
 	Failed []Hit
@@ -239,7 +369,7 @@ func (a *App) handleDoc(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "doc.html", page{Title: doc.Title, Doc: doc, URL: r.URL})
+	a.render(w, "doc.html", page{Title: doc.Title, Doc: doc, Stages: a.stagesFor(doc), URL: r.URL})
 }
 
 func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
