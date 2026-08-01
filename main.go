@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -27,7 +29,11 @@ type Config struct {
 	// number still looks authoritative.
 	PriceIn  float64
 	PriceOut float64
-	Dev      bool
+	// KeyFile is read when OPENAI_API_KEY is unset. A file keeps the key out
+	// of shell history, out of the process listing, and out of any unit file
+	// or script that might get committed.
+	KeyFile string
+	Dev     bool
 }
 
 // App holds everything the handlers and the pipeline need.
@@ -52,6 +58,8 @@ func main() {
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
 	flag.Float64Var(&cfg.PriceIn, "llm-price-in", 0.20, "USD per million input tokens")
 	flag.Float64Var(&cfg.PriceOut, "llm-price-out", 1.20, "USD per million output tokens")
+	flag.StringVar(&cfg.KeyFile, "openai-key-file", defaultKeyFile(),
+		"file holding the OpenAI API key, read when OPENAI_API_KEY is unset")
 	flag.BoolVar(&cfg.Dev, "dev", false, "reload templates from disk on each request")
 	flag.Parse()
 
@@ -68,11 +76,11 @@ func run(cfg Config) error {
 	search := NewSearch(cfg.TypesenseURL, cfg.TypesenseKey, cfg.Collection)
 	app := &App{cfg: cfg, store: store, search: search}
 	if cfg.LLMEnabled {
-		if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		if key, source := openAIKey(cfg.KeyFile); key != "" {
 			app.enricher = NewOpenAIEnricher(cfg.LLMModel, key)
-			logf("metadata enrichment on, model %s", cfg.LLMModel)
+			logf("metadata enrichment on, model %s (key from %s)", cfg.LLMModel, source)
 		} else {
-			logf("OPENAI_API_KEY not set: documents will keep filename-derived titles and no tags")
+			logf("no OpenAI key in OPENAI_API_KEY or %s: documents will keep filename-derived titles and no tags", cfg.KeyFile)
 		}
 	}
 
@@ -197,6 +205,67 @@ func waitForSearch(ctx context.Context, s *Search, limit time.Duration) error {
 // and the archive total can never disagree.
 func (c Config) LLMCost(in, out int64) float64 {
 	return float64(in)*c.PriceIn/1e6 + float64(out)*c.PriceOut/1e6
+}
+
+func defaultKeyFile() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".openai.secret")
+}
+
+// openAIKey finds the key, preferring the environment so a one-off run can
+// override the file. It returns where the key came from as well, because
+// "which key is this actually using" is otherwise guesswork.
+func openAIKey(path string) (key, source string) {
+	if v := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); v != "" {
+		return v, "OPENAI_API_KEY"
+	}
+	if path == "" {
+		return "", ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		// A missing file is the ordinary case for someone using the
+		// environment; anything else is worth saying.
+		if !os.IsNotExist(err) {
+			logf("reading %s: %v", path, err)
+		}
+		return "", ""
+	}
+
+	// Usually a bare key on one line, but a dotenv-style assignment, an
+	// "export" prefix, wrapping quotes and comment lines are all common
+	// enough to accept rather than fail on.
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		if name, value, ok := strings.Cut(line, "="); ok && strings.TrimSpace(name) == "OPENAI_API_KEY" {
+			line = strings.TrimSpace(value)
+		}
+		if key = strings.Trim(line, `"'`); key != "" {
+			warnKeyPerms(path)
+			return key, path
+		}
+	}
+	return "", ""
+}
+
+// warnKeyPerms says so once when the key file is readable by anyone else on
+// the machine. Refusing to start would be worse than the risk; saying nothing
+// would be worse than saying it.
+func warnKeyPerms(path string) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if mode := st.Mode().Perm(); mode&0o077 != 0 {
+		logf("warning: %s is mode %#o, readable beyond your user — chmod 600 %s", path, mode, path)
+	}
 }
 
 func envOr(key, fallback string) string {
