@@ -424,6 +424,26 @@ func (a *App) render(w http.ResponseWriter, name string, data page) {
 	}
 }
 
+// BrowserTitle is what the tab says. The index carries the size of the
+// archive, which is the one number worth seeing without looking at the page;
+// everywhere else names the page and then the app, in that order, because a
+// row of tabs truncates from the right.
+func (p page) BrowserTitle() string {
+	if p.Title != "" {
+		return p.Title + " · Docistan"
+	}
+	// A search gets its terms in the tab. The count belongs to the archive,
+	// not to the page, and reading "4 docs" above three results is a small
+	// lie that costs nothing to avoid.
+	if q := strings.TrimSpace(p.Query.Q); q != "" {
+		return fmt.Sprintf("\u201c%s\u201d · Docistan", q)
+	}
+	if p.Total > 0 {
+		return fmt.Sprintf("Docistan — %s doc%s", commaNum(p.Total), plural(p.Total))
+	}
+	return "Docistan"
+}
+
 // urlWith rebuilds the current index URL with the query string edited in
 // place, which is how every filter link preserves what else was selected.
 func (p page) urlWith(mutate func(url.Values)) string {
@@ -652,7 +672,6 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.render(w, "index.html", page{
-		Title:  "Documents",
 		Query:  q,
 		Result: res,
 		Total:  total,

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- The brand mark: the same accent square the header shows, with the D
+       knocked out in the page's own paper colour. -->
+  <rect width="64" height="64" fill="#ec3013"/>
+  <rect x="14" y="12" width="10" height="40" fill="#f3f2f2"/>
+  <path d="M24 12h12a16 16 0 0 1 0 40H24V42h10a10 10 0 0 0 0-20H24z" fill="#f3f2f2"/>
+</svg>
