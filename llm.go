@@ -294,6 +294,7 @@ type EnrichQueue struct {
 	mu      sync.Mutex
 	pending []int
 	queued  map[int]bool
+	active  int // id currently being enriched, 0 when idle
 	done    int
 	failed  int
 }
@@ -321,7 +322,16 @@ func (q *EnrichQueue) next() (int, bool) {
 	id := q.pending[0]
 	q.pending = q.pending[1:]
 	delete(q.queued, id)
+	// Stays claimed while in flight: a caller polling for the result must not
+	// see a gap between "waiting" and "done" and read it as failure.
+	q.active = id
 	return id, true
+}
+
+func (q *EnrichQueue) clearActive() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.active = 0
 }
 
 // requeue puts a document back at the front, for when nothing was wrong with
@@ -336,12 +346,12 @@ func (q *EnrichQueue) requeue(id int) {
 	q.pending = append([]int{id}, q.pending...)
 }
 
-// Has reports whether a document is waiting in the queue, so its page can say
-// "queued" rather than leaving the user guessing why it has no tags yet.
+// Has reports whether a document is waiting or currently being enriched, so
+// its page can say "in progress" rather than leaving the user guessing.
 func (q *EnrichQueue) Has(id int) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.queued[id]
+	return q.queued[id] || q.active == id
 }
 
 func (q *EnrichQueue) Stats() (pending, done, failed int) {
@@ -394,6 +404,7 @@ func (q *EnrichQueue) Run(ctx context.Context) {
 			continue
 		}
 		q.enrichOne(ctx, id)
+		q.clearActive()
 		if !sleepCtx(ctx, pace) {
 			return
 		}

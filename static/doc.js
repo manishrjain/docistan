@@ -112,8 +112,10 @@ document.addEventListener("DOMContentLoaded", () => {
   form.querySelector('button[type="submit"]')?.remove();
 
   // --- tag pills ---------------------------------------------------------
-  if (!editor || !field) return;
+  // Exposed so background re-tagging can refresh the pills in place.
+  let applyMeta = () => {};
 
+  if (editor && field) {
   const known = (editor.dataset.known || "")
     .split(",")
     .map((t) => t.trim().toLowerCase())
@@ -285,4 +287,95 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   render();
+
+  applyMeta = (data) => {
+    if (Array.isArray(data.tags)) {
+      tags = data.tags.map((t) => String(t).toLowerCase());
+      field.value = tags.join(", ");
+      render();
+    }
+    if (typeof data.title === "string" && data.title) {
+      if (heading) heading.textContent = data.title;
+      const t = form.elements["title"];
+      if (t) t.value = data.title;
+    }
+    if (typeof data.created_date === "string") {
+      const d = form.elements["created_date"];
+      if (d) d.value = data.created_date;
+    }
+  };
+  }
+
+  // --- re-tag with AI ----------------------------------------------------
+  // The work happens in the background queue, so the button reports what is
+  // happening and then polls until the result lands, rather than redirecting
+  // to a page that looks unchanged.
+  const retag = document.querySelector('form[action$="/enrich"]');
+  if (retag) {
+    const button = retag.querySelector("button");
+
+    retag.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      button.disabled = true;
+      setStatus("Asking the model…");
+
+      try {
+        const res = await fetch(retag.action, {
+          method: "POST",
+          headers: { Accept: "application/json" },
+        });
+        if (!res.ok) {
+          throw new Error((await res.text()) || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (data.status === "blocked") {
+          setStatus(data.reason || "Tagging is stopped", "bad");
+          button.disabled = false;
+          return;
+        }
+        if (data.status === "waiting") {
+          setStatus(`Queued — ${data.reason}`);
+        }
+        await waitForTags();
+      } catch (err) {
+        setStatus(`Could not re-tag — ${String(err.message || err).slice(0, 120)}`, "bad");
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    async function waitForTags() {
+      const deadline = Date.now() + 120000;
+      let dots = 0;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1200));
+        let data;
+        try {
+          const res = await fetch(`${location.pathname}/meta`, {
+            headers: { Accept: "application/json" },
+          });
+          data = await res.json();
+        } catch {
+          continue; // a transient failure should not end the wait
+        }
+
+        if (data.enriched) {
+          applyMeta(data);
+          setStatus(`Tagged — ${data.title || "done"}`, "ok");
+          return;
+        }
+        if (!data.queued) {
+          setStatus("The model call did not succeed — see Processing below", "bad");
+          return;
+        }
+        dots = (dots + 1) % 4;
+        setStatus(
+          data.reason
+            ? `Waiting — ${data.reason}`
+            : "Asking the model" + ".".repeat(dots),
+        );
+      }
+      setStatus("Still queued — this page will show the tags once it runs");
+    }
+  }
 });

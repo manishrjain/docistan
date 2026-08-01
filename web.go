@@ -101,6 +101,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /doc/{id}/delete", a.handleDocDelete)
 	mux.HandleFunc("POST /doc/{id}/retry", a.handleDocRetry)
 	mux.HandleFunc("POST /doc/{id}/enrich", a.handleDocEnrich)
+	mux.HandleFunc("GET /doc/{id}/meta", a.handleDocMeta)
 	mux.HandleFunc("GET /doc/{id}/pdf", a.handleDocPDF)
 	mux.HandleFunc("GET /doc/{id}/original", a.handleDocOriginal)
 	mux.HandleFunc("GET /doc/{id}/thumb", a.handleDocThumb)
@@ -521,7 +522,56 @@ func (a *App) handleDocEnrich(w http.ResponseWriter, r *http.Request) {
 	// Queued rather than run inline: the request should not hang waiting on a
 	// rate limit that may be hours from resetting.
 	a.enrichq.Add(id)
+
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		// Say which of the three states this is, so the page can report
+		// "working" versus "waiting on a limit" rather than a blank pause.
+		out := map[string]any{"status": "queued"}
+		remaining, resetIn, stopped := a.enricher.Budget()
+		switch {
+		case stopped != "":
+			out["status"], out["reason"] = "blocked", stopped
+		case remaining == 0 && resetIn > 0:
+			out["status"] = "waiting"
+			out["reason"] = "rate limit resets in " + resetIn.Round(time.Second).String()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(out)
+		return
+	}
 	http.Redirect(w, r, fmt.Sprintf("/doc/%d", id), http.StatusSeeOther)
+}
+
+// handleDocMeta reports a document's current metadata, so a page waiting on
+// background tagging can show the result without a reload.
+func (a *App) handleDocMeta(w http.ResponseWriter, r *http.Request) {
+	id, err := docID(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	doc, err := a.store.Load(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	out := map[string]any{
+		"id":           doc.ID,
+		"title":        doc.Title,
+		"tags":         doc.Tags,
+		"created_date": doc.CreatedDate,
+		"enriched":     doc.Enriched,
+		"queued":       a.enrichq != nil && a.enrichq.Has(doc.ID),
+	}
+	if a.enricher != nil {
+		if _, resetIn, stopped := a.enricher.Budget(); stopped != "" {
+			out["reason"] = stopped
+		} else if resetIn > 0 {
+			out["reason"] = "rate limit resets in " + resetIn.Round(time.Second).String()
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(out)
 }
 
 func (a *App) handleDocPDF(w http.ResponseWriter, r *http.Request) {
