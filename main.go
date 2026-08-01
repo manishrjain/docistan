@@ -22,7 +22,12 @@ type Config struct {
 	Workers      int
 	LLMModel     string
 	LLMEnabled   bool
-	Dev          bool
+	// Per-million-token prices, so the cost shown next to a document stays
+	// true when the model changes. Wrong prices are worse than none: the
+	// number still looks authoritative.
+	PriceIn  float64
+	PriceOut float64
+	Dev      bool
 }
 
 // App holds everything the handlers and the pipeline need.
@@ -45,6 +50,8 @@ func main() {
 	flag.IntVar(&cfg.Workers, "workers", 2, "ingest workers")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
+	flag.Float64Var(&cfg.PriceIn, "llm-price-in", 0.20, "USD per million input tokens")
+	flag.Float64Var(&cfg.PriceOut, "llm-price-out", 1.20, "USD per million output tokens")
 	flag.BoolVar(&cfg.Dev, "dev", false, "reload templates from disk on each request")
 	flag.Parse()
 
@@ -184,6 +191,12 @@ func waitForSearch(ctx context.Context, s *Search, limit time.Duration) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return err
+}
+
+// LLMCost is the only place tokens become money, so the per-document figure
+// and the archive total can never disagree.
+func (c Config) LLMCost(in, out int64) float64 {
+	return float64(in)*c.PriceIn/1e6 + float64(out)*c.PriceOut/1e6
 }
 
 func envOr(key, fallback string) string {

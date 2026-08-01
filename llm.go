@@ -146,10 +146,8 @@ func NewOpenAIEnricher(model, apiKey string) *OpenAIEnricher {
 	return e
 }
 
-func (e *OpenAIEnricher) Spend() (calls, in, out int64, usd float64) {
-	calls, in, out = e.calls.Load(), e.inTokens.Load(), e.outTokens.Load()
-	usd = float64(in)*0.20/1e6 + float64(out)*1.20/1e6
-	return
+func (e *OpenAIEnricher) Spend() (calls, in, out int64) {
+	return e.calls.Load(), e.inTokens.Load(), e.outTokens.Load()
 }
 
 func (e *OpenAIEnricher) Budget() (remaining int, resetIn time.Duration, stopped string) {
@@ -183,16 +181,25 @@ func metaSchema() map[string]any {
 	}
 }
 
-func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, error) {
+// Usage is what one call actually cost, returned alongside the result so the
+// tokens can be attributed to the document that caused them rather than only
+// to a process-wide total.
+type Usage struct{ In, Out int64 }
+
+// Enrich returns usage on every path where the request reached the model,
+// including one whose answer we then fail to parse — that response was
+// billed, so the document should carry the cost.
+func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usage, error) {
 	var meta Meta
+	var used Usage
 
 	if wait := e.budget.Wait(); wait != 0 {
-		return meta, ErrRateLimited
+		return meta, used, ErrRateLimited
 	}
 
 	text := strings.TrimSpace(in.Text)
 	if text == "" {
-		return meta, errors.New("no text to work from")
+		return meta, used, errors.New("no text to work from")
 	}
 	if len(text) > textCap {
 		text = text[:headCap] + "\n\n…[middle omitted]…\n\n" + text[len(text)-tailCap:]
@@ -230,28 +237,29 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, erro
 			switch apiErr.StatusCode {
 			case 429:
 				e.budget.block(e.resetHint(apiErr))
-				return meta, ErrRateLimited
+				return meta, used, ErrRateLimited
 			case 401, 403:
 				// A bad key will not fix itself. Stop, rather than walk the
 				// whole queue producing identical failures.
 				e.budget.stop(fmt.Sprintf("authentication failed (HTTP %d)", apiErr.StatusCode))
-				return meta, err
+				return meta, used, err
 			}
 		}
-		return meta, err
+		return meta, used, err
 	}
 
+	used = Usage{In: resp.Usage.PromptTokens, Out: resp.Usage.CompletionTokens}
 	e.calls.Add(1)
-	e.inTokens.Add(resp.Usage.PromptTokens)
-	e.outTokens.Add(resp.Usage.CompletionTokens)
+	e.inTokens.Add(used.In)
+	e.outTokens.Add(used.Out)
 
 	if len(resp.Choices) == 0 {
-		return meta, errors.New("model returned no choices")
+		return meta, used, errors.New("model returned no choices")
 	}
 	if err := json.Unmarshal([]byte(resp.Choices[0].Message.Content), &meta); err != nil {
-		return meta, fmt.Errorf("parsing model output: %w", err)
+		return meta, used, fmt.Errorf("parsing model output: %w", err)
 	}
-	return cleanMeta(meta), nil
+	return cleanMeta(meta), used, nil
 }
 
 func (e *OpenAIEnricher) resetHint(apiErr *openai.Error) time.Duration {
@@ -427,9 +435,14 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	}
 
 	known, _ := q.app.search.Vocabulary(ctx, "tags", 50)
-	meta, err := q.app.enricher.Enrich(ctx, EnrichInput{
+	meta, used, err := q.app.enricher.Enrich(ctx, EnrichInput{
 		Filename: doc.OriginalName, Text: doc.Content, KnownTags: known,
 	})
+	// Whatever the outcome, tokens the model actually billed belong to this
+	// document — a failed parse still cost money.
+	doc.LLMIn += used.In
+	doc.LLMOut += used.Out
+
 	if errors.Is(err, ErrRateLimited) {
 		q.requeue(id)
 		return
@@ -464,7 +477,9 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	q.mu.Lock()
 	q.done++
 	q.mu.Unlock()
-	logf("doc %d tagged: %q %v %s", doc.ID, doc.Title, doc.Tags, doc.CreatedDate)
+	logf("doc %d tagged: %q %v %s (%d in / %d out tokens, $%.5f)",
+		doc.ID, doc.Title, doc.Tags, doc.CreatedDate, used.In, used.Out,
+		q.app.cfg.LLMCost(used.In, used.Out))
 }
 
 func (q *EnrichQueue) save(ctx context.Context, doc *Doc) {

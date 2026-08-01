@@ -76,6 +76,10 @@ func (s *Search) schema() *api.CollectionSchema {
 			f("created_ts", "int64", sortable),
 			f("added_ts", "int64", sortable),
 			f("confidence", "int32", sortable),
+			// Faceted purely for the stats Typesense returns with a facet, which
+			// is what lets the archive total outlive the process.
+			f("llm_in", "int64", facet),
+			f("llm_out", "int64", facet),
 			f("created_date", "string", stored),
 			f("page_count", "int32", stored),
 			f("file_size", "int64", stored),
@@ -135,6 +139,8 @@ func tsDoc(d *Doc) map[string]any {
 		"signed":        d.Signed,
 		"enriched":      d.Enriched,
 		"native_text":   d.NativeText,
+		"llm_in":        d.LLMIn,
+		"llm_out":       d.LLMOut,
 		"text_ts":       d.TextTS,
 		"enriched_ts":   d.EnrichedTS,
 	}
@@ -448,6 +454,42 @@ func (s *Search) Count(ctx context.Context) (int, error) {
 	return *res.Found, nil
 }
 
+// TokenTotals sums model usage across every indexed document. Typesense
+// returns sum/avg alongside a numeric facet, so this is one cheap query rather
+// than a scan — and because it reads the documents rather than a counter in
+// memory, the figure survives a restart and counts work done by earlier runs.
+func (s *Search) TokenTotals(ctx context.Context) (in, out int64, docs int, err error) {
+	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
+		Q:              pointer.String("*"),
+		QueryBy:        pointer.String("title"),
+		FilterBy:       pointer.String("llm_in:>0"),
+		FacetBy:        pointer.String("llm_in,llm_out"),
+		MaxFacetValues: pointer.Int(1),
+		PerPage:        pointer.Int(0),
+	})
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if res.Found != nil {
+		docs = *res.Found
+	}
+	if res.FacetCounts == nil {
+		return 0, 0, docs, nil
+	}
+	for _, fc := range *res.FacetCounts {
+		if fc.FieldName == nil || fc.Stats == nil || fc.Stats.Sum == nil {
+			continue
+		}
+		switch *fc.FieldName {
+		case "llm_in":
+			in = int64(*fc.Stats.Sum)
+		case "llm_out":
+			out = int64(*fc.Stats.Sum)
+		}
+	}
+	return in, out, docs, nil
+}
+
 // Get fetches one document by id. This is a direct lookup, not a search.
 func (s *Search) Get(ctx context.Context, id int) (*Doc, error) {
 	raw, err := s.client.Collection(s.collectionName).Document(strconv.Itoa(id)).Retrieve(ctx)
@@ -523,6 +565,8 @@ func docFromMap(m map[string]any) *Doc {
 		Content:      str("content"),
 		CreatedTS:    num("created_ts"),
 		AddedTS:      num("added_ts"),
+		LLMIn:        num("llm_in"),
+		LLMOut:       num("llm_out"),
 		TextTS:       num("text_ts"),
 		EnrichedTS:   num("enriched_ts"),
 		FileSize:     num("file_size"),

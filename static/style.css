@@ -1023,15 +1023,6 @@ main {
   font-size: 12px;
   color: var(--color-neutral-600);
 }
-.doc-foot span:first-child { flex: none; }
-/* Scanner filenames run long; the whole name stays in the tooltip. */
-.doc-foot .origname {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
-}
 
 .banner {
   border: 2px solid var(--color-accent);

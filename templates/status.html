@@ -18,15 +18,30 @@
             <span class="v">{{.Budget}}</span>
           </div>
         {{end}}
-        {{if .Calls}}
-          <div class="stat">
-            <span class="k">Spent · {{printf "$%.5f" .PerDoc}} per document</span>
-            <span class="v">{{printf "$%.4f" .USD}}</span>
-          </div>
-        {{end}}
       </div>
-      {{if .Calls}}
-        <p class="quiet" style="margin-top:8px">{{commaNum .In}} input + {{commaNum .Out}} output tokens over {{.Calls}} call{{if ne .Calls 1}}s{{end}}.</p>
+
+      {{/* Summed from the documents themselves, so it covers every run rather
+           than only this one — which is the number a backfill is judged on. */}}
+      {{if .AllDocs}}
+        <h6 style="margin-top:24px">Spend across the archive</h6>
+        <div class="stats">
+          <div class="stat"><span class="k">Total</span><span class="v">{{usd .AllCost}}</span></div>
+          <div class="stat"><span class="k">Per document</span><span class="v">{{usd .AllPer}}</span></div>
+          <div class="stat"><span class="k">Documents tagged</span><span class="v">{{commaNum .AllDocs}}</span></div>
+          <div class="stat"><span class="k">Input tokens</span><span class="v">{{commaNum .AllIn}}</span></div>
+          <div class="stat"><span class="k">Output tokens</span><span class="v">{{commaNum .AllOut}}</span></div>
+        </div>
+        {{if .Calls}}
+          <p class="quiet" style="margin-top:8px">
+            This session: {{commaNum .In}} in + {{commaNum .Out}} out over
+            {{.Calls}} call{{if ne .Calls 1}}s{{end}}, {{usd .USD}}.
+          </p>
+        {{end}}
+      {{else if .Calls}}
+        <p class="quiet" style="margin-top:8px">
+          This session: {{commaNum .In}} in + {{commaNum .Out}} out over
+          {{.Calls}} call{{if ne .Calls 1}}s{{end}}, {{usd .USD}}.
+        </p>
       {{end}}
     </section>
   {{end}}

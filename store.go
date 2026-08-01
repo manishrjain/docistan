@@ -60,6 +60,11 @@ type Doc struct {
 	Confidence  int    `json:"confidence"`
 	Enriched    bool   `json:"enriched"`
 	Content     string `json:"content"`
+	// What the model cost for this one document, accumulated across every
+	// call made for it — a re-tag adds to the bill rather than replacing it,
+	// because the money really was spent twice.
+	LLMIn  int64 `json:"llm_in,omitempty"`
+	LLMOut int64 `json:"llm_out,omitempty"`
 	// When each visible step finished, so the document page can say when it
 	// was read and when the model described it rather than only when it
 	// arrived. Zero on documents ingested before these were recorded; the

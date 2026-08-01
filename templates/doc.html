@@ -137,16 +137,13 @@
       </ul>
 
       <hr class="hr">
-      {{/* The arrival time now lives on the timeline's first step, so this
-           line carries what is otherwise nowhere on the page: what the file
-           was called before it became #{{$d.ID}}. */}}
       <div class="doc-foot">
         <span>
           {{if $d.PageCount}}{{$d.PageCount}} page{{if ne $d.PageCount 1}}s{{end}}{{end}}
           {{if and $d.PageCount $d.FileSize}} · {{end}}
           {{if $d.FileSize}}{{humanSize $d.FileSize}}{{end}}
         </span>
-        <span class="origname" title="{{$d.OriginalName}}">{{$d.OriginalName}}</span>
+        <span>Added {{shortDate $d.AddedTS}}</span>
       </div>
 
       <details class="extracted"{{if not $d.Content}} data-empty="1"{{end}}>

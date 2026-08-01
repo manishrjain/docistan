@@ -70,6 +70,7 @@ func templateFuncs() template.FuncMap {
 		// Counts in the chrome read as quantities, not identifiers, so they
 		// get separators. Document ids deliberately do not.
 		"commaNum":     commaNum,
+		"usd":          usd,
 		"monthOptions": monthOptions,
 		"yearOptions":  yearOptions,
 		"ymYear": func(s string) string {
@@ -155,6 +156,20 @@ func commaNum(v any) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// usd formats a cost that is usually a small fraction of a cent, without
+// rounding it away to $0.00 and without trailing noise on larger totals.
+func usd(v float64) string {
+	switch {
+	case v == 0:
+		return "$0"
+	case v < 0.01:
+		return fmt.Sprintf("$%.5f", v)
+	case v < 1:
+		return fmt.Sprintf("$%.4f", v)
+	}
+	return fmt.Sprintf("$%.2f", v)
 }
 
 func humanSize(n int64) string {
@@ -284,7 +299,15 @@ func (a *App) taggingStage(doc *Doc) Stage {
 	switch {
 	case doc.Enriched:
 		s.State = "done"
-		s.Detail = when(doc.EnrichedTS, a.cfg.LLMModel)
+		by := a.cfg.LLMModel
+		if doc.LLMIn > 0 {
+			// What this one document cost, next to when it ran and which model
+			// ran it — the three facts belong together.
+			by += fmt.Sprintf(" · %s in / %s out · %s",
+				commaNum(doc.LLMIn), commaNum(doc.LLMOut),
+				usd(a.cfg.LLMCost(doc.LLMIn, doc.LLMOut)))
+		}
+		s.Detail = when(doc.EnrichedTS, by)
 	case a.enricher == nil:
 		s.State = "skipped"
 		s.Detail = "no model configured — set OPENAI_API_KEY"
@@ -346,12 +369,24 @@ type page struct {
 
 // SpendSummary reports actual model usage rather than an estimate, alongside
 // the state of the enrichment queue and the remaining request budget.
+//
+// Two totals, because they answer different questions. The session figures are
+// process counters and reset on restart; the archive figures are summed from
+// the indexed documents, so they cover every run and are what a backfill
+// should be judged on.
 type SpendSummary struct {
-	Calls   int64
-	In      int64
-	Out     int64
-	USD     float64
-	PerDoc  float64
+	Calls  int64
+	In     int64
+	Out    int64
+	USD    float64
+	PerDoc float64
+
+	AllIn   int64
+	AllOut  int64
+	AllDocs int
+	AllCost float64
+	AllPer  float64
+
 	Pending int
 	Done    int
 	Failed  int
@@ -977,10 +1012,21 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	var spend *SpendSummary
 	if a.enricher != nil {
-		calls, in, out, usd := a.enricher.Spend()
-		spend = &SpendSummary{Calls: calls, In: in, Out: out, USD: usd}
+		calls, in, out := a.enricher.Spend()
+		spend = &SpendSummary{Calls: calls, In: in, Out: out, USD: a.cfg.LLMCost(in, out)}
 		if calls > 0 {
-			spend.PerDoc = usd / float64(calls)
+			spend.PerDoc = spend.USD / float64(calls)
+		}
+		// Summed from the documents themselves, so this covers every run the
+		// archive has ever seen rather than only this one.
+		if allIn, allOut, docs, err := a.search.TokenTotals(r.Context()); err != nil {
+			logf("token totals: %v", err)
+		} else {
+			spend.AllIn, spend.AllOut, spend.AllDocs = allIn, allOut, docs
+			spend.AllCost = a.cfg.LLMCost(allIn, allOut)
+			if docs > 0 {
+				spend.AllPer = spend.AllCost / float64(docs)
+			}
 		}
 		spend.Pending, spend.Done, spend.Failed = a.enrichq.Stats()
 		remaining, resetIn, stopped := a.enricher.Budget()
