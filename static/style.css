@@ -508,6 +508,8 @@ main {
 .seg a + a { border-left: 1px solid var(--color-divider); }
 .seg a:hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
 .seg a.on { background: var(--color-text); color: var(--color-bg); }
+.sort-dir .dir-arrow { display: none; }
+.sort-dir:hover { border-color: var(--color-accent); color: var(--color-accent-700); }
 
 .range-custom {
   display: flex;
@@ -986,6 +988,30 @@ main {
 }
 .timeline .step { flex: 1; min-width: 0; }
 .timeline .what { font-size: 13px; line-height: 1.35; display: block; }
+/* Extra lines a step can carry: what it spent, and the name the document
+   arrived under. The filename is boxed rather than run into the line, because
+   scanner filenames are long and unpunctuated and would read as prose. */
+.timeline .cost,
+.timeline .file {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--color-neutral-700);
+  margin-top: 3px;
+}
+.timeline .cost { letter-spacing: 0.04em; }
+.timeline .file {
+  padding: 4px 6px;
+  border: 1px solid var(--color-divider);
+  background: var(--color-neutral-100);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .timeline .detail {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -1236,11 +1262,14 @@ main {
   .tag-browse-list { grid-template-columns: repeat(2, 1fr); }
 
   .results-head {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
   }
-  .results-head .sort { flex-wrap: wrap; gap: var(--space-2); }
+  .results-head .sort { flex-wrap: wrap; gap: 6px; }
+  .results-head .sort > .micro { display: none; }
+  .sort-dir .dir-full { display: none; }
+  .sort-dir .dir-arrow { display: inline; }
   .results-head,
   .row { padding-inline: var(--space-4); }
   .row { gap: 14px; padding-block: var(--space-4); }

@@ -211,9 +211,14 @@ func (a *App) routes(mux *http.ServeMux) {
 // to make it obvious what ran, what did not, and crucially which steps were
 // local and which involved the model.
 type Stage struct {
-	Key    string // stable id so the page can update a row in place
-	Name   string
-	State  string // done | pending | skipped | failed
+	Key   string // stable id so the page can update a row in place
+	Name  string
+	State string // done | pending | skipped | failed
+	// Cost and File each get their own line under the label when set: the
+	// tokens a step spent, and the filename a document arrived under. Detail
+	// is the last line, carrying when the step finished.
+	Cost   string
+	File   string
 	Detail string
 }
 
@@ -234,7 +239,14 @@ func (a *App) stagesFor(doc *Doc) []Stage {
 }
 
 func landedStage(doc *Doc) Stage {
-	return Stage{Key: "landed", Name: "Landed", State: "done", Detail: stamp(doc.AddedTS)}
+	return Stage{
+		Key: "landed", Name: "Landed", State: "done",
+		// What the file was called before it became a number. Boxed rather
+		// than run into the line, because scanner filenames are long and
+		// unpunctuated and would otherwise read as prose.
+		File:   doc.OriginalName,
+		Detail: stamp(doc.AddedTS),
+	}
 }
 
 // when puts the step's own timestamp first and what did the work second.
@@ -295,19 +307,17 @@ func readStage(doc *Doc) Stage {
 // the way the design does — the step is the same step whether it is queued,
 // running or finished.
 func (a *App) taggingStage(doc *Doc) Stage {
-	s := Stage{Key: "tagging", Name: "AI summary + tags generated"}
+	s := Stage{Key: "tagging", Name: "AI summary + tags"}
 	switch {
 	case doc.Enriched:
 		s.State = "done"
-		by := a.cfg.LLMModel
+		s.Name += " — " + a.cfg.LLMModel
 		if doc.LLMIn > 0 {
-			// What this one document cost, next to when it ran and which model
-			// ran it — the three facts belong together.
-			by += fmt.Sprintf(" · %s in / %s out · %s",
+			s.Cost = fmt.Sprintf("%s in · %s out · %s",
 				commaNum(doc.LLMIn), commaNum(doc.LLMOut),
 				usd(a.cfg.LLMCost(doc.LLMIn, doc.LLMOut)))
 		}
-		s.Detail = when(doc.EnrichedTS, by)
+		s.Detail = stamp(doc.EnrichedTS)
 	case a.enricher == nil:
 		s.State = "skipped"
 		s.Detail = "no model configured — set OPENAI_API_KEY"
@@ -500,6 +510,16 @@ func (p page) DirLabel() string {
 		return "↓ Newest first"
 	}
 	return "↑ Oldest first"
+}
+
+// DirArrow is the same control with no room for words. Both are rendered and
+// CSS picks one, so the choice follows the viewport rather than a guess made
+// on the server.
+func (p page) DirArrow() string {
+	if p.Query.Descending() {
+		return "↓"
+	}
+	return "↑"
 }
 
 // IsLatest reports the plain default view: everything, newest arrival first.
@@ -843,6 +863,12 @@ func (a *App) handleDocMeta(w http.ResponseWriter, r *http.Request) {
 		"created_date": doc.CreatedDate,
 		"enriched":     doc.Enriched,
 		"queued":       a.enrichq != nil && a.enrichq.Has(doc.ID),
+		"model":        a.cfg.LLMModel,
+	}
+	if doc.LLMIn > 0 {
+		out["cost"] = fmt.Sprintf("%s in · %s out · %s",
+			commaNum(doc.LLMIn), commaNum(doc.LLMOut),
+			usd(a.cfg.LLMCost(doc.LLMIn, doc.LLMOut)))
 	}
 	if a.enricher != nil {
 		if _, resetIn, stopped := a.enricher.Budget(); stopped != "" {

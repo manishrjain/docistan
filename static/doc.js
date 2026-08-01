@@ -29,16 +29,28 @@ document.addEventListener("DOMContentLoaded", () => {
   // label stays put and only the line beneath it changes — it is the same
   // step whether it is queued, running or done.
   const tagRow = document.querySelector('.timeline li[data-stage="tagging"]');
-  function setTagStage(state, detail) {
-    if (!tagRow) return;
-    tagRow.className = state;
-    let el = tagRow.querySelector(".detail");
+
+  // Each sub-line is created on demand and kept in document order, so a row
+  // that gains a cost mid-poll does not end up with it below the timestamp.
+  function stageLine(cls) {
+    if (!tagRow) return null;
+    let el = tagRow.querySelector("." + cls);
     if (!el) {
       el = document.createElement("span");
-      el.className = "detail";
-      tagRow.querySelector(".step").append(el);
+      el.className = cls;
+      const detail = tagRow.querySelector(".detail");
+      if (cls === "cost" && detail) detail.before(el);
+      else tagRow.querySelector(".step").append(el);
     }
-    el.textContent = detail || "";
+    return el;
+  }
+
+  function setTagStage(state, detail, extra = {}) {
+    if (!tagRow) return;
+    tagRow.className = state;
+    if (extra.label) tagRow.querySelector(".what").textContent = extra.label;
+    if (extra.cost) stageLine("cost").textContent = extra.cost;
+    stageLine("detail").textContent = detail || "";
   }
 
   // --- autosave ----------------------------------------------------------
@@ -483,7 +495,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
         if (data.enriched) {
           applyMeta(data);
-          setTagStage("done", "just now");
+          // The label names the model and the line under it what the call
+          // cost, the same as a server-rendered row — so a page that watched
+          // the work happen ends up identical to one loaded afterwards.
+          setTagStage("done", "just now", {
+            label: data.model ? `AI summary + tags — ${data.model}` : undefined,
+            cost: data.cost,
+          });
           if (window.toast) toast(`Tagged — ${data.title || "done"}`, { kind: "ok" });
           return;
         }

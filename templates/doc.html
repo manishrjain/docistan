@@ -127,9 +127,12 @@
             <span class="dot" aria-hidden="true"></span>
             <span class="step">
               <span class="what">{{.Name}}</span>
-              {{/* Clamped to two lines by CSS — a long filename or a long
-                   error should not push the rest of the timeline off the
-                   page, so the full text lives in the tooltip. */}}
+              {{if .Cost}}<span class="cost">{{.Cost}}</span>{{end}}
+              {{/* Both of these are clamped to two lines by CSS — a scanner
+                   filename or a long error should not push the rest of the
+                   timeline off the page, so the full text lives in the
+                   tooltip. */}}
+              {{if .File}}<span class="file" title="{{.File}}">{{.File}}</span>{{end}}
               {{if .Detail}}<span class="detail" title="{{.Detail}}">{{.Detail}}</span>{{end}}
             </span>
           </li>

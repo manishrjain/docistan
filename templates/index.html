@@ -101,7 +101,8 @@
       {{/* Relevance has no meaningful reverse, so the direction control only
            appears once the ordering is by a date. */}}
       {{if not ($page.SortOn "relevance")}}
-        <nav class="seg"><a href="{{$page.ToggleDir}}">{{$page.DirLabel}}</a></nav>
+        <nav class="seg"><a class="sort-dir" href="{{$page.ToggleDir}}" title="{{$page.DirLabel}}"
+          ><span class="dir-full">{{$page.DirLabel}}</span><span class="dir-arrow">{{$page.DirArrow}}</span></a></nav>
       {{end}}
     </div>
   </div>
