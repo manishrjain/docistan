@@ -24,33 +24,54 @@ document.addEventListener("DOMContentLoaded", () => {
       : null;
   }
 
-  // The timeline row carries its state in the class; the dot's colour and
-  // pulse come from CSS, so there is no symbol to keep in step here. The
-  // label stays put and only the line beneath it changes — it is the same
-  // step whether it is queued, running or done.
-  const tagRow = document.querySelector('.timeline li[data-stage="tagging"]');
+  // --- timeline ----------------------------------------------------------
+  // The server already knows how to write every step; rather than
+  // reimplementing those labels here, the poll returns the rendered stages
+  // and this applies them. A page that watched the work happen therefore
+  // ends up byte-identical to one loaded afterwards.
+  const timeline = document.querySelector(".timeline");
 
-  // Each sub-line is created on demand and kept in document order, so a row
-  // that gains a cost mid-poll does not end up with it below the timestamp.
-  function stageLine(cls) {
-    if (!tagRow) return null;
-    let el = tagRow.querySelector("." + cls);
+  function applyStages(stages) {
+    if (!timeline || !Array.isArray(stages)) return;
+    for (const st of stages) {
+      const row = timeline.querySelector(`li[data-stage="${st.key}"]`);
+      if (!row) continue;
+      row.className = st.state;
+      row.querySelector(".what").textContent = st.name;
+      setLine(row, "cost", st.cost);
+      setLine(row, "file", st.file);
+      setLine(row, "detail", st.detail);
+    }
+  }
+
+  // Order matters: cost, then file, then the timestamp. A line that appears
+  // mid-poll has to land in the right place, not at the end.
+  const lineOrder = ["cost", "file", "detail"];
+  function setLine(row, cls, text) {
+    let el = row.querySelector("." + cls);
+    if (!text) {
+      el?.remove();
+      return;
+    }
     if (!el) {
       el = document.createElement("span");
       el.className = cls;
-      const detail = tagRow.querySelector(".detail");
-      if (cls === "cost" && detail) detail.before(el);
-      else tagRow.querySelector(".step").append(el);
+      const after = lineOrder.slice(lineOrder.indexOf(cls) + 1);
+      const before = after.map((c) => row.querySelector("." + c)).find(Boolean);
+      if (before) before.before(el);
+      else row.querySelector(".step").append(el);
     }
-    return el;
+    el.textContent = text;
+    if (cls !== "detail") el.title = text;
   }
 
-  function setTagStage(state, detail, extra = {}) {
-    if (!tagRow) return;
-    tagRow.className = state;
-    if (extra.label) tagRow.querySelector(".what").textContent = extra.label;
-    if (extra.cost) stageLine("cost").textContent = extra.cost;
-    stageLine("detail").textContent = detail || "";
+  // Used before the first poll comes back, so a press registers immediately
+  // rather than looking ignored for a second.
+  function markWorking(key, state, detail) {
+    const row = timeline?.querySelector(`li[data-stage="${key}"]`);
+    if (!row) return;
+    row.className = state;
+    setLine(row, "detail", detail);
   }
 
   // --- autosave ----------------------------------------------------------
@@ -434,90 +455,127 @@ document.addEventListener("DOMContentLoaded", () => {
   };
   }
 
-  // --- re-tag with AI ----------------------------------------------------
-  // The work happens in the background queue, so the button reports what is
-  // happening and then polls until the result lands, rather than redirecting
-  // to a page that looks unchanged.
-  const retag = document.querySelector('form[action$="/enrich"]');
-  if (retag) {
-    const button = retag.querySelector("button");
+  // --- reprocess and re-tag ----------------------------------------------
+  // Both run in the background, so both stay on this page and report
+  // themselves in the timeline. Neither redirects: the progress is here.
 
-    retag.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      button.disabled = true;
-      setTagStage("working", "Working…");
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-      try {
-        const res = await fetch(retag.action, {
-          method: "POST",
-          headers: { Accept: "application/json" },
-        });
-        if (!res.ok) {
-          throw new Error((await res.text()) || `HTTP ${res.status}`);
-        }
-        const data = await res.json();
-        if (data.status === "blocked") {
-          setTagStage("failed", "Stopped: " + (data.reason || "the model is unavailable"));
-          button.disabled = false;
-          return;
-        }
-        if (data.status === "waiting") {
-          setTagStage("pending", data.reason ? "Waiting — " + data.reason : "Queued");
-        }
-        await waitForTags();
-      } catch (err) {
-        setTagStage("failed", String(err.message || err).slice(0, 120));
-      } finally {
-        button.disabled = false;
-      }
-    });
-
-    // A document ingested moments ago is already queued; watch it land rather
-    // than making the reader press a button to find out.
-    if (tagRow && (tagRow.classList.contains("pending") || tagRow.classList.contains("working"))) {
-      waitForTags();
-    }
-
-    async function waitForTags() {
-      const deadline = Date.now() + 120000;
-      let dots = 0;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 1200));
-        let data;
-        try {
-          const res = await fetch(`${location.pathname}/meta`, {
-            headers: { Accept: "application/json" },
-          });
-          data = await res.json();
-        } catch {
-          continue; // a transient failure should not end the wait
-        }
-
-        if (data.enriched) {
-          applyMeta(data);
-          // The label names the model and the line under it what the call
-          // cost, the same as a server-rendered row — so a page that watched
-          // the work happen ends up identical to one loaded afterwards.
-          setTagStage("done", "just now", {
-            label: data.model ? `AI summary + tags — ${data.model}` : undefined,
-            cost: data.cost,
-          });
-          if (window.toast) toast(`Tagged — ${data.title || "done"}`, { kind: "ok" });
-          return;
-        }
-        if (!data.queued) {
-          setTagStage("failed", "the model call did not succeed — try again");
-          return;
-        }
-        dots = (dots + 1) % 4;
-        setTagStage(
-          "working",
-          data.reason ? "Waiting — " + data.reason : "Working" + ".".repeat(dots),
-        );
-      }
-      setTagStage("pending", "Still queued — the tags will appear once it runs");
+  async function poll() {
+    try {
+      const res = await fetch(`${location.pathname}/meta`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null; // a transient failure should not end the wait
     }
   }
+
+  // Watches until nothing is outstanding: the pipeline has finished and the
+  // model is neither queued nor running.
+  async function watch(timeoutMs = 300000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await sleep(1200);
+      const data = await poll();
+      if (!data) continue;
+      applyStages(data.stages);
+      applyMeta(data);
+      if (data.status !== "processing" && !data.queued) return data;
+    }
+    return null;
+  }
+
+  // Confirmation, when the markup asks for one, then the action. Without
+  // JavaScript the form keeps its inline confirm() and posts normally; this
+  // replaces that with the panel, which has room to say what happens.
+  function guarded(form, run) {
+    if (!form) return;
+    const key = form.dataset.confirms;
+    const panel = key
+      ? document.querySelector(`.confirm[data-confirm="${key}"]`)
+      : null;
+
+    form.removeAttribute("onsubmit");
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (!panel) {
+        run();
+        return;
+      }
+      for (const other of document.querySelectorAll(".confirm")) other.hidden = true;
+      panel.hidden = false;
+      panel.querySelector("[data-go]")?.focus();
+    });
+    if (!panel) return;
+    panel.querySelector("[data-cancel]")?.addEventListener("click", () => {
+      panel.hidden = true;
+    });
+    panel.querySelector("[data-go]")?.addEventListener("click", () => {
+      panel.hidden = true;
+      run();
+    });
+  }
+
+  // Runs a form's action as a background request and watches it land, with
+  // the button held disabled so it cannot be pressed twice.
+  async function background(form, onAccepted) {
+    const button = form.querySelector("button");
+    if (button) button.disabled = true;
+    try {
+      const res = await fetch(form.action, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+      const data = await res.json();
+      if (onAccepted && onAccepted(data) === false) return;
+      const done = await watch();
+      if (done && window.toast) {
+        toast(done.title ? `Done — ${done.title}` : "Done", { kind: "ok" });
+      }
+    } catch (err) {
+      if (window.toast) {
+        toast(String(err.message || err).slice(0, 160), { kind: "bad" });
+      }
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  guarded(document.querySelector('form[action$="/retry"]'), () =>
+    background(document.querySelector('form[action$="/retry"]'), () => {
+      // The design's shape: the read is running, the model is behind it.
+      markWorking("text", "working", "Working…");
+      markWorking("tagging", "pending", "Queued");
+    }),
+  );
+
+  guarded(document.querySelector('form[action$="/enrich"]'), () =>
+    background(document.querySelector('form[action$="/enrich"]'), (data) => {
+      if (data.status === "blocked") {
+        markWorking("tagging", "failed", "Stopped: " + (data.reason || "the model is unavailable"));
+        return false;
+      }
+      markWorking(
+        "tagging",
+        data.status === "waiting" ? "pending" : "working",
+        data.reason ? "Waiting — " + data.reason : "Working…",
+      );
+    }),
+  );
+
+  guarded(document.querySelector('form[action$="/delete"]'), () => {
+    // Deletion navigates away, so it is the one action with nothing to watch.
+    document.querySelector('form[action$="/delete"]').submit();
+  });
+
+  // A document still mid-flight when the page opened — ingested moments ago,
+  // or reprocessing in another tab — is watched without anyone pressing
+  // anything.
+  if (timeline?.querySelector("li.pending, li.working")) watch();
 
   // --- document number ---------------------------------------------------
   // The number is what gets written on the paper original, so copying it
@@ -536,31 +594,4 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // --- inline confirmations ----------------------------------------------
-  // The markup ships with the browser's own confirm() on the form, which is
-  // what protects the no-JavaScript path. Here it is replaced by the panel,
-  // which has room to say what actually happens.
-  for (const target of document.querySelectorAll("form[data-confirms]")) {
-    const panel = document.querySelector(
-      `.confirm[data-confirm="${target.dataset.confirms}"]`,
-    );
-    if (!panel) continue;
-
-    target.removeAttribute("onsubmit");
-    target.addEventListener("submit", (e) => {
-      e.preventDefault();
-      for (const other of document.querySelectorAll(".confirm")) other.hidden = true;
-      panel.hidden = false;
-      panel.querySelector("[data-go]")?.focus();
-    });
-    panel.querySelector("[data-cancel]")?.addEventListener("click", () => {
-      panel.hidden = true;
-    });
-    // submit() rather than requestSubmit(), so this does not come straight
-    // back through the handler above.
-    panel.querySelector("[data-go]")?.addEventListener("click", () => {
-      panel.hidden = true;
-      target.submit();
-    });
-  }
 });

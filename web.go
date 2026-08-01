@@ -211,15 +211,15 @@ func (a *App) routes(mux *http.ServeMux) {
 // to make it obvious what ran, what did not, and crucially which steps were
 // local and which involved the model.
 type Stage struct {
-	Key   string // stable id so the page can update a row in place
-	Name  string
-	State string // done | pending | skipped | failed
+	Key   string `json:"key"` // stable id so the page can update a row in place
+	Name  string `json:"name"`
+	State string `json:"state"` // done | pending | skipped | failed
 	// Cost and File each get their own line under the label when set: the
 	// tokens a step spent, and the filename a document arrived under. Detail
 	// is the last line, carrying when the step finished.
-	Cost   string
-	File   string
-	Detail string
+	Cost   string `json:"cost,omitempty"`
+	File   string `json:"file,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // stagesFor reconstructs what happened to a document from what is on disk and
@@ -272,10 +272,13 @@ func readStage(doc *Doc) Stage {
 	s := Stage{Key: "text", Name: "OCR"}
 	chars := len(strings.TrimSpace(doc.Content))
 
+	// Status wins over the content: a reprocess leaves the previous text in
+	// the sidecar until the new pass replaces it, so counting characters
+	// would report the step finished while it is still running.
+	if doc.Status == StatusProcessing {
+		return Stage{Key: "text", Name: "OCR", State: "pending", Detail: "Working…"}
+	}
 	if chars == 0 {
-		if doc.Status == StatusProcessing {
-			return Stage{Key: "text", Name: "OCR", State: "pending", Detail: "Working…"}
-		}
 		return Stage{Key: "text", Name: "OCR — no text found", State: "failed",
 			Detail: "nothing to search or summarise"}
 	}
@@ -318,6 +321,10 @@ func (a *App) taggingStage(doc *Doc) Stage {
 				usd(a.cfg.LLMCost(doc.LLMIn, doc.LLMOut)))
 		}
 		s.Detail = stamp(doc.EnrichedTS)
+	case doc.Status == StatusProcessing:
+		// Not queued yet — the pipeline enqueues it once the text is back.
+		s.State = "pending"
+		s.Detail = "Queued"
 	case a.enricher == nil:
 		s.State = "skipped"
 		s.Detail = "no model configured — set OPENAI_API_KEY"
@@ -794,7 +801,14 @@ func (a *App) handleDocRetry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot reprocess: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	http.Redirect(w, r, "/status", http.StatusSeeOther)
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"status": "processing"})
+		return
+	}
+	// Without JavaScript, back to the document: the timeline there already
+	// reports the work, and the status page is about the queue as a whole.
+	http.Redirect(w, r, fmt.Sprintf("/doc/%d", id), http.StatusSeeOther)
 }
 
 // handleDocEnrich re-runs just the metadata call, leaving OCR alone. Useful
@@ -861,14 +875,13 @@ func (a *App) handleDocMeta(w http.ResponseWriter, r *http.Request) {
 		"title":        doc.Title,
 		"tags":         doc.Tags,
 		"created_date": doc.CreatedDate,
+		"summary":      doc.Summary,
+		"status":       doc.Status,
 		"enriched":     doc.Enriched,
 		"queued":       a.enrichq != nil && a.enrichq.Has(doc.ID),
-		"model":        a.cfg.LLMModel,
-	}
-	if doc.LLMIn > 0 {
-		out["cost"] = fmt.Sprintf("%s in · %s out · %s",
-			commaNum(doc.LLMIn), commaNum(doc.LLMOut),
-			usd(a.cfg.LLMCost(doc.LLMIn, doc.LLMOut)))
+		// The rendered steps, so a watching page shows exactly what a reload
+		// would rather than a second implementation of the same labels.
+		"stages": a.stagesFor(doc),
 	}
 	if a.enricher != nil {
 		if _, resetIn, stopped := a.enricher.Budget(); stopped != "" {
