@@ -87,7 +87,11 @@
   </aside>
 
   <section class="preview">
-    <iframe src="/doc/{{$d.ID}}/pdf" title="{{$d.Title}}"></iframe>
+    {{/* PDF.js rather than the browser's own viewer, so the find bar is
+         consistent and always reachable. Scanned documents are searchable
+         here too, because ocrmypdf embeds a real text layer. */}}
+    <iframe src="/static/pdfjs/web/viewer.html?file=/doc/{{$d.ID}}/pdf#search="
+            title="{{$d.Title}}" allow="fullscreen"></iframe>
   </section>
 </div>
 {{end}}
