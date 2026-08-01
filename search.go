@@ -67,6 +67,7 @@ func (s *Search) schema() *api.CollectionSchema {
 		Name: s.collectionName,
 		Fields: []api.Field{
 			f("title", "string"),
+			f("summary", "string"),
 			f("content", "string"),
 			f("original_name", "string"),
 			f("tags", "string[]", facet),
@@ -116,6 +117,7 @@ func tsDoc(d *Doc) map[string]any {
 	return map[string]any{
 		"id":            strconv.Itoa(d.ID),
 		"title":         d.Title,
+		"summary":       d.Summary,
 		"content":       content,
 		"original_name": d.OriginalName,
 		"tags":          tags,
@@ -194,9 +196,14 @@ type Result struct {
 	Facets  map[string][]FacetValue
 }
 
+// Hit carries per-field highlights. A match can land in the title, the
+// summary or the body, and the card should show where it actually landed
+// rather than always excerpting the body.
 type Hit struct {
 	Doc     *Doc
-	Snippet template.HTML
+	Title   template.HTML // the title, marked up if the match was there
+	Summary template.HTML // summary, marked up if matched, plain otherwise
+	Snippet template.HTML // body excerpt, only when the body matched
 }
 
 type FacetValue struct {
@@ -248,11 +255,11 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 
 	params := &api.SearchCollectionParams{
 		Q:                       pointer.String(text),
-		QueryBy:                 pointer.String("title,content,tags,original_name"),
-		QueryByWeights:          pointer.String("10,4,8,2"),
+		QueryBy:                 pointer.String("title,summary,content,tags,original_name"),
+		QueryByWeights:          pointer.String("10,6,4,8,2"),
 		FacetBy:                 pointer.String("tags,status"),
 		MaxFacetValues:          pointer.Int(30),
-		HighlightFields:         pointer.String("content"),
+		HighlightFields:         pointer.String("title,summary,content"),
 		HighlightStartTag:       pointer.String(hlStart),
 		HighlightEndTag:         pointer.String(hlEnd),
 		HighlightAffixNumTokens: pointer.Int(8),
@@ -279,8 +286,7 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 			if h.Document == nil {
 				continue
 			}
-			hit := Hit{Doc: docFromMap(*h.Document)}
-			hit.Snippet = snippetOf(h)
+			hit := newHit(docFromMap(*h.Document), h)
 			out.Hits = append(out.Hits, hit)
 		}
 	}
@@ -302,23 +308,47 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 	return out, nil
 }
 
-// snippetOf renders the matched excerpt. Everything is HTML-escaped first and
-// only the sentinel markers become tags, so document text can never inject
-// markup into the page.
-func snippetOf(h api.SearchResultHit) template.HTML {
-	if h.Highlights == nil {
-		return ""
-	}
-	for _, hl := range *h.Highlights {
-		if hl.Snippet == nil || *hl.Snippet == "" {
-			continue
+func newHit(doc *Doc, h api.SearchResultHit) Hit {
+	hit := Hit{Doc: doc}
+
+	marked := map[string]template.HTML{}
+	if h.Highlights != nil {
+		for _, hl := range *h.Highlights {
+			if hl.Field == nil || hl.Snippet == nil || *hl.Snippet == "" {
+				continue
+			}
+			marked[*hl.Field] = renderMarks(*hl.Snippet)
 		}
-		safe := template.HTMLEscapeString(*hl.Snippet)
-		safe = strings.ReplaceAll(safe, template.HTMLEscapeString(hlStart), "<mark>")
-		safe = strings.ReplaceAll(safe, template.HTMLEscapeString(hlEnd), "</mark>")
-		return template.HTML(safe)
 	}
-	return ""
+
+	hit.Title = marked["title"]
+	if hit.Title == "" {
+		hit.Title = template.HTML(template.HTMLEscapeString(doc.Title))
+	}
+	hit.Summary = marked["summary"]
+	if hit.Summary == "" {
+		hit.Summary = template.HTML(template.HTMLEscapeString(clip(doc.Summary, 240)))
+	}
+	hit.Snippet = marked["content"]
+	return hit
+}
+
+// renderMarks turns a Typesense snippet into safe HTML. Everything is escaped
+// first and only the sentinel markers become tags, so document text can never
+// inject markup into the page.
+func renderMarks(snippet string) template.HTML {
+	safe := template.HTMLEscapeString(snippet)
+	safe = strings.ReplaceAll(safe, template.HTMLEscapeString(hlStart), "<mark>")
+	safe = strings.ReplaceAll(safe, template.HTMLEscapeString(hlEnd), "</mark>")
+	return template.HTML(safe)
+}
+
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return strings.TrimSpace(string(r[:n])) + "…"
 }
 
 // Get fetches one document by id. This is a direct lookup, not a search.
@@ -388,6 +418,7 @@ func docFromMap(m map[string]any) *Doc {
 	d := &Doc{
 		OriginalName: str("original_name"),
 		Title:        str("title"),
+		Summary:      str("summary"),
 		Status:       str("status"),
 		SHA256:       str("sha256"),
 		CreatedDate:  str("created_date"),

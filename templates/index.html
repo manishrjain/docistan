@@ -63,13 +63,14 @@
                  Tag links sit above it and keep their own behaviour. */}}
             {{/* The query rides along so the document opens with the match
                  already found in the PDF rather than only in the snippet. */}}
-            <a class="title stretch" href="/doc/{{$d.ID}}{{if $page.Query.Q}}?q={{$page.Query.Q}}{{end}}">{{$d.Title}}</a>
+            <a class="title stretch" href="/doc/{{$d.ID}}{{if $page.Query.Q}}?q={{$page.Query.Q}}{{end}}">{{.Title}}</a>
             <p class="sub">
               <span class="id">#{{$d.ID}}</span>
               {{if $d.CreatedDate}}<span>{{monthLabel $d.CreatedDate}}</span>{{end}}
               {{if $d.PageCount}}<span>{{$d.PageCount}}p</span>{{end}}
               {{if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>{{end}}
             </p>
+            {{if .Summary}}<p class="summary">{{.Summary}}</p>{{end}}
             {{if .Snippet}}<p class="snippet">{{.Snippet}}</p>{{end}}
             {{if $d.Tags}}
               <p class="tags">

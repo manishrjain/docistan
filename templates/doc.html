@@ -25,6 +25,8 @@
       <a href="/doc/{{$d.ID}}/original">Download original</a>
     </p>
 
+    {{if $d.Summary}}<p class="doc-summary">{{$d.Summary}}</p>{{end}}
+
     {{if ne $d.Status "ready"}}
       <p class="banner {{$d.Status}}">
         {{$d.Status}}{{if $d.FailedStage}} at {{$d.FailedStage}}{{end}}

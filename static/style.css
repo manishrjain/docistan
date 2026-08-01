@@ -331,3 +331,11 @@ h1 .inline-edit { font-size: inherit; font-weight: inherit; }
   background: var(--surface); font-size: .82rem; color: var(--muted);
 }
 .searching strong { color: var(--yellow); font-weight: 600; }
+
+.summary { margin: .25rem 0; color: var(--ink); font-size: .88rem; }
+.summary mark, .card .title mark { background: var(--yellow-soft); color: var(--yellow); border-radius: 3px; padding: 0 .12em; }
+.doc-summary {
+  margin: .2rem 0 .8rem; padding: .5rem .65rem;
+  background: var(--surface); border-radius: 6px;
+  font-size: .88rem; line-height: 1.5;
+}

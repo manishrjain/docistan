@@ -20,6 +20,7 @@ import (
 // Meta is what the model is asked to produce for a document.
 type Meta struct {
 	Title       string   `json:"title"`
+	Summary     string   `json:"summary"`
 	Tags        []string `json:"tags"`
 	CreatedDate string   `json:"created_date"`
 }
@@ -159,11 +160,15 @@ func metaSchema() map[string]any {
 	return map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
-		"required":             []string{"title", "tags", "created_date"},
+		"required":             []string{"title", "summary", "tags", "created_date"},
 		"properties": map[string]any{
 			"title": map[string]any{
 				"type":        "string",
 				"description": "Short human-readable title, e.g. 'Northwind Electricity Statement'. No file extension.",
+			},
+			"summary": map[string]any{
+				"type":        "string",
+				"description": "One or two plain sentences saying what this document is and what it actually says — amounts, dates, parties, the decision or obligation it records. No preamble like 'This document is'.",
 			},
 			"tags": map[string]any{
 				"type":        "array",
@@ -269,6 +274,7 @@ func (e *OpenAIEnricher) resetHint(apiErr *openai.Error) time.Duration {
 
 func cleanMeta(m Meta) Meta {
 	m.Title = strings.TrimSpace(m.Title)
+	m.Summary = strings.TrimSpace(m.Summary)
 	m.CreatedDate = normalizeMonth(m.CreatedDate)
 
 	seen := map[string]bool{}
@@ -440,6 +446,9 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 
 	if meta.Title != "" {
 		doc.Title = meta.Title
+	}
+	if meta.Summary != "" {
+		doc.Summary = meta.Summary
 	}
 	if meta.CreatedDate != "" {
 		doc.CreatedDate = meta.CreatedDate

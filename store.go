@@ -44,6 +44,7 @@ type Doc struct {
 	FileSize     int64    `json:"file_size"`
 	PageCount    int      `json:"page_count"`
 	Title        string   `json:"title"`
+	Summary      string   `json:"summary"`
 	Tags         []string `json:"tags"`
 	CreatedDate  string   `json:"created_date"`
 	CreatedTS    int64    `json:"created_ts"`
