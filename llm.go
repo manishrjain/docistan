@@ -26,9 +26,15 @@ type Meta struct {
 }
 
 type EnrichInput struct {
-	Filename  string
-	Text      string
+	Filename string
+	Text     string
+	// KnownTags is the vocabulary already in use across the archive, so the
+	// model reaches for an existing tag instead of inventing a near-duplicate.
 	KnownTags []string
+	// CurrentTags is what this document already carries. Re-tagging replaces
+	// the list outright, so without this a second pass silently drops
+	// whatever the first pass — or a person — put there.
+	CurrentTags []string
 }
 
 // textCap bounds what we send. Dates and totals cluster at the start and end
@@ -154,7 +160,7 @@ func (e *OpenAIEnricher) Budget() (remaining int, resetIn time.Duration, stopped
 	return e.budget.status()
 }
 
-func metaSchema() map[string]any {
+func metaSchema(maxTags int) map[string]any {
 	return map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -171,7 +177,7 @@ func metaSchema() map[string]any {
 			"tags": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": "1-5 short lowercase tags. Tags are the only classification, so include both the kind of document (invoice, statement, tax) and who or what it concerns (northwind, car, medical).",
+				"description": fmt.Sprintf("1-%d short lowercase tags. Tags are the only classification, so include both the kind of document (invoice, statement, tax) and who or what it concerns (northwind, car, medical).", maxTags),
 			},
 			"created_date": map[string]any{
 				"type":        "string",
@@ -213,7 +219,25 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 		sb.WriteString(strings.Join(in.KnownTags, ", "))
 		sb.WriteString(".\n")
 	}
+	// Your answer replaces the tag list wholesale, so anything left out is
+	// removed. Say so plainly, and give the asymmetry: a tag someone chose is
+	// worth more than the tidiness of dropping it.
+	if len(in.CurrentTags) > 0 {
+		sb.WriteString("This document is already tagged: ")
+		sb.WriteString(strings.Join(in.CurrentTags, ", "))
+		sb.WriteString(".\nReturn those tags again unless one is clearly wrong for this document, ")
+		sb.WriteString("and add any that are missing. Your list replaces the current one, so a tag ")
+		sb.WriteString("you leave out is deleted; dropping a tag someone chose is worse than keeping ")
+		sb.WriteString("one that is merely imprecise.\n")
+	}
 	fmt.Fprintf(&sb, "The original filename is %q; use it only if the text is uninformative.\n", in.Filename)
+
+	// A document already carrying the maximum would otherwise lose one to the
+	// cap however careful the model was, so the ceiling rises to fit.
+	limit := maxTags
+	if n := len(in.CurrentTags); n > limit {
+		limit = n
+	}
 
 	resp, err := e.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 		Model: e.model,
@@ -225,7 +249,7 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 			OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
 				JSONSchema: shared.ResponseFormatJSONSchemaJSONSchemaParam{
 					Name:   "document_metadata",
-					Schema: metaSchema(),
+					Schema: metaSchema(limit),
 					Strict: openai.Bool(true),
 				},
 			},
@@ -259,7 +283,7 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 	if err := json.Unmarshal([]byte(resp.Choices[0].Message.Content), &meta); err != nil {
 		return meta, used, fmt.Errorf("parsing model output: %w", err)
 	}
-	return cleanMeta(meta), used, nil
+	return cleanMeta(meta, limit), used, nil
 }
 
 func (e *OpenAIEnricher) resetHint(apiErr *openai.Error) time.Duration {
@@ -280,7 +304,7 @@ func (e *OpenAIEnricher) resetHint(apiErr *openai.Error) time.Duration {
 	return wait
 }
 
-func cleanMeta(m Meta) Meta {
+func cleanMeta(m Meta, maxTags int) Meta {
 	m.Title = strings.TrimSpace(m.Title)
 	m.Summary = strings.TrimSpace(m.Summary)
 	m.CreatedDate = normalizeMonth(m.CreatedDate)
@@ -437,6 +461,9 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	known, _ := q.app.search.Vocabulary(ctx, "tags", 50)
 	meta, used, err := q.app.enricher.Enrich(ctx, EnrichInput{
 		Filename: doc.OriginalName, Text: doc.Content, KnownTags: known,
+		// needs-review is ours, not a description of the document; offering it
+		// back would invite the model to keep it forever.
+		CurrentTags: withoutTag(doc.Tags, "needs-review"),
 	})
 	// Whatever the outcome, tokens the model actually billed belong to this
 	// document — a failed parse still cost money.
@@ -499,6 +526,19 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-time.After(d):
 		return true
 	}
+}
+
+// withoutTag copies the list minus one entry, leaving the caller's slice
+// alone — the document's own tags must not change just because we described
+// them to the model.
+func withoutTag(tags []string, drop string) []string {
+	out := make([]string, 0, len(tags))
+	for _, t := range tags {
+		if t != drop {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func appendTag(tags []string, t string) []string {
