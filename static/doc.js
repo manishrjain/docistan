@@ -426,6 +426,12 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
 
+    // A document ingested moments ago is already queued; watch it land rather
+    // than making the reader press a button to find out.
+    if (tagRow && (tagRow.classList.contains("pending") || tagRow.classList.contains("working"))) {
+      waitForTags();
+    }
+
     async function waitForTags() {
       const deadline = Date.now() + 120000;
       let dots = 0;
