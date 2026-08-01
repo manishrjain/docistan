@@ -415,6 +415,18 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "saved to disk, but indexing failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+
+	// Autosave posts in the background and stays on the page.
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"title":        doc.Title,
+			"tags":         doc.Tags,
+			"created_date": doc.CreatedDate,
+		})
+		return
+	}
 	http.Redirect(w, r, fmt.Sprintf("/doc/%d", id), http.StatusSeeOther)
 }
 
