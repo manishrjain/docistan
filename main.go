@@ -18,6 +18,7 @@ type Config struct {
 	Listen       string
 	TypesenseURL string
 	TypesenseKey string
+	Collection   string
 	Workers      int
 	LLMModel     string
 	LLMEnabled   bool
@@ -40,6 +41,7 @@ func main() {
 	flag.StringVar(&cfg.Listen, "listen", "127.0.0.1:8080", "listen address")
 	flag.StringVar(&cfg.TypesenseURL, "typesense-url", "http://localhost:8108", "Typesense URL")
 	flag.StringVar(&cfg.TypesenseKey, "typesense-key", envOr("TYPESENSE_API_KEY", "docistan-dev-key"), "Typesense API key")
+	flag.StringVar(&cfg.Collection, "collection", "documents", "Typesense collection name; give a second instance its own")
 	flag.IntVar(&cfg.Workers, "workers", 2, "ingest workers")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
@@ -56,7 +58,7 @@ func run(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("data dir: %w", err)
 	}
-	search := NewSearch(cfg.TypesenseURL, cfg.TypesenseKey)
+	search := NewSearch(cfg.TypesenseURL, cfg.TypesenseKey, cfg.Collection)
 	app := &App{cfg: cfg, store: store, search: search}
 	if cfg.LLMEnabled {
 		if key := os.Getenv("OPENAI_API_KEY"); key != "" {

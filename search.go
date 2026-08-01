@@ -14,22 +14,30 @@ import (
 	"github.com/typesense/typesense-go/v3/typesense/api/pointer"
 )
 
-const collectionName = "documents"
-
 // contentIndexLimit caps how much text is handed to Typesense. The sidecar
 // always keeps the full text; this only bounds the index.
 const contentIndexLimit = 400 << 10
 
 type Search struct {
 	client *typesense.Client
+	// collectionName is configurable because every boot drops and recreates
+	// the collection. Two instances sharing one Typesense would otherwise
+	// silently wipe each other's index on startup.
+	collectionName string
 }
 
-func NewSearch(url, key string) *Search {
-	return &Search{client: typesense.NewClient(
-		typesense.WithServer(url),
-		typesense.WithAPIKey(key),
-		typesense.WithConnectionTimeout(10*time.Second),
-	)}
+func NewSearch(url, key, collection string) *Search {
+	if collection == "" {
+		collection = "documents"
+	}
+	return &Search{
+		collectionName: collection,
+		client: typesense.NewClient(
+			typesense.WithServer(url),
+			typesense.WithAPIKey(key),
+			typesense.WithConnectionTimeout(10*time.Second),
+		),
+	}
 }
 
 func (s *Search) Health(ctx context.Context) error {
@@ -43,7 +51,7 @@ func (s *Search) Health(ctx context.Context) error {
 	return nil
 }
 
-func schema() *api.CollectionSchema {
+func (s *Search) schema() *api.CollectionSchema {
 	f := func(name, typ string, opts ...func(*api.Field)) api.Field {
 		fl := api.Field{Name: name, Type: typ}
 		for _, o := range opts {
@@ -56,7 +64,7 @@ func schema() *api.CollectionSchema {
 	stored := func(fl *api.Field) { fl.Index = pointer.False(); fl.Optional = pointer.True() }
 
 	return &api.CollectionSchema{
-		Name: collectionName,
+		Name: s.collectionName,
 		Fields: []api.Field{
 			f("title", "string"),
 			f("content", "string"),
@@ -83,14 +91,14 @@ func schema() *api.CollectionSchema {
 // index is rebuilt from sidecars on every boot, so starting clean guarantees
 // the live schema always matches this code and makes schema changes free.
 func (s *Search) EnsureFreshCollection(ctx context.Context) error {
-	if _, err := s.client.Collection(collectionName).Delete(ctx); err != nil {
+	if _, err := s.client.Collection(s.collectionName).Delete(ctx); err != nil {
 		// A missing collection is the normal case on a cold start.
 		var apiErr *typesense.HTTPError
 		if !errors.As(err, &apiErr) || apiErr.Status != 404 {
 			logf("dropping existing collection: %v", err)
 		}
 	}
-	_, err := s.client.Collections().Create(ctx, schema())
+	_, err := s.client.Collections().Create(ctx, s.schema())
 	return err
 }
 
@@ -127,12 +135,12 @@ func tsDoc(d *Doc) map[string]any {
 }
 
 func (s *Search) Upsert(ctx context.Context, d *Doc) error {
-	_, err := s.client.Collection(collectionName).Documents().Upsert(ctx, tsDoc(d), &api.DocumentIndexParameters{})
+	_, err := s.client.Collection(s.collectionName).Documents().Upsert(ctx, tsDoc(d), &api.DocumentIndexParameters{})
 	return err
 }
 
 func (s *Search) Delete(ctx context.Context, id int) error {
-	_, err := s.client.Collection(collectionName).Document(strconv.Itoa(id)).Delete(ctx)
+	_, err := s.client.Collection(s.collectionName).Document(strconv.Itoa(id)).Delete(ctx)
 	return err
 }
 
@@ -147,7 +155,7 @@ func (s *Search) Import(ctx context.Context, docs []*Doc) error {
 		batch = append(batch, tsDoc(d))
 	}
 	action := "upsert"
-	results, err := s.client.Collection(collectionName).Documents().Import(ctx, batch,
+	results, err := s.client.Collection(s.collectionName).Documents().Import(ctx, batch,
 		&api.ImportDocumentsParams{Action: (*api.IndexAction)(&action)})
 	if err != nil {
 		return err
@@ -256,7 +264,7 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 	}
 	params.SortBy = pointer.String(sortBy)
 
-	res, err := s.client.Collection(collectionName).Documents().Search(ctx, params)
+	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, params)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +323,7 @@ func snippetOf(h api.SearchResultHit) template.HTML {
 
 // Get fetches one document by id. This is a direct lookup, not a search.
 func (s *Search) Get(ctx context.Context, id int) (*Doc, error) {
-	raw, err := s.client.Collection(collectionName).Document(strconv.Itoa(id)).Retrieve(ctx)
+	raw, err := s.client.Collection(s.collectionName).Document(strconv.Itoa(id)).Retrieve(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +333,7 @@ func (s *Search) Get(ctx context.Context, id int) (*Doc, error) {
 // Vocabulary returns the most common values of a faceted field, used to keep
 // the heuristics and the LLM prompt anchored to terms already in use.
 func (s *Search) Vocabulary(ctx context.Context, field string, limit int) ([]string, error) {
-	res, err := s.client.Collection(collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
+	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
 		Q:              pointer.String("*"),
 		QueryBy:        pointer.String("title"),
 		FacetBy:        pointer.String(field),
@@ -410,7 +418,7 @@ func docFromMap(m map[string]any) *Doc {
 
 // FindByHash returns the id of an existing document with this content hash.
 func (s *Search) FindByHash(ctx context.Context, sha string) (int, bool, error) {
-	res, err := s.client.Collection(collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
+	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
 		Q:        pointer.String("*"),
 		FilterBy: pointer.String("sha256:=" + sha),
 		PerPage:  pointer.Int(1),
