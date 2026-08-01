@@ -1,109 +1,158 @@
 {{define "content"}}
 {{$d := .Doc}}
-<div class="doc-layout">
-  <aside class="doc-meta">
-    <h1 class="doc-title" data-edits="title" tabindex="0" title="Click to edit">{{$d.Title}}</h1>
-    <p class="doc-date">
-      <span data-edits="created_date" tabindex="0" title="Click to edit">{{if $d.CreatedDate}}{{monthLabel $d.CreatedDate}}{{else}}Add a date{{end}}</span>
-    </p>
-    <p class="sub">
-      <span class="id">#{{$d.ID}}</span>
-      <span>{{$d.OriginalName}}</span>
-      {{if $d.PageCount}}<span>{{$d.PageCount}} page{{if ne $d.PageCount 1}}s{{end}}</span>{{end}}
-      {{if $d.FileSize}}<span>{{humanSize $d.FileSize}}</span>{{end}}
-    </p>
+<div class="doc">
+  {{/* The document page carries its own header rather than the site one: the
+       whole width belongs to the document, and the way back is the only
+       navigation that matters here. */}}
+  <header class="doc-head">
+    <a class="btn btn-secondary" href="{{.BackLink}}">← All results</a>
+    <span class="code" data-copy="{{$d.ID}}" title="Click to copy the document number">#{{$d.ID}}</span>
+    <div class="doc-head-title">
+      <h1 class="doc-title" data-edits="title" tabindex="0" title="Click to edit">{{$d.Title}}</h1>
+    </div>
+    <div class="doc-head-actions">
+      <a class="btn btn-secondary" href="/doc/{{$d.ID}}/pdf" target="_blank" rel="noopener">Open ↗</a>
+      <a class="btn btn-secondary" href="/doc/{{$d.ID}}/original">Download</a>
+    </div>
+  </header>
 
-    {{if .Search}}
-      <p class="searching">
-        Jumped to <strong>{{.Search}}</strong> in the document ·
-        <a href="/doc/{{$d.ID}}">clear</a>
-      </p>
-    {{end}}
+  <div class="doc-body">
+    <section class="doc-preview">
+      {{/* PDF.js rather than the browser's own viewer, so the find bar is
+           consistent and always reachable. Scanned documents are searchable
+           here too, because ocrmypdf embeds a real text layer.
+           The hash is only appended when there is something to look for; an
+           empty #search= makes the viewer open its find bar for no reason. */}}
+      <iframe src="/static/pdfjs/web/viewer.html?file=/doc/{{$d.ID}}/pdf{{if .Search}}#search={{.Search}}&phrase=true&highlightall=true{{end}}"
+              title="{{$d.Title}}" allow="fullscreen"></iframe>
+    </section>
 
-    <p class="openlinks">
-      <a href="/doc/{{$d.ID}}/pdf" target="_blank" rel="noopener">Open in new tab ↗</a>
-      <a href="/doc/{{$d.ID}}/original">Download original</a>
-    </p>
+    <aside class="doc-side">
+      <div class="tools">
+        {{/* Each is a plain form, so every action still works without
+             JavaScript — with the browser's own confirm rather than the
+             inline panels below. */}}
+        <form method="post" action="/doc/{{$d.ID}}/retry" data-confirms="retry"
+              onsubmit="return confirm('Redo OCR and metadata for #{{$d.ID}}? This re-runs the model.')">
+          <button type="submit" class="tool" title="Reprocess — redo OCR, text and metadata">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
+          </button>
+        </form>
+        <form method="post" action="/doc/{{$d.ID}}/enrich">
+          <button type="submit" class="tool" title="Re-tag with AI">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg>
+          </button>
+        </form>
+        <form method="post" action="/doc/{{$d.ID}}/delete" data-confirms="delete"
+              onsubmit="return confirm('Delete document #{{$d.ID}}? The original file will be removed.')">
+          <button type="submit" class="tool danger" title="Delete document">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg>
+          </button>
+        </form>
+      </div>
 
-    {{if $d.Summary}}<p class="doc-summary">{{$d.Summary}}</p>{{end}}
+      {{/* Revealed by doc.js in place of the browser's confirm dialog. */}}
+      <div class="confirm" data-confirm="delete" hidden>
+        <h5>Delete this document?</h5>
+        <p>The original file, the archival copy and the extracted text are all removed. The number #{{$d.ID}} is never reissued.</p>
+        <div class="confirm-actions">
+          <button type="button" class="btn btn-primary" data-go>Delete</button>
+          <button type="button" class="btn btn-secondary" data-cancel>Cancel</button>
+        </div>
+      </div>
+      <div class="confirm" data-confirm="retry" hidden>
+        <h5>Reprocess this document?</h5>
+        <p>OCR, the thumbnail, the text and the metadata are all redone from the original. This re-runs the model.</p>
+        <div class="confirm-actions">
+          <button type="button" class="btn btn-primary" data-go>Reprocess</button>
+          <button type="button" class="btn btn-secondary" data-cancel>Cancel</button>
+        </div>
+      </div>
 
-    {{if ne $d.Status "ready"}}
-      <p class="banner {{$d.Status}}">
-        {{$d.Status}}{{if $d.FailedStage}} at {{$d.FailedStage}}{{end}}
-        {{if $d.Error}}<br><small>{{$d.Error}}</small>{{end}}
-      </p>
-    {{end}}
+      {{if ne $d.Status "ready"}}
+        <p class="banner {{$d.Status}}">
+          {{$d.Status}}{{if $d.FailedStage}} at {{$d.FailedStage}}{{end}}
+          {{if $d.Error}}<small>{{$d.Error}}</small>{{end}}
+        </p>
+      {{end}}
+      {{if $d.Signed}}
+        <p class="banner info">Digitally signed — the signature was preserved, so this document was not OCR'd.</p>
+      {{end}}
+      {{if .Search}}
+        <p class="searching">Jumped to <strong>{{.Search}}</strong> in the document · <a href="/doc/{{$d.ID}}">clear</a></p>
+      {{end}}
 
-    {{if $d.Signed}}
-      <p class="banner info">Digitally signed — the signature was preserved, so this document was not OCR'd.</p>
-    {{end}}
+      <form class="doc-form" method="post" action="/doc/{{$d.ID}}">
+        <h6>Date</h6>
+        <div class="doc-date-wrap">
+          <span class="doc-date{{if not $d.CreatedDate}} unset{{end}}" data-edits="created_date" tabindex="0" title="Click to change">
+            {{if $d.CreatedDate}}{{monthLabel $d.CreatedDate}}{{else}}Add a date{{end}}
+          </span>
+        </div>
 
-    <form method="post" action="/doc/{{$d.ID}}">
-      {{/* Hidden by doc.js, which edits these through the heading instead.
-           Without JavaScript they remain the way to change either field. */}}
-      <label class="plain-field">Title
-        <input type="text" name="title" value="{{$d.Title}}">
-      </label>
-      <label class="plain-field">Document month
-        <input type="month" name="created_date" value="{{$d.CreatedDate}}">
-      </label>
+        {{/* Hidden by doc.js, which edits these through the heading and the
+             date above instead. Without JavaScript they remain the way to
+             change either field. */}}
+        <label class="plain-field">Document month
+          <input type="month" name="created_date" value="{{$d.CreatedDate}}">
+        </label>
+        <label class="plain-field">Title
+          <input type="text" name="title" value="{{$d.Title}}">
+        </label>
 
-      <div class="field">
-        <span class="field-label">Tags</span>
+        <hr class="hr">
+        <h6>Tags</h6>
         <div class="tag-editor" data-known="{{joinTags .KnownTags}}">
           <input type="text" name="tags" id="tags-field" value="{{joinTags $d.Tags}}"
                  aria-label="Tags, comma separated">
         </div>
-      </div>
 
-      <button type="submit" class="primary">Save</button>{{/* removed by doc.js once autosave is active */}}
-    </form>
+        {{/* Removed by doc.js once autosave is active. */}}
+        <button type="submit" class="btn btn-primary" style="margin-top:12px">Save</button>
+      </form>
 
-    <section class="stages">
-      <h2>Processing</h2>
-      <ul>
+      <hr class="hr">
+      <h6>AI summary</h6>
+      {{if $d.Summary}}
+        <p class="doc-summary">{{$d.Summary}}</p>
+      {{else}}
+        <p class="doc-summary none">No summary yet — use Re-tag with AI.</p>
+      {{end}}
+
+      <hr class="hr">
+      <h6>Naturalization</h6>
+      <ul class="timeline">
         {{range .Stages}}
           <li class="{{.State}}" data-stage="{{.Key}}">
-            <span class="mark">{{.Symbol}}</span>
-            <span class="what">{{.Name}}</span>
-            {{if .Detail}}<span class="detail">{{.Detail}}</span>{{end}}
+            <span class="dot" aria-hidden="true"></span>
+            <span class="step">
+              <span class="what">{{.Name}}</span>
+              {{if .Detail}}<span class="detail">{{.Detail}}</span>{{end}}
+            </span>
           </li>
         {{end}}
       </ul>
-      <p class="quiet added">Added {{shortDate $d.AddedTS}}</p>
-    </section>
 
-    <details class="extracted"{{if not $d.Content}} data-empty="1"{{end}}>
-      <summary>Extracted text {{if $d.Content}}<span class="quiet">({{len $d.Content}} characters)</span>{{end}}</summary>
-      {{if $d.Content}}
-        <pre>{{$d.Content}}</pre>
-      {{else}}
-        <p class="quiet">No text was extracted from this document.</p>
-      {{end}}
-    </details>
+      <hr class="hr">
+      <div class="doc-foot">
+        <span>
+          {{if $d.PageCount}}{{$d.PageCount}} page{{if ne $d.PageCount 1}}s{{end}}{{end}}
+          {{if and $d.PageCount $d.FileSize}} · {{end}}
+          {{if $d.FileSize}}{{humanSize $d.FileSize}}{{end}}
+        </span>
+        <span>Added {{shortDate $d.AddedTS}}</span>
+      </div>
 
-    <div class="actions">
-      <form method="post" action="/doc/{{$d.ID}}/enrich"><button type="submit">Re-tag with AI</button></form>
-      <form method="post" action="/doc/{{$d.ID}}/retry"
-            onsubmit="return confirm('Redo OCR and metadata for #{{$d.ID}}? This re-runs the model.')">
-        <button type="submit">Reprocess</button>
-      </form>
-      <form method="post" action="/doc/{{$d.ID}}/delete"
-            onsubmit="return confirm('Delete document #{{$d.ID}}? The original file will be removed.')">
-        <button type="submit" class="danger">Delete</button>
-      </form>
-    </div>
-  </aside>
-
-  <section class="preview">
-    {{/* PDF.js rather than the browser's own viewer, so the find bar is
-         consistent and always reachable. Scanned documents are searchable
-         here too, because ocrmypdf embeds a real text layer. */}}
-    {{/* Only append the hash when there is something to look for; an empty
-         #search= makes the viewer open its find bar for no reason. */}}
-    <iframe src="/static/pdfjs/web/viewer.html?file=/doc/{{$d.ID}}/pdf{{if .Search}}#search={{.Search}}&phrase=true&highlightall=true{{end}}"
-            title="{{$d.Title}}" allow="fullscreen"></iframe>
-  </section>
+      <details class="extracted"{{if not $d.Content}} data-empty="1"{{end}}>
+        <summary>Extracted text {{if $d.Content}}({{len $d.Content}} characters){{end}}</summary>
+        {{if $d.Content}}
+          <pre>{{$d.Content}}</pre>
+        {{else}}
+          <p class="quiet">No text was extracted from this document.</p>
+        {{end}}
+      </details>
+    </aside>
+  </div>
 </div>
 {{end}}
 

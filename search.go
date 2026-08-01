@@ -180,10 +180,44 @@ func (s *Search) Import(ctx context.Context, docs []*Doc) error {
 // Query is a parsed search request from the URL.
 type Query struct {
 	Q      string
-	Tag    string
+	Tags   []string // every tag must match, so picking more narrows
 	Status string
 	Sort   string
-	Page   int
+	// Range selects a document-date window: "", "month", "quarter", "year" or
+	// "custom". Empty means all time, which is the right default for an
+	// archive — a date filter that hides most of the corpus should be asked
+	// for, not assumed.
+	Range string
+	From  string // YYYY-MM, custom range only
+	To    string // YYYY-MM, custom range only
+	Page  int
+}
+
+// Bounds turns the selected range into inclusive created_ts limits. Zero means
+// unbounded on that side. Document dates are month-precision timestamps, so a
+// bound at the start of the To month covers the whole of it.
+func (q Query) Bounds(now time.Time) (lo, hi int64) {
+	month := func(t time.Time) int64 {
+		return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC).Unix()
+	}
+	switch q.Range {
+	case "month":
+		return month(now.AddDate(0, -1, 0)), 0
+	case "quarter":
+		return month(now.AddDate(0, -3, 0)), 0
+	case "year":
+		return month(now.AddDate(-1, 0, 0)), 0
+	case "custom":
+		return parseDateTS(q.From), parseDateTS(q.To)
+	}
+	return 0, 0
+}
+
+// HasDateFilter reports whether the range actually constrains anything, which
+// is what the UI uses to decide if "Clear" is worth offering.
+func (q Query) HasDateFilter() bool {
+	lo, hi := q.Bounds(time.Now())
+	return lo > 0 || hi > 0
 }
 
 // Result is everything a results page needs, already shaped for templates.
@@ -240,8 +274,24 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 			filters = append(filters, fmt.Sprintf(`%s:="%s"`, field, escapeFilterValue(value)))
 		}
 	}
-	add("tags", q.Tag)
+	// Chained rather than combined into one list filter, because chaining is
+	// what gives AND: each selected tag narrows further.
+	for _, t := range q.Tags {
+		add("tags", t)
+	}
 	add("status", q.Status)
+
+	// A document with no date has created_ts 0, so any lower bound excludes
+	// undated documents. That is the honest reading of "documents from the
+	// last year" — but it is why all-time stays the default.
+	if lo, hi := q.Bounds(time.Now()); lo > 0 || hi > 0 {
+		if lo > 0 {
+			filters = append(filters, fmt.Sprintf("created_ts:>=%d", lo))
+		}
+		if hi > 0 {
+			filters = append(filters, fmt.Sprintf("created_ts:<=%d", hi))
+		}
+	}
 
 	sortBy := "_text_match:desc,added_ts:desc"
 	switch {
@@ -258,7 +308,7 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 		QueryBy:                 pointer.String("title,summary,content,tags,original_name"),
 		QueryByWeights:          pointer.String("10,6,4,8,2"),
 		FacetBy:                 pointer.String("tags,status"),
-		MaxFacetValues:          pointer.Int(30),
+		MaxFacetValues:          pointer.Int(200),
 		HighlightFields:         pointer.String("title,summary,content"),
 		HighlightStartTag:       pointer.String(hlStart),
 		HighlightEndTag:         pointer.String(hlEnd),
@@ -349,6 +399,24 @@ func clip(s string, n int) string {
 		return s
 	}
 	return strings.TrimSpace(string(r[:n])) + "…"
+}
+
+// Count returns how many documents are indexed, for the search placeholder.
+// Asking Typesense for zero results makes this a metadata lookup rather than
+// a fetch, so it costs almost nothing on every index render.
+func (s *Search) Count(ctx context.Context) (int, error) {
+	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
+		Q:       pointer.String("*"),
+		QueryBy: pointer.String("title"),
+		PerPage: pointer.Int(0),
+	})
+	if err != nil {
+		return 0, err
+	}
+	if res.Found == nil {
+		return 0, nil
+	}
+	return *res.Found, nil
 }
 
 // Get fetches one document by id. This is a direct lookup, not a search.

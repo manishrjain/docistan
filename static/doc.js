@@ -5,12 +5,12 @@
 // Save.
 
 document.addEventListener("DOMContentLoaded", () => {
-  const form = document.querySelector(".doc-meta form");
+  const form = document.querySelector(".doc-form");
   if (!form) return;
 
   const editor = form.querySelector(".tag-editor");
   const field = document.getElementById("tags-field");
-  const heading = document.querySelector(".doc-meta h1");
+  const heading = document.querySelector(".doc-title");
 
   // --- feedback ----------------------------------------------------------
   // Edits report themselves as toasts, which are hard to miss. Model progress
@@ -24,18 +24,18 @@ document.addEventListener("DOMContentLoaded", () => {
       : null;
   }
 
-  const tagRow = document.querySelector('.stages li[data-stage="tagging"]');
+  // The timeline row carries its state in the class; the dot's colour and
+  // pulse come from CSS, so there is no symbol to keep in step here.
+  const tagRow = document.querySelector('.timeline li[data-stage="tagging"]');
   function setTagStage(state, name, detail) {
     if (!tagRow) return;
     tagRow.className = state;
-    tagRow.querySelector(".mark").textContent =
-      { done: "✓", pending: "◷", failed: "✗", working: "◷" }[state] || "–";
     tagRow.querySelector(".what").textContent = name;
     let el = tagRow.querySelector(".detail");
     if (!el) {
       el = document.createElement("span");
       el.className = "detail";
-      tagRow.append(el);
+      tagRow.querySelector(".step").append(el);
     }
     el.textContent = detail || "";
   }
@@ -159,6 +159,8 @@ document.addEventListener("DOMContentLoaded", () => {
           save(input.name);
         }
         display.textContent = format(input.value);
+        // The date reads as a placeholder rather than a value when unset.
+        display.classList.toggle("unset", !input.value);
         box.remove();
         display.hidden = false;
       };
@@ -206,13 +208,22 @@ document.addEventListener("DOMContentLoaded", () => {
   const pills = document.createElement("div");
   pills.className = "pills";
 
+  // The search box stays out of the way until asked for: a row of tags is
+  // something to read, and an always-open text field makes it look like a
+  // form that is waiting on you.
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "tag-add";
+  addBtn.textContent = "+ Add tag";
+
   const box = document.createElement("div");
   box.className = "tag-input-row";
+  box.hidden = true;
 
   const input = document.createElement("input");
   input.type = "text";
   input.className = "tag-input";
-  input.placeholder = "Add a tag…";
+  input.placeholder = "Search tags…";
   input.autocomplete = "off";
   input.setAttribute("aria-label", "Add a tag");
 
@@ -222,6 +233,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
   box.append(input, menu);
   editor.append(pills, box);
+
+  function openAdder() {
+    box.hidden = false;
+    input.focus();
+  }
+  function closeAdder() {
+    box.hidden = true;
+    menu.hidden = true;
+    input.value = "";
+  }
+  addBtn.addEventListener("click", () => (box.hidden ? openAdder() : closeAdder()));
 
   function parse(value) {
     const seen = new Set();
@@ -265,6 +287,8 @@ document.addEventListener("DOMContentLoaded", () => {
       pill.append(label, remove);
       pills.append(pill);
     }
+    // The adder trails the pills, so it reads as the next one in the row.
+    pills.append(addBtn);
   }
 
   function add(raw) {
@@ -317,7 +341,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
   input.addEventListener("input", showMenu);
   input.addEventListener("blur", () => {
-    setTimeout(() => (menu.hidden = true), 120);
+    // Deferred, so a click landing on a suggestion is not cut off by the
+    // field closing under it.
+    setTimeout(() => {
+      if (document.activeElement !== input) closeAdder();
+    }, 120);
     // A tag left half-typed should count rather than vanish.
     if (input.value.trim()) {
       add(input.value);
@@ -354,7 +382,11 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         break;
       case "Escape":
-        menu.hidden = true;
+        if (menu.hidden) {
+          closeAdder();
+        } else {
+          menu.hidden = true;
+        }
         break;
       case "Backspace":
         if (!input.value && tags.length) {
@@ -383,6 +415,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (d) d.value = data.created_date;
       if (dateDisplay && !dateDisplay.dataset.editing) {
         dateDisplay.textContent = monthLabel(data.created_date);
+        dateDisplay.classList.toggle("unset", !data.created_date);
       }
     }
   };
@@ -466,5 +499,50 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       setTagStage("pending", "Still queued", "the tags will appear once it runs");
     }
+  }
+
+  // --- document number ---------------------------------------------------
+  // The number is what gets written on the paper original, so copying it
+  // should not mean selecting six pixels of monospace by hand.
+  const codeChip = document.querySelector(".doc-head .code[data-copy]");
+  if (codeChip && navigator.clipboard) {
+    const original = codeChip.textContent;
+    codeChip.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(codeChip.dataset.copy);
+        codeChip.textContent = "Copied ✓";
+        setTimeout(() => (codeChip.textContent = original), 1400);
+      } catch {
+        // Clipboard access can be refused; the number is still on screen.
+      }
+    });
+  }
+
+  // --- inline confirmations ----------------------------------------------
+  // The markup ships with the browser's own confirm() on the form, which is
+  // what protects the no-JavaScript path. Here it is replaced by the panel,
+  // which has room to say what actually happens.
+  for (const target of document.querySelectorAll("form[data-confirms]")) {
+    const panel = document.querySelector(
+      `.confirm[data-confirm="${target.dataset.confirms}"]`,
+    );
+    if (!panel) continue;
+
+    target.removeAttribute("onsubmit");
+    target.addEventListener("submit", (e) => {
+      e.preventDefault();
+      for (const other of document.querySelectorAll(".confirm")) other.hidden = true;
+      panel.hidden = false;
+      panel.querySelector("[data-go]")?.focus();
+    });
+    panel.querySelector("[data-cancel]")?.addEventListener("click", () => {
+      panel.hidden = true;
+    });
+    // submit() rather than requestSubmit(), so this does not come straight
+    // back through the handler above.
+    panel.querySelector("[data-go]")?.addEventListener("click", () => {
+      panel.hidden = true;
+      target.submit();
+    });
   }
 });

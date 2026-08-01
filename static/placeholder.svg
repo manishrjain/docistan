@@ -1,6 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="88" height="114" viewBox="0 0 88 114">
-  <rect width="88" height="114" fill="#403e41"/>
-  <g fill="none" stroke="#727072" stroke-width="2">
-    <path d="M22 28h44M22 42h44M22 56h30"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" width="112" height="148" viewBox="0 0 112 148">
+  <!-- Stands in for a thumbnail that was never produced. The diagonal hatch is
+       the one the design uses for an empty document slot, so a missing
+       thumbnail reads as "nothing rendered" rather than as a broken image. -->
+  <defs>
+    <pattern id="hatch" width="12" height="12" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+      <rect width="12" height="12" fill="#f8f4f4"/>
+      <rect width="6" height="12" fill="#eae7e7"/>
+    </pattern>
+  </defs>
+  <rect width="112" height="148" fill="url(#hatch)"/>
+  <text x="56" y="79" text-anchor="middle" font-family="ui-monospace, Menlo, monospace"
+        font-size="9" letter-spacing="1" fill="#7d7979">NO PREVIEW</text>
 </svg>

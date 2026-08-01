@@ -1,6 +1,8 @@
 {{define "content"}}
-<section class="narrow">
-  <h1>Upload documents</h1>
+{{template "topbar" .}}
+<main>
+<div class="page" style="max-width:720px">
+  <h2>Upload documents</h2>
 
   {{range .Flash}}
     <p class="flash{{if .Bad}} bad{{end}}">
@@ -9,17 +11,18 @@
   {{end}}
 
   <form method="post" action="/upload" enctype="multipart/form-data" id="upload-form">
-    <div class="dropzone">
-      <p>Drop files anywhere in the app, or choose them here.</p>
+    <div class="uploader">
+      <p class="micro">Drop files anywhere in the app, or choose them here</p>
       <input type="file" name="files" id="file-input" multiple
              accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,.webp,.txt,.md">
+      <button type="submit" class="btn btn-primary">Upload</button>
     </div>
-    <button type="submit" class="primary">Upload</button>
   </form>
 
-  <p class="hint">
+  <p class="quiet" style="margin-top:16px">
     PDFs, images (jpg, png, tiff, webp) and plain text. Files are also picked up
     automatically if you copy them into the consume folder.
   </p>
-</section>
+</div>
+</main>
 {{end}}

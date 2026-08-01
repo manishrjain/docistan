@@ -1,83 +1,97 @@
 {{define "content"}}
-<section class="narrow">
-  <h1>Status</h1>
-
-  <h2>In progress</h2>
-  {{if .Jobs}}
-    <table>
-      <thead><tr><th>Document</th><th>Stage</th><th>Started</th></tr></thead>
-      <tbody>
-        {{range .Jobs}}
-          <tr>
-            <td>{{if .ID}}<a href="/doc/{{.ID}}">#{{.ID}}</a> {{end}}{{.Name}}</td>
-            <td><code>{{.Stage}}</code></td>
-            <td>{{.Started.Format "15:04:05"}}</td>
-          </tr>
-        {{end}}
-      </tbody>
-    </table>
-  {{else}}
-    <p class="quiet">Nothing being processed.</p>
-  {{end}}
-
-  <h2>Failed</h2>
-  {{if .Failed}}
-    <table>
-      <thead><tr><th>Document</th><th>Stage</th><th>Error</th><th></th></tr></thead>
-      <tbody>
-        {{range .Failed}}
-          {{$d := .Doc}}
-          <tr>
-            <td><a href="/doc/{{$d.ID}}">#{{$d.ID}}</a> {{$d.OriginalName}}</td>
-            <td><code>{{$d.FailedStage}}</code></td>
-            <td class="err">{{$d.Error}}</td>
-            <td><form method="post" action="/doc/{{$d.ID}}/retry"><button type="submit">Retry</button></form></td>
-          </tr>
-        {{end}}
-      </tbody>
-    </table>
-  {{else}}
-    <p class="quiet">No failures.</p>
-  {{end}}
+{{template "topbar" .}}
+<main>
+<div class="page">
+  <h2>Status</h2>
 
   {{with .Spend}}
-    <h2>Tagging</h2>
-    {{if .Stopped}}
-      <p class="flash bad">Enrichment stopped: {{.Stopped}}</p>
-    {{end}}
-    <p>
-      {{if .Pending}}<strong>{{.Pending}}</strong> waiting{{else}}Nothing waiting{{end}}
-      · {{.Done}} tagged this session
-      {{if .Failed}}· {{.Failed}} failed{{end}}
-      {{if ge .Budget 0}}
-        · <span class="quiet">{{.Budget}} request{{if ne .Budget 1}}s{{end}} left in budget{{if .ResetIn}}, resets in {{.ResetIn}}{{end}}</span>
+    <section>
+      <h6>Tagging</h6>
+      {{if .Stopped}}<p class="flash bad">Enrichment stopped: {{.Stopped}}</p>{{end}}
+      <div class="stats">
+        <div class="stat"><span class="k">Waiting</span><span class="v">{{.Pending}}</span></div>
+        <div class="stat"><span class="k">Tagged this session</span><span class="v">{{.Done}}</span></div>
+        <div class="stat"><span class="k">Failed</span><span class="v">{{.Failed}}</span></div>
+        {{if ge .Budget 0}}
+          <div class="stat">
+            <span class="k">Requests left{{if .ResetIn}} · resets in {{.ResetIn}}{{end}}</span>
+            <span class="v">{{.Budget}}</span>
+          </div>
+        {{end}}
+        {{if .Calls}}
+          <div class="stat">
+            <span class="k">Spent · {{printf "$%.5f" .PerDoc}} per document</span>
+            <span class="v">{{printf "$%.4f" .USD}}</span>
+          </div>
+        {{end}}
+      </div>
+      {{if .Calls}}
+        <p class="quiet" style="margin-top:8px">{{commaNum .In}} input + {{commaNum .Out}} output tokens over {{.Calls}} call{{if ne .Calls 1}}s{{end}}.</p>
       {{end}}
-    </p>
-    {{if .Calls}}
-      <p class="quiet">
-        {{.In}} input + {{.Out}} output tokens ·
-        <strong>${{printf "%.4f" .USD}}</strong>
-        ({{printf "$%.5f" .PerDoc}} per document)
-      </p>
-    {{end}}
+    </section>
   {{end}}
 
-  <h2>Duplicates rejected</h2>
-  {{if .Dupes}}
-    <table>
-      <thead><tr><th>File</th><th>Already stored as</th></tr></thead>
-      <tbody>
-        {{range .Dupes}}
-          <tr>
-            <td>{{.Name}}</td>
-            <td><a href="/doc/{{.DupOf}}">#{{.DupOf}}</a></td>
-          </tr>
-        {{end}}
-      </tbody>
-    </table>
-    <p class="hint">The rejected files are kept in the duplicates folder — nothing is deleted.</p>
-  {{else}}
-    <p class="quiet">None this session.</p>
-  {{end}}
-</section>
+  <section>
+    <h6>In progress</h6>
+    {{if .Jobs}}
+      <table class="table">
+        <thead><tr><th>Document</th><th>Stage</th><th>Started</th></tr></thead>
+        <tbody>
+          {{range .Jobs}}
+            <tr>
+              <td>{{if .ID}}<a href="/doc/{{.ID}}">#{{.ID}}</a> {{end}}{{.Name}}</td>
+              <td>{{.Stage}}</td>
+              <td>{{.Started.Format "15:04:05"}}</td>
+            </tr>
+          {{end}}
+        </tbody>
+      </table>
+    {{else}}
+      <p class="quiet">Nothing being processed.</p>
+    {{end}}
+  </section>
+
+  <section>
+    <h6>Failed</h6>
+    {{if .Failed}}
+      <table class="table">
+        <thead><tr><th>Document</th><th>Stage</th><th>Error</th><th></th></tr></thead>
+        <tbody>
+          {{range .Failed}}
+            {{$d := .Doc}}
+            <tr>
+              <td><a href="/doc/{{$d.ID}}">#{{$d.ID}}</a> {{$d.OriginalName}}</td>
+              <td>{{$d.FailedStage}}</td>
+              <td>{{$d.Error}}</td>
+              <td><form method="post" action="/doc/{{$d.ID}}/retry"><button type="submit" class="btn btn-secondary btn-sm">Retry</button></form></td>
+            </tr>
+          {{end}}
+        </tbody>
+      </table>
+    {{else}}
+      <p class="quiet">No failures.</p>
+    {{end}}
+  </section>
+
+  <section>
+    <h6>Duplicates rejected</h6>
+    {{if .Dupes}}
+      <table class="table">
+        <thead><tr><th>File</th><th>Already stored as</th></tr></thead>
+        <tbody>
+          {{range .Dupes}}
+            <tr>
+              <td>{{.Name}}</td>
+              <td><a href="/doc/{{.DupOf}}">#{{.DupOf}}</a></td>
+            </tr>
+          {{end}}
+        </tbody>
+      </table>
+      <p class="quiet" style="margin-top:8px">The rejected files are kept in the duplicates folder — nothing is deleted.</p>
+    {{else}}
+      <p class="quiet">None this session.</p>
+    {{end}}
+  </section>
+</div>
+</main>
 {{end}}

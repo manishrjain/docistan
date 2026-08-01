@@ -66,20 +66,86 @@ func templateFuncs() template.FuncMap {
 			}
 			return t.Format("Jan 2006")
 		},
-		// Go's built-in "slice" slices an existing value; it cannot build a
-		// literal list, which is what the templates actually want.
-		"list": func(items ...string) []string { return items },
-		"add":  func(a, b int) int { return a + b },
-		"facetLabel": func(field string) string {
-			switch field {
-			case "tags":
-				return "Tags"
-			case "status":
-				return "Status"
+		"add": func(a, b int) int { return a + b },
+		// Counts in the chrome read as quantities, not identifiers, so they
+		// get separators. Document ids deliberately do not.
+		"commaNum":     commaNum,
+		"monthOptions": monthOptions,
+		"yearOptions":  yearOptions,
+		"ymYear": func(s string) string {
+			if len(s) >= 4 {
+				return s[:4]
 			}
-			return field
+			return ""
+		},
+		"ymMonth": func(s string) string {
+			if len(s) >= 7 {
+				return s[5:7]
+			}
+			return ""
 		},
 	}
+}
+
+// Option is one entry of a <select>, kept so the date-range selects can be
+// built in the template without string surgery there.
+type Option struct{ Value, Label string }
+
+func monthOptions() []Option {
+	out := make([]Option, 0, 12)
+	for m := 1; m <= 12; m++ {
+		t := time.Date(2000, time.Month(m), 1, 0, 0, 0, 0, time.UTC)
+		out = append(out, Option{Value: fmt.Sprintf("%02d", m), Label: t.Format("January")})
+	}
+	return out
+}
+
+// yearOptions offers a fixed window back from this year. Deriving it from the
+// oldest document would cost a query on every page render for a list nobody
+// scrolls to the end of.
+func yearOptions() []string {
+	const span = 15
+	now := time.Now().Year()
+	out := make([]string, 0, span+1)
+	for y := now; y >= now-span; y-- {
+		out = append(out, strconv.Itoa(y))
+	}
+	return out
+}
+
+// joinYM composes the YYYY-MM a date filter works in from the two selects the
+// form actually posts. Either half missing means no bound.
+func joinYM(year, month string) string {
+	if len(year) != 4 || len(month) != 2 {
+		return ""
+	}
+	return normalizeMonth(year + "-" + month)
+}
+
+// commaNum takes any so templates can pass either an int count or an int64
+// token total without a conversion helper at every call site.
+func commaNum(v any) string {
+	var n int64
+	switch t := v.(type) {
+	case int:
+		n = int64(t)
+	case int64:
+		n = t
+	default:
+		return fmt.Sprint(v)
+	}
+	if n < 0 {
+		return "-" + commaNum(-n)
+	}
+	s := strconv.FormatInt(n, 10)
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func humanSize(n int64) string {
@@ -125,18 +191,6 @@ type Stage struct {
 	Name   string
 	State  string // done | pending | skipped | failed
 	Detail string
-}
-
-func (s Stage) Symbol() string {
-	switch s.State {
-	case "done":
-		return "✓"
-	case "pending":
-		return "◷"
-	case "failed":
-		return "✗"
-	}
-	return "–"
 }
 
 // stagesFor reconstructs what happened to a document from what is on disk and
@@ -252,6 +306,7 @@ type page struct {
 	Title     string
 	Query     Query
 	Result    *Result
+	Total     int // documents in the index, for the search placeholder
 	Doc       *Doc
 	Stages    []Stage
 	KnownTags []string
@@ -294,64 +349,186 @@ func (a *App) render(w http.ResponseWriter, name string, data page) {
 	}
 }
 
-// WithParam rebuilds the current URL with one parameter replaced, which is how
-// facet links and pagination preserve everything else the user selected.
-func (p page) WithParam(key, value string) string {
+// urlWith rebuilds the current index URL with the query string edited in
+// place, which is how every filter link preserves what else was selected.
+func (p page) urlWith(mutate func(url.Values)) string {
 	q := url.Values{}
 	if p.URL != nil {
 		q = p.URL.Query()
 	}
-	if value == "" {
-		q.Del(key)
-	} else {
-		q.Set(key, value)
-	}
-	if key != "page" {
-		q.Del("page")
-	}
+	mutate(q)
 	if len(q) == 0 {
 		return "/"
 	}
 	return "/?" + q.Encode()
 }
 
-// Active reports whether a facet value is the one currently filtered on.
-func (p page) Active(field, value string) bool {
-	switch field {
-	case "tags":
-		return p.Query.Tag == value
-	case "status":
-		return p.Query.Status == value
-	}
-	return false
+// WithParam replaces one parameter. Any change other than paging returns to
+// page one, since the old page number rarely means anything afterwards.
+func (p page) WithParam(key, value string) string {
+	return p.urlWith(func(q url.Values) {
+		if value == "" {
+			q.Del(key)
+		} else {
+			q.Set(key, value)
+		}
+		if key != "page" {
+			q.Del("page")
+		}
+	})
 }
 
-func (p page) ParamFor(field string) string {
-	if field == "tags" {
-		return "tag"
+// ToggleTag adds or removes one tag from the filter. Tags accumulate rather
+// than replace, so each click narrows further.
+func (p page) ToggleTag(tag string) string {
+	return p.urlWith(func(q url.Values) {
+		var next []string
+		found := false
+		for _, t := range q["tag"] {
+			if t == tag {
+				found = true
+				continue
+			}
+			next = append(next, t)
+		}
+		if !found {
+			next = append(next, tag)
+		}
+		if len(next) == 0 {
+			q.Del("tag")
+		} else {
+			q["tag"] = next
+		}
+		q.Del("page")
+	})
+}
+
+func (p page) TagOn(tag string) bool { return hasTag(p.Query.Tags, tag) }
+
+// BackLink returns to the search that led here, so "All results" means the
+// results you actually came from rather than an unfiltered list.
+func (p page) BackLink() string {
+	if p.Search == "" {
+		return "/"
 	}
-	return field
+	return "/?" + url.Values{"q": {p.Search}}.Encode()
+}
+
+func (p page) WithRange(r string) string { return p.WithParam("range", r) }
+
+func (p page) RangeOn(r string) bool {
+	if r == "" {
+		// All time is the default, so an unrecognised or absent value reads as
+		// all time rather than leaving no segment selected.
+		return !p.Query.HasDateFilter()
+	}
+	return p.Query.Range == r
+}
+
+func (p page) HasFilters() bool {
+	return len(p.Query.Tags) > 0 || p.Query.Status != "" || p.Query.HasDateFilter()
+}
+
+// ClearFilters keeps the search term — clearing filters and clearing the
+// query are separate actions, and the header has its own Clear for the query.
+func (p page) ClearFilters() string {
+	return p.urlWith(func(q url.Values) {
+		for _, k := range []string{"tag", "status", "range", "from_y", "from_m", "to_y", "to_m", "page"} {
+			q.Del(k)
+		}
+	})
+}
+
+// topTagCount is how many tag pills sit in the filter bar before the rest
+// move behind the browser.
+const topTagCount = 6
+
+// TagFacets is the full tag vocabulary of the current result set, ordered by
+// how many documents carry each. Filtering narrows it, which is deliberate:
+// every tag offered leads somewhere.
+func (p page) TagFacets() []FacetValue {
+	if p.Result == nil {
+		return nil
+	}
+	return p.Result.Facets["tags"]
+}
+
+// TopTags is what the filter bar shows without opening the browser: the most
+// common tags, plus any selected tag that would otherwise be hidden inside it.
+func (p page) TopTags() []FacetValue {
+	all := p.TagFacets()
+	top := all
+	if len(top) > topTagCount {
+		top = top[:topTagCount]
+	}
+	out := append([]FacetValue(nil), top...)
+	for _, t := range p.Query.Tags {
+		shown := false
+		for _, f := range out {
+			if f.Value == t {
+				shown = true
+				break
+			}
+		}
+		if !shown {
+			out = append(out, FacetValue{Value: t})
+		}
+	}
+	return out
+}
+
+// MoreTags counts what the browser adds beyond the pills already on screen.
+func (p page) MoreTags() int {
+	n := len(p.TagFacets()) - topTagCount
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
 	q := Query{
 		Q:      v.Get("q"),
-		Tag:    v.Get("tag"),
+		Tags:   v["tag"],
 		Status: v.Get("status"),
 		Sort:   v.Get("sort"),
+		Range:  v.Get("range"),
+		From:   joinYM(v.Get("from_y"), v.Get("from_m")),
+		To:     joinYM(v.Get("to_y"), v.Get("to_m")),
 	}
 	q.Page, _ = strconv.Atoi(v.Get("page"))
+
+	// Picking "Custom" for the first time should open on a usable window
+	// rather than on two empty selects that filter nothing.
+	if q.Range == "custom" {
+		now := time.Now()
+		if q.From == "" {
+			q.From = now.AddDate(-1, 0, 0).Format("2006-01")
+		}
+		if q.To == "" {
+			q.To = now.Format("2006-01")
+		}
+	}
 
 	res, err := a.search.Query(r.Context(), q)
 	if err != nil {
 		http.Error(w, "search unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	// The placeholder says how many documents are searchable, which is only
+	// the same as the result count when nothing is filtered.
+	total := res.Found
+	if q.Q != "" || len(q.Tags) > 0 || q.Status != "" || q.HasDateFilter() {
+		if n, err := a.search.Count(r.Context()); err == nil {
+			total = n
+		}
+	}
 	a.render(w, "index.html", page{
 		Title:  "Documents",
 		Query:  q,
 		Result: res,
+		Total:  total,
 		URL:    r.URL,
 	})
 }

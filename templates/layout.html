@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#221f22">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#f3f2f2">
 <title>{{if .Title}}{{.Title}} · {{end}}docistan</title>
-<link rel="preload" href="/static/fonts/rubik-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/toast.js" defer></script>
 <script src="/static/drop.js" defer></script>
@@ -14,19 +14,29 @@
 {{block "head" .}}{{end}}
 </head>
 <body>
+{{block "content" .}}{{end}}
+</body>
+</html>{{end}}
+
+{{/* The site header. The document page deliberately does not use it — there
+     the whole width belongs to the document, and its own header carries the
+     way back. */}}
+{{define "topbar"}}
 <header class="topbar">
-  <a class="brand" href="/">docistan</a>
-  <form class="searchbox" action="/" method="get">
-    <input type="search" name="q" value="{{.Query.Q}}" placeholder="Search documents…" autocomplete="off">
+  <a class="brand" href="/">Docistan</a>
+  <form class="searchbox" action="/" method="get" role="search">
+    <span class="glyph" aria-hidden="true">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    </span>
+    <input type="search" name="q" value="{{.Query.Q}}" autocomplete="off"
+           aria-label="Search documents"
+           placeholder="{{if .Total}}Search {{commaNum .Total}} document{{if ne .Total 1}}s{{end}}{{else}}Search documents…{{end}}">
+    {{if .Query.Q}}<a class="clear" href="{{.WithParam "q" ""}}">CLEAR</a>{{end}}
     <button type="submit">Search</button>
   </form>
   <nav>
-    <a href="/upload">Upload</a>
-    <a href="/status">Status</a>
+    <a class="btn btn-secondary" href="/upload">Upload</a>
+    <a class="btn btn-secondary" href="/status">Status</a>
   </nav>
 </header>
-<main>
-{{block "content" .}}{{end}}
-</main>
-</body>
-</html>{{end}}
+{{end}}

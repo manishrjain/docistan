@@ -1,98 +1,167 @@
 {{define "content"}}
 {{$page := .}}
-<div class="layout">
-  <aside class="facets">
-    {{if or .Query.Tag .Query.Status}}
-      <div class="active-filters">
-        <h3>Filters</h3>
-        {{if .Query.Tag}}<a class="chip remove" href="{{$page.WithParam "tag" ""}}">{{.Query.Tag}} ×</a>{{end}}
-        {{if .Query.Status}}<a class="chip remove" href="{{$page.WithParam "status" ""}}">status: {{.Query.Status}} ×</a>{{end}}
-      </div>
-    {{end}}
-
-    {{range $field := list "tags" "status"}}
-      {{$values := index $page.Result.Facets $field}}
-      {{if $values}}
-        <section class="facet">
-          <h3>{{facetLabel $field}}</h3>
-          <ul>
-            {{range $v := $values}}
-              {{$param := $page.ParamFor $field}}
-              <li>
-                {{if $page.Active $field $v.Value}}
-                  <a class="on" href="{{$page.WithParam $param ""}}">{{$v.Value}} <span class="count">{{$v.Count}}</span></a>
-                {{else}}
-                  <a href="{{$page.WithParam $param $v.Value}}">{{$v.Value}} <span class="count">{{$v.Count}}</span></a>
-                {{end}}
-              </li>
-            {{end}}
-          </ul>
-        </section>
+{{template "topbar" .}}
+<main>
+  <div class="filters">
+    <div class="filter-tags">
+      <span class="micro">Tags</span>
+      {{range $page.TopTags}}
+        <a class="pill-tag{{if $page.TagOn .Value}} on{{end}}" href="{{$page.ToggleTag .Value}}"
+          >{{.Value}}{{if .Count}}<span class="n">{{.Count}}</span>{{end}}</a>
       {{end}}
-    {{end}}
-  </aside>
 
-  <section class="results">
-    <div class="results-head">
-      <p class="count">{{.Result.Found}} document{{if ne .Result.Found 1}}s{{end}}</p>
-      <p class="sort">
-        Sort:
-        <a href="{{$page.WithParam "sort" ""}}"{{if eq .Query.Sort ""}} class="on"{{end}}>relevance</a>
-        <a href="{{$page.WithParam "sort" "created"}}"{{if eq .Query.Sort "created"}} class="on"{{end}}>document date</a>
-        <a href="{{$page.WithParam "sort" "oldest"}}"{{if eq .Query.Sort "oldest"}} class="on"{{end}}>oldest added</a>
-      </p>
+      {{if $page.MoreTags}}
+        {{/* <details> gives the toggle for free, so the whole vocabulary stays
+             reachable with JavaScript off. The filter box inside is the
+             enhancement, not the mechanism. */}}
+        <details class="tag-browse">
+          <summary class="pill-tag pill-dashed">+ {{$page.MoreTags}} more</summary>
+          <div class="tag-browse-panel">
+            <input type="search" class="tag-filter" placeholder="Filter tags…" aria-label="Filter tags" hidden>
+            <div class="tag-browse-list">
+              {{range $page.TagFacets}}
+                <a{{if $page.TagOn .Value}} class="on"{{end}} href="{{$page.ToggleTag .Value}}" data-tag="{{.Value}}"
+                  ><span>{{if $page.TagOn .Value}}✓ {{end}}{{.Value}}</span><span class="n">{{.Count}}</span></a>
+              {{end}}
+            </div>
+            <p class="tag-browse-foot">{{len $page.TagFacets}} tags in these results</p>
+          </div>
+        </details>
+      {{end}}
+
+      {{if $page.HasFilters}}
+        <a class="pill-plain" href="{{$page.ClearFilters}}">Clear</a>
+      {{end}}
     </div>
 
-    {{if not .Result.Hits}}
-      <div class="empty">
-        <p>Nothing here yet.</p>
-        <p>Drop files into the consume folder, or <a href="/upload">upload some</a>.</p>
+    <div class="filter-date">
+      <div class="filter-date-row">
+        <span class="micro">Date</span>
+        <nav class="seg" aria-label="Document date range">
+          <a href="{{$page.WithRange "month"}}"{{if $page.RangeOn "month"}} class="on"{{end}}>Last month</a>
+          <a href="{{$page.WithRange "quarter"}}"{{if $page.RangeOn "quarter"}} class="on"{{end}}>Last quarter</a>
+          <a href="{{$page.WithRange "year"}}"{{if $page.RangeOn "year"}} class="on"{{end}}>Last year</a>
+          <a href="{{$page.WithRange ""}}"{{if $page.RangeOn ""}} class="on"{{end}}>All time</a>
+          <a href="{{$page.WithRange "custom"}}"{{if $page.RangeOn "custom"}} class="on"{{end}}>Custom</a>
+        </nav>
       </div>
-    {{end}}
 
-    <ul class="cards">
-      {{range .Result.Hits}}
-        {{$d := .Doc}}
-        <li class="card">
-          <span class="thumb">
-            <img src="/doc/{{$d.ID}}/thumb" alt="" loading="lazy">
-          </span>
-          <div class="meta">
-            {{/* The title link is stretched over the whole card by CSS, so the
-                 box is clickable without nesting anchors, which is invalid.
-                 Tag links sit above it and keep their own behaviour. */}}
-            {{/* The query rides along so the document opens with the match
-                 already found in the PDF rather than only in the snippet. */}}
-            <a class="title stretch" href="/doc/{{$d.ID}}{{if $page.Query.Q}}?q={{$page.Query.Q}}{{end}}">{{.Title}}</a>
-            <p class="sub">
-              <span class="id">#{{$d.ID}}</span>
-              {{if $d.CreatedDate}}<span>{{monthLabel $d.CreatedDate}}</span>{{end}}
-              {{if $d.PageCount}}<span>{{$d.PageCount}}p</span>{{end}}
-              {{if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>{{end}}
-            </p>
-            {{if .Summary}}<p class="summary">{{.Summary}}</p>{{end}}
-            {{if .Snippet}}<p class="snippet">{{.Snippet}}</p>{{end}}
-            {{if $d.Tags}}
-              <p class="tags">
-                {{range $d.Tags}}<a class="chip" href="{{$page.WithParam "tag" .}}">{{.}}</a>{{end}}
-              </p>
-            {{end}}
-          </div>
-        </li>
+      {{if eq .Query.Range "custom"}}
+        {{/* A plain GET form, so the range survives a bookmark and works with
+             no JavaScript. filters.js submits it on change and drops the
+             button. */}}
+        <form class="range-custom" method="get" action="/">
+          {{if .Query.Q}}<input type="hidden" name="q" value="{{.Query.Q}}">{{end}}
+          {{range .Query.Tags}}<input type="hidden" name="tag" value="{{.}}">{{end}}
+          {{if .Query.Status}}<input type="hidden" name="status" value="{{.Query.Status}}">{{end}}
+          {{if .Query.Sort}}<input type="hidden" name="sort" value="{{.Query.Sort}}">{{end}}
+          <input type="hidden" name="range" value="custom">
+
+          {{$fm := ymMonth .Query.From}}{{$fy := ymYear .Query.From}}
+          {{$tm := ymMonth .Query.To}}{{$ty := ymYear .Query.To}}
+          <select class="input" name="from_m" aria-label="From month">
+            {{range monthOptions}}<option value="{{.Value}}"{{if eq .Value $fm}} selected{{end}}>{{.Label}}</option>{{end}}
+          </select>
+          <select class="input" name="from_y" aria-label="From year">
+            {{range yearOptions}}<option value="{{.}}"{{if eq . $fy}} selected{{end}}>{{.}}</option>{{end}}
+          </select>
+          <span class="sep">to</span>
+          <select class="input" name="to_m" aria-label="To month">
+            {{range monthOptions}}<option value="{{.Value}}"{{if eq .Value $tm}} selected{{end}}>{{.Label}}</option>{{end}}
+          </select>
+          <select class="input" name="to_y" aria-label="To year">
+            {{range yearOptions}}<option value="{{.}}"{{if eq . $ty}} selected{{end}}>{{.}}</option>{{end}}
+          </select>
+          <button type="submit" class="btn btn-primary btn-sm">Apply</button>
+        </form>
       {{end}}
-    </ul>
+    </div>
+  </div>
 
-    {{if gt .Result.Pages 1}}
-      <nav class="pager">
-        {{if gt .Result.Page 1}}
-          <a href="{{$page.WithParam "page" (printf "%d" (add .Result.Page -1))}}">← Previous</a>
-        {{end}}
-        <span>Page {{.Result.Page}} of {{.Result.Pages}}</span>
-        {{if lt .Result.Page .Result.Pages}}
-          <a href="{{$page.WithParam "page" (printf "%d" (add .Result.Page 1))}}">Next →</a>
-        {{end}}
-      </nav>
+  <div class="results-head">
+    <p class="count">
+      <strong>{{commaNum .Result.Found}}</strong>
+      {{if .Query.Q}}
+        result{{if ne .Result.Found 1}}s{{end}} for “{{.Query.Q}}”
+      {{else}}
+        document{{if ne .Result.Found 1}}s{{end}}
+      {{end}}
+    </p>
+    <p class="sort">
+      <span>Sort</span>
+      <a href="{{$page.WithParam "sort" ""}}"{{if eq .Query.Sort ""}} class="on"{{end}}>{{if .Query.Q}}Relevance{{else}}Newest{{end}}</a>
+      <a href="{{$page.WithParam "sort" "created"}}"{{if eq .Query.Sort "created"}} class="on"{{end}}>Document date</a>
+      <a href="{{$page.WithParam "sort" "oldest"}}"{{if eq .Query.Sort "oldest"}} class="on"{{end}}>Oldest</a>
+    </p>
+  </div>
+
+  {{if not .Result.Hits}}
+    <div class="empty">
+      <h4>Nothing here.</h4>
+      {{if $page.HasFilters}}
+        <p>No document matches these filters. <a href="{{$page.ClearFilters}}">Clear them</a> and try again.</p>
+      {{else if .Query.Q}}
+        <p>Nothing matched “{{.Query.Q}}”.</p>
+      {{else}}
+        <p>Drop a file anywhere on this page, or <a href="/upload">upload some</a>.</p>
+      {{end}}
+    </div>
+  {{end}}
+
+  <ul class="rows">
+    {{range .Result.Hits}}
+      {{$d := .Doc}}
+      <li class="row">
+        <span class="thumb">
+          <img src="/doc/{{$d.ID}}/thumb" alt="" loading="lazy">
+        </span>
+        <div class="row-body">
+          <div class="row-top">
+            <span class="code">#{{$d.ID}}</span>
+            <span class="row-meta">
+              {{if $d.CreatedDate}}<span>{{monthLabel $d.CreatedDate}}</span>{{end}}
+              {{if $d.PageCount}}<span>{{$d.PageCount}} page{{if ne $d.PageCount 1}}s{{end}}</span>{{end}}
+              {{if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>{{end}}
+            </span>
+          </div>
+
+          <div class="row-head">
+            {{/* The title link is stretched over the whole row by CSS, so the
+                 box is clickable without nesting anchors, which is invalid.
+                 The query rides along so the document opens with the match
+                 already found in the PDF rather than only in the snippet. */}}
+            <h3><a href="/doc/{{$d.ID}}{{if $page.Query.Q}}?q={{$page.Query.Q}}{{end}}">{{.Title}}</a></h3>
+            <a class="open-link" href="/doc/{{$d.ID}}/pdf" target="_blank" rel="noopener" title="Open the PDF in a new tab">Open ↗</a>
+          </div>
+
+          {{if .Snippet}}
+            <p class="snippet">{{.Snippet}}</p>
+          {{else if .Summary}}
+            <p class="summary">{{.Summary}}</p>
+          {{end}}
+
+          {{if $d.Tags}}
+            <div class="row-tags">
+              {{range $d.Tags}}<a class="chip{{if $page.TagOn .}} on{{end}}" href="{{$page.ToggleTag .}}">{{.}}</a>{{end}}
+            </div>
+          {{end}}
+        </div>
+      </li>
     {{end}}
-  </section>
-</div>
+  </ul>
+
+  {{if gt .Result.Pages 1}}
+    <nav class="pager">
+      {{if gt .Result.Page 1}}
+        <a href="{{$page.WithParam "page" (printf "%d" (add .Result.Page -1))}}">← Previous</a>
+      {{end}}
+      <span>Page {{.Result.Page}} of {{.Result.Pages}}</span>
+      {{if lt .Result.Page .Result.Pages}}
+        <a href="{{$page.WithParam "page" (printf "%d" (add .Result.Page 1))}}">Next →</a>
+      {{end}}
+    </nav>
+  {{end}}
+</main>
 {{end}}
+
+{{define "head"}}<script src="/static/filters.js" defer></script>{{end}}
