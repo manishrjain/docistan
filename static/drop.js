@@ -6,33 +6,9 @@ const overlay = document.createElement("div");
 overlay.className = "drop-overlay";
 overlay.innerHTML = "<div>Drop to upload</div>";
 
-const toasts = document.createElement("div");
-toasts.className = "toasts";
-
 document.addEventListener("DOMContentLoaded", () => {
-  document.body.append(overlay, toasts);
+  document.body.append(overlay);
 });
-
-function toast(text, opts = {}) {
-  const el = document.createElement("div");
-  el.className = "toast" + (opts.bad ? " bad" : "");
-  if (opts.docID) {
-    el.innerHTML = `${escapeHTML(text)} — <a href="/doc/${opts.docID}">see #${opts.docID}</a>`;
-  } else {
-    el.textContent = text;
-  }
-  toasts.append(el);
-  if (!opts.sticky) {
-    setTimeout(() => el.remove(), 6000);
-  }
-  return el;
-}
-
-function escapeHTML(s) {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
-}
 
 // Only react to an actual file drag, not to text or link dragging.
 const draggingFiles = (e) =>
@@ -88,7 +64,11 @@ window.addEventListener("drop", async (e) => {
 
     let queued = 0;
     for (const f of data.flash || []) {
-      toast(f.text, { bad: f.bad, docID: f.doc_id });
+      toast(f.text, {
+        kind: f.bad ? "bad" : undefined,
+        href: f.doc_id ? `/doc/${f.doc_id}` : undefined,
+        linkText: f.doc_id ? `see #${f.doc_id}` : undefined,
+      });
       if (!f.bad && !f.doc_id) queued++;
     }
     // Give the watcher a moment to pick the files up, then refresh so the new
@@ -96,6 +76,6 @@ window.addEventListener("drop", async (e) => {
     if (queued) setTimeout(() => location.reload(), 1500);
   } catch (err) {
     pending.remove();
-    toast(`Upload failed: ${err.message}`, { bad: true });
+    toast(`Upload failed: ${err.message}`, { kind: "bad" });
   }
 });

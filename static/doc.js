@@ -12,19 +12,32 @@ document.addEventListener("DOMContentLoaded", () => {
   const field = document.getElementById("tags-field");
   const heading = document.querySelector(".doc-meta h1");
 
-  // --- save status -------------------------------------------------------
-  const status = document.createElement("span");
-  status.className = "save-status";
-  form.prepend(status);
-
-  let statusTimer;
+  // --- feedback ----------------------------------------------------------
+  // Edits report themselves as toasts, which are hard to miss. Model progress
+  // reports itself in the Processing list instead, next to the other steps,
+  // because that is where a reader already looks to see what ran.
+  let saveToast;
   function setStatus(text, kind) {
-    clearTimeout(statusTimer);
-    status.textContent = text;
-    status.className = "save-status" + (kind ? " " + kind : "");
-    if (kind === "ok") {
-      statusTimer = setTimeout(() => (status.textContent = ""), 2000);
+    saveToast?.remove();
+    saveToast = window.toast
+      ? toast(text, { kind, sticky: !kind })
+      : null;
+  }
+
+  const tagRow = document.querySelector('.stages li[data-stage="tagging"]');
+  function setTagStage(state, name, detail) {
+    if (!tagRow) return;
+    tagRow.className = state;
+    tagRow.querySelector(".mark").textContent =
+      { done: "✓", pending: "◷", failed: "✗", working: "◷" }[state] || "–";
+    tagRow.querySelector(".what").textContent = name;
+    let el = tagRow.querySelector(".detail");
+    if (!el) {
+      el = document.createElement("span");
+      el.className = "detail";
+      tagRow.append(el);
     }
+    el.textContent = detail || "";
   }
 
   // --- autosave ----------------------------------------------------------
@@ -62,7 +75,9 @@ document.addEventListener("DOMContentLoaded", () => {
       });
       if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
       const data = await res.json();
-      if (heading && data.title) heading.textContent = data.title;
+      if (heading && data.title && !heading.dataset.editing) {
+        heading.textContent = data.title;
+      }
       setStatus("Saved", "ok");
     } catch (err) {
       // Put the fields back so a later save retries them rather than dropping
@@ -110,6 +125,70 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // The button is redundant once edits save themselves.
   form.querySelector('button[type="submit"]')?.remove();
+
+  // --- inline title and date ---------------------------------------------
+  // The title used to appear twice: once as the heading and again as a form
+  // field. The heading is now the editor, and the plain fields stay in the
+  // markup only so the page still works without JavaScript.
+  function inlineEdit(display, input, format) {
+    if (!display || !input) return;
+    input.closest("label")?.classList.add("hidden");
+
+    display.addEventListener("click", start);
+    display.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        start();
+      }
+    });
+
+    function start() {
+      if (display.dataset.editing) return;
+      display.dataset.editing = "1";
+
+      const box = document.createElement("input");
+      box.type = input.type === "month" ? "month" : "text";
+      box.className = "inline-edit";
+      box.value = input.value;
+
+      const finish = (commit) => {
+        if (!display.dataset.editing) return;
+        delete display.dataset.editing;
+        if (commit && box.value !== input.value) {
+          input.value = box.value;
+          save(input.name);
+        }
+        display.textContent = format(input.value);
+        box.remove();
+        display.hidden = false;
+      };
+
+      box.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          finish(true);
+        }
+        if (e.key === "Escape") finish(false);
+      });
+      box.addEventListener("blur", () => finish(true));
+
+      display.hidden = true;
+      display.after(box);
+      box.focus();
+      box.select?.();
+    }
+  }
+
+  const monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  function monthLabel(v) {
+    const m = /^(\d{4})-(\d{2})$/.exec(v || "");
+    return m ? `${monthNames[+m[2] - 1]} ${m[1]}` : "Add a date";
+  }
+
+  const titleDisplay = document.querySelector('[data-edits="title"]');
+  const dateDisplay = document.querySelector('[data-edits="created_date"]');
+  inlineEdit(titleDisplay, form.elements["title"], (v) => v || "Untitled");
+  inlineEdit(dateDisplay, form.elements["created_date"], monthLabel);
 
   // --- tag pills ---------------------------------------------------------
   // Exposed so background re-tagging can refresh the pills in place.
@@ -295,13 +374,16 @@ document.addEventListener("DOMContentLoaded", () => {
       render();
     }
     if (typeof data.title === "string" && data.title) {
-      if (heading) heading.textContent = data.title;
       const t = form.elements["title"];
       if (t) t.value = data.title;
+      if (heading && !heading.dataset.editing) heading.textContent = data.title;
     }
     if (typeof data.created_date === "string") {
       const d = form.elements["created_date"];
       if (d) d.value = data.created_date;
+      if (dateDisplay && !dateDisplay.dataset.editing) {
+        dateDisplay.textContent = monthLabel(data.created_date);
+      }
     }
   };
   }
@@ -317,7 +399,7 @@ document.addEventListener("DOMContentLoaded", () => {
     retag.addEventListener("submit", async (e) => {
       e.preventDefault();
       button.disabled = true;
-      setStatus("Asking the model…");
+      setTagStage("working", "Asking the model…", "");
 
       try {
         const res = await fetch(retag.action, {
@@ -329,16 +411,16 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         const data = await res.json();
         if (data.status === "blocked") {
-          setStatus(data.reason || "Tagging is stopped", "bad");
+          setTagStage("failed", "Tagging stopped", data.reason || "");
           button.disabled = false;
           return;
         }
         if (data.status === "waiting") {
-          setStatus(`Queued — ${data.reason}`);
+          setTagStage("pending", "Queued", data.reason || "");
         }
         await waitForTags();
       } catch (err) {
-        setStatus(`Could not re-tag — ${String(err.message || err).slice(0, 120)}`, "bad");
+        setTagStage("failed", "Could not re-tag", String(err.message || err).slice(0, 120));
       } finally {
         button.disabled = false;
       }
@@ -361,21 +443,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
         if (data.enriched) {
           applyMeta(data);
-          setStatus(`Tagged — ${data.title || "done"}`, "ok");
+          setTagStage("done", "Titled and tagged by AI", "just now");
+          if (window.toast) toast(`Tagged — ${data.title || "done"}`, { kind: "ok" });
           return;
         }
         if (!data.queued) {
-          setStatus("The model call did not succeed — see Processing below", "bad");
+          setTagStage("failed", "The model call did not succeed", "try Re-tag with AI again");
           return;
         }
         dots = (dots + 1) % 4;
-        setStatus(
-          data.reason
-            ? `Waiting — ${data.reason}`
-            : "Asking the model" + ".".repeat(dots),
+        setTagStage(
+          "working",
+          data.reason ? "Waiting on the rate limit" : "Asking the model" + ".".repeat(dots),
+          data.reason || "",
         );
       }
-      setStatus("Still queued — this page will show the tags once it runs");
+      setTagStage("pending", "Still queued", "the tags will appear once it runs");
     }
   }
 });

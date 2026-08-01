@@ -2,7 +2,10 @@
 {{$d := .Doc}}
 <div class="doc-layout">
   <aside class="doc-meta">
-    <h1>{{$d.Title}}</h1>
+    <h1 class="doc-title" data-edits="title" tabindex="0" title="Click to edit">{{$d.Title}}</h1>
+    <p class="doc-date">
+      <span data-edits="created_date" tabindex="0" title="Click to edit">{{if $d.CreatedDate}}{{monthLabel $d.CreatedDate}}{{else}}Add a date{{end}}</span>
+    </p>
     <p class="sub">
       <span class="id">#{{$d.ID}}</span>
       <span>{{$d.OriginalName}}</span>
@@ -27,10 +30,12 @@
     {{end}}
 
     <form method="post" action="/doc/{{$d.ID}}">
-      <label>Title
+      {{/* Hidden by doc.js, which edits these through the heading instead.
+           Without JavaScript they remain the way to change either field. */}}
+      <label class="plain-field">Title
         <input type="text" name="title" value="{{$d.Title}}">
       </label>
-      <label>Document month
+      <label class="plain-field">Document month
         <input type="month" name="created_date" value="{{$d.CreatedDate}}">
       </label>
 
@@ -49,7 +54,7 @@
       <h2>Processing</h2>
       <ul>
         {{range .Stages}}
-          <li class="{{.State}}">
+          <li class="{{.State}}" data-stage="{{.Key}}">
             <span class="mark">{{.Symbol}}</span>
             <span class="what">{{.Name}}</span>
             {{if .Detail}}<span class="detail">{{.Detail}}</span>{{end}}

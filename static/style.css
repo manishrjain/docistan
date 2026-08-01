@@ -248,3 +248,22 @@ code { background: var(--accent-soft); padding: .05rem .3rem; border-radius: 4px
 }
 .save-status.ok { color: #3f7d4e; }
 .save-status.bad { color: var(--bad); font-weight: 600; }
+
+/* ---- inline-editable heading ---- */
+.doc-title { cursor: text; border-radius: 5px; padding: .05rem .25rem; margin-left: -.25rem; }
+.doc-title:hover, .doc-date [data-edits]:hover { background: var(--accent-soft); }
+.doc-title:focus-visible, .doc-date [data-edits]:focus-visible { outline: 2px solid var(--accent); }
+.doc-date { margin: .1rem 0 .5rem; color: var(--muted); font-size: .9rem; }
+.doc-date [data-edits] { cursor: text; border-radius: 5px; padding: .05rem .25rem; margin-left: -.25rem; }
+.inline-edit { font: inherit; color: inherit; width: 100%; }
+h1 .inline-edit { font-size: inherit; font-weight: inherit; }
+
+/* the plain fallback fields, once the heading takes over */
+.plain-field.hidden { display: none; }
+
+/* a stage row the model is actively working on */
+.stages li.working .mark { color: var(--accent); }
+.stages li.working .what { color: var(--accent); font-weight: 600; }
+@keyframes stage-pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+.stages li.working .mark { animation: stage-pulse 1.1s ease-in-out infinite; }
+.toast { font-size: .92rem; padding: .65rem 1rem; }

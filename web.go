@@ -121,6 +121,7 @@ func (a *App) routes(mux *http.ServeMux) {
 // to make it obvious what ran, what did not, and crucially which steps were
 // local and which involved the model.
 type Stage struct {
+	Key    string // stable id so the page can update a row in place
 	Name   string
 	State  string // done | pending | skipped | failed
 	Detail string
@@ -143,13 +144,13 @@ func (s Stage) Symbol() string {
 func (a *App) stagesFor(doc *Doc) []Stage {
 	var out []Stage
 
-	orig := Stage{Name: "Original stored", State: "done", Detail: doc.OriginalName}
+	orig := Stage{Key: "stored", Name: "Original stored", State: "done", Detail: doc.OriginalName}
 	if doc.FileSize > 0 {
 		orig.Detail += " · " + humanSize(doc.FileSize)
 	}
 	out = append(out, orig)
 
-	archive := Stage{Name: "Converted to archival PDF", State: "failed", Detail: "not produced"}
+	archive := Stage{Key: "archive", Name: "Converted to archival PDF", State: "failed", Detail: "not produced"}
 	if _, err := os.Stat(a.store.ArchivePath(doc.ID)); err == nil {
 		archive.State, archive.Detail = "done", "PDF/A"
 		if doc.PageCount > 0 {
@@ -163,7 +164,7 @@ func (a *App) stagesFor(doc *Doc) []Stage {
 	// through the Ghostscript fallback as failed despite having good text.
 	// The source is worth stating plainly though, since "did AI read this?"
 	// is not otherwise answerable from the page.
-	text := Stage{Name: "Text extracted"}
+	text := Stage{Key: "text", Name: "Text extracted"}
 	if n := len(strings.TrimSpace(doc.Content)); n == 0 {
 		text.State = "failed"
 		text.Detail = "no text could be extracted"
@@ -185,13 +186,13 @@ func (a *App) stagesFor(doc *Doc) []Stage {
 	}
 	out = append(out, text)
 
-	thumb := Stage{Name: "Thumbnail", State: "skipped", Detail: "not generated"}
+	thumb := Stage{Key: "thumb", Name: "Thumbnail", State: "skipped", Detail: "not generated"}
 	if _, err := os.Stat(a.store.ThumbPath(doc.ID)); err == nil {
 		thumb.State, thumb.Detail = "done", ""
 	}
 	out = append(out, thumb)
 
-	index := Stage{Name: "Indexed for search", State: "pending", Detail: doc.Status}
+	index := Stage{Key: "index", Name: "Indexed for search", State: "pending", Detail: doc.Status}
 	if doc.Status == StatusReady {
 		index.State, index.Detail = "done", "full text searchable"
 	}
@@ -202,7 +203,7 @@ func (a *App) stagesFor(doc *Doc) []Stage {
 }
 
 func (a *App) taggingStage(doc *Doc) Stage {
-	s := Stage{Name: "Titled and tagged by AI"}
+	s := Stage{Key: "tagging", Name: "Titled and tagged by AI"}
 	switch {
 	case doc.Enriched:
 		s.State = "done"
