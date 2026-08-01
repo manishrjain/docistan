@@ -14,8 +14,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // --- feedback ----------------------------------------------------------
   // Edits report themselves as toasts, which are hard to miss. Model progress
-  // reports itself in the Processing list instead, next to the other steps,
-  // because that is where a reader already looks to see what ran.
+  // reports itself in the Naturalization timeline instead, next to the other
+  // steps, because that is where a reader already looks to see what ran.
   let saveToast;
   function setStatus(text, kind) {
     saveToast?.remove();
@@ -25,12 +25,13 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // The timeline row carries its state in the class; the dot's colour and
-  // pulse come from CSS, so there is no symbol to keep in step here.
+  // pulse come from CSS, so there is no symbol to keep in step here. The
+  // label stays put and only the line beneath it changes — it is the same
+  // step whether it is queued, running or done.
   const tagRow = document.querySelector('.timeline li[data-stage="tagging"]');
-  function setTagStage(state, name, detail) {
+  function setTagStage(state, detail) {
     if (!tagRow) return;
     tagRow.className = state;
-    tagRow.querySelector(".what").textContent = name;
     let el = tagRow.querySelector(".detail");
     if (!el) {
       el = document.createElement("span");
@@ -432,7 +433,7 @@ document.addEventListener("DOMContentLoaded", () => {
     retag.addEventListener("submit", async (e) => {
       e.preventDefault();
       button.disabled = true;
-      setTagStage("working", "Asking the model…", "");
+      setTagStage("working", "Working…");
 
       try {
         const res = await fetch(retag.action, {
@@ -444,16 +445,16 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         const data = await res.json();
         if (data.status === "blocked") {
-          setTagStage("failed", "Tagging stopped", data.reason || "");
+          setTagStage("failed", "Stopped: " + (data.reason || "the model is unavailable"));
           button.disabled = false;
           return;
         }
         if (data.status === "waiting") {
-          setTagStage("pending", "Queued", data.reason || "");
+          setTagStage("pending", data.reason ? "Waiting — " + data.reason : "Queued");
         }
         await waitForTags();
       } catch (err) {
-        setTagStage("failed", "Could not re-tag", String(err.message || err).slice(0, 120));
+        setTagStage("failed", String(err.message || err).slice(0, 120));
       } finally {
         button.disabled = false;
       }
@@ -482,22 +483,21 @@ document.addEventListener("DOMContentLoaded", () => {
 
         if (data.enriched) {
           applyMeta(data);
-          setTagStage("done", "Titled and tagged by AI", "just now");
+          setTagStage("done", "just now");
           if (window.toast) toast(`Tagged — ${data.title || "done"}`, { kind: "ok" });
           return;
         }
         if (!data.queued) {
-          setTagStage("failed", "The model call did not succeed", "try Re-tag with AI again");
+          setTagStage("failed", "the model call did not succeed — try again");
           return;
         }
         dots = (dots + 1) % 4;
         setTagStage(
           "working",
-          data.reason ? "Waiting on the rate limit" : "Asking the model" + ".".repeat(dots),
-          data.reason || "",
+          data.reason ? "Waiting — " + data.reason : "Working" + ".".repeat(dots),
         );
       }
-      setTagStage("pending", "Still queued", "the tags will appear once it runs");
+      setTagStage("pending", "Still queued — the tags will appear once it runs");
     }
   }
 

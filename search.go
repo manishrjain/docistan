@@ -83,6 +83,8 @@ func (s *Search) schema() *api.CollectionSchema {
 			f("signed", "bool", stored),
 			f("native_text", "bool", stored),
 			f("enriched", "bool", stored),
+			f("text_ts", "int64", stored),
+			f("enriched_ts", "int64", stored),
 		},
 		DefaultSortingField: pointer.String("added_ts"),
 	}
@@ -133,6 +135,8 @@ func tsDoc(d *Doc) map[string]any {
 		"signed":        d.Signed,
 		"enriched":      d.Enriched,
 		"native_text":   d.NativeText,
+		"text_ts":       d.TextTS,
+		"enriched_ts":   d.EnrichedTS,
 	}
 }
 
@@ -182,7 +186,12 @@ type Query struct {
 	Q      string
 	Tags   []string // every tag must match, so picking more narrows
 	Status string
-	Sort   string
+	// Sort names the field: "" for relevance, "added" for when the document
+	// arrived, "created" for the date on the document itself. Direction is
+	// separate, because which field to order by and which end to start from
+	// are two different questions.
+	Sort string
+	Dir  string // "asc" for oldest first; anything else is newest first
 	// Range selects a document-date window: "", "month", "quarter", "year" or
 	// "custom". Empty means all time, which is the right default for an
 	// archive — a date filter that hides most of the corpus should be asked
@@ -212,6 +221,22 @@ func (q Query) Bounds(now time.Time) (lo, hi int64) {
 	}
 	return 0, 0
 }
+
+// SortField resolves what the results are actually ordered by, which is not
+// always what the URL says: with no field chosen, a search orders by relevance
+// and a bare listing orders by arrival.
+func (q Query) SortField() string {
+	switch q.Sort {
+	case "added", "created":
+		return q.Sort
+	}
+	if strings.TrimSpace(q.Q) != "" {
+		return "relevance"
+	}
+	return "added"
+}
+
+func (q Query) Descending() bool { return q.Dir != "asc" }
 
 // HasDateFilter reports whether the range actually constrains anything, which
 // is what the UI uses to decide if "Clear" is worth offering.
@@ -293,14 +318,18 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 		}
 	}
 
+	dir := "desc"
+	if !q.Descending() {
+		dir = "asc"
+	}
+	// Relevance still falls back to arrival for ties, so equally-good matches
+	// come out newest first rather than in whatever order the index holds.
 	sortBy := "_text_match:desc,added_ts:desc"
-	switch {
-	case q.Sort == "created":
-		sortBy = "created_ts:desc"
-	case q.Sort == "oldest":
-		sortBy = "added_ts:asc"
-	case text == "*":
-		sortBy = "added_ts:desc"
+	switch q.SortField() {
+	case "added":
+		sortBy = "added_ts:" + dir
+	case "created":
+		sortBy = "created_ts:" + dir
 	}
 
 	params := &api.SearchCollectionParams{
@@ -494,6 +523,8 @@ func docFromMap(m map[string]any) *Doc {
 		Content:      str("content"),
 		CreatedTS:    num("created_ts"),
 		AddedTS:      num("added_ts"),
+		TextTS:       num("text_ts"),
+		EnrichedTS:   num("enriched_ts"),
 		FileSize:     num("file_size"),
 		PageCount:    int(num("page_count")),
 		Confidence:   int(num("confidence")),

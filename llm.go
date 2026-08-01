@@ -458,6 +458,7 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 		doc.Tags = meta.Tags
 	}
 	doc.Enriched = true
+	doc.EnrichedTS = time.Now().Unix()
 	q.save(ctx, doc)
 
 	q.mu.Lock()

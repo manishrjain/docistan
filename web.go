@@ -87,6 +87,15 @@ func templateFuncs() template.FuncMap {
 	}
 }
 
+// stamp is the timeline's date format: precise to the minute, because the
+// point of "Landed" is when this arrived relative to everything else that day.
+func stamp(ts int64) string {
+	if ts <= 0 {
+		return ""
+	}
+	return time.Unix(ts, 0).Format("2 Jan 2006 · 15:04")
+}
+
 // Option is one entry of a <select>, kept so the date-range selects can be
 // built in the template without string surgery there.
 type Option struct{ Value, Label string }
@@ -195,84 +204,98 @@ type Stage struct {
 
 // stagesFor reconstructs what happened to a document from what is on disk and
 // in the sidecar, rather than from a stored log, so it cannot drift.
+//
+// Three steps: the document arrives, it gets read, and the model describes it.
+// The finer stages the pipeline actually runs — the archival conversion, the
+// thumbnail, the index write — are either self-evident from the page or only
+// interesting when they fail, and a failure names its own stage in the banner
+// above this list.
 func (a *App) stagesFor(doc *Doc) []Stage {
-	var out []Stage
-
-	orig := Stage{Key: "stored", Name: "Original stored", State: "done", Detail: doc.OriginalName}
-	if doc.FileSize > 0 {
-		orig.Detail += " · " + humanSize(doc.FileSize)
+	return []Stage{
+		landedStage(doc),
+		readStage(doc),
+		a.taggingStage(doc),
 	}
-	out = append(out, orig)
-
-	archive := Stage{Key: "archive", Name: "Converted to archival PDF", State: "failed", Detail: "not produced"}
-	if _, err := os.Stat(a.store.ArchivePath(doc.ID)); err == nil {
-		archive.State, archive.Detail = "done", "PDF/A"
-		if doc.PageCount > 0 {
-			archive.Detail = fmt.Sprintf("PDF/A · %d page%s", doc.PageCount, plural(doc.PageCount))
-		}
-	}
-	out = append(out, archive)
-
-	// Success here is whether text exists, not which tool produced it. Driving
-	// this off the OCR source instead would report a document that came
-	// through the Ghostscript fallback as failed despite having good text.
-	// The source is worth stating plainly though, since "did AI read this?"
-	// is not otherwise answerable from the page.
-	text := Stage{Key: "text", Name: "Text extracted"}
-	if n := len(strings.TrimSpace(doc.Content)); n == 0 {
-		text.State = "failed"
-		text.Detail = "no text could be extracted"
-	} else {
-		text.State = "done"
-		switch {
-		case doc.NativeText:
-			text.Detail = "local · the PDF already had a text layer"
-		case doc.OCRSource == OCRTesseract:
-			text.Detail = "local · OCR by tesseract"
-		case doc.OCRSource == OCRSkippedSigned:
-			text.Detail = "local · digitally signed, left as-is"
-		case doc.OCRSource == OCRLLM:
-			text.Detail = "model · transcribed from page images"
-		default:
-			text.Detail = "local"
-		}
-		text.Detail += fmt.Sprintf(" · %d characters", n)
-	}
-	out = append(out, text)
-
-	thumb := Stage{Key: "thumb", Name: "Thumbnail", State: "skipped", Detail: "not generated"}
-	if _, err := os.Stat(a.store.ThumbPath(doc.ID)); err == nil {
-		thumb.State, thumb.Detail = "done", ""
-	}
-	out = append(out, thumb)
-
-	index := Stage{Key: "index", Name: "Indexed for search", State: "pending", Detail: doc.Status}
-	if doc.Status == StatusReady {
-		index.State, index.Detail = "done", "full text searchable"
-	}
-	out = append(out, index)
-
-	out = append(out, a.taggingStage(doc))
-	return out
 }
 
+func landedStage(doc *Doc) Stage {
+	return Stage{Key: "landed", Name: "Landed", State: "done", Detail: stamp(doc.AddedTS)}
+}
+
+// when puts the step's own timestamp first and what did the work second.
+// Documents ingested before the timestamps were recorded simply have no time
+// to show, rather than borrowing the arrival time and stating something false.
+func when(ts int64, by string) string {
+	t := stamp(ts)
+	switch {
+	case t == "":
+		return by
+	case by == "":
+		return t
+	}
+	return t + " · " + by
+}
+
+// readStage covers getting text out of the document. The design labels this
+// "OCR — 11 pages, 99.2% confidence"; we do not score OCR, so the second
+// figure is the amount of text recovered, and the line beneath says which
+// tool produced it — which is the question the confidence number stands in
+// for: how far to trust this text.
+func readStage(doc *Doc) Stage {
+	s := Stage{Key: "text", Name: "OCR"}
+	chars := len(strings.TrimSpace(doc.Content))
+
+	if chars == 0 {
+		if doc.Status == StatusProcessing {
+			return Stage{Key: "text", Name: "OCR", State: "pending", Detail: "Working…"}
+		}
+		return Stage{Key: "text", Name: "OCR — no text found", State: "failed",
+			Detail: "nothing to search or summarise"}
+	}
+
+	s.State = "done"
+	var parts []string
+	if doc.PageCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d page%s", doc.PageCount, plural(doc.PageCount)))
+	}
+	parts = append(parts, commaNum(chars)+" characters")
+	s.Name = "OCR — " + strings.Join(parts, ", ")
+
+	var by string
+	switch {
+	case doc.NativeText:
+		by = "existing text layer"
+	case doc.OCRSource == OCRTesseract:
+		by = "tesseract"
+	case doc.OCRSource == OCRSkippedSigned:
+		by = "signed, left as-is"
+	case doc.OCRSource == OCRLLM:
+		by = "read by the model"
+	}
+	s.Detail = when(doc.TextTS, by)
+	return s
+}
+
+// taggingStage keeps one fixed label and says what is happening underneath it,
+// the way the design does — the step is the same step whether it is queued,
+// running or finished.
 func (a *App) taggingStage(doc *Doc) Stage {
-	s := Stage{Key: "tagging", Name: "Titled and tagged by AI"}
+	s := Stage{Key: "tagging", Name: "AI summary + tags generated"}
 	switch {
 	case doc.Enriched:
 		s.State = "done"
-		s.Detail = "model · " + a.cfg.LLMModel
+		s.Detail = when(doc.EnrichedTS, a.cfg.LLMModel)
 	case a.enricher == nil:
 		s.State = "skipped"
 		s.Detail = "no model configured — set OPENAI_API_KEY"
 	case a.enrichq != nil && a.enrichq.Has(doc.ID):
 		s.State = "pending"
-		s.Detail = "queued"
+		s.Detail = "Queued"
 		if _, resetIn, stopped := a.enricher.Budget(); stopped != "" {
-			s.Detail = "stopped: " + stopped
+			s.Detail = "Stopped: " + stopped
 		} else if resetIn > 0 {
 			if remaining, _, _ := a.enricher.Budget(); remaining == 0 {
-				s.Detail = "waiting for rate limit to reset in " + resetIn.Round(time.Second).String()
+				s.Detail = "Waiting — rate limit resets in " + resetIn.Round(time.Second).String()
 			}
 		}
 	case hasTag(doc.Tags, "needs-review"):
@@ -416,6 +439,41 @@ func (p page) BackLink() string {
 
 func (p page) WithRange(r string) string { return p.WithParam("range", r) }
 
+// --- sorting -------------------------------------------------------------
+// Two controls rather than one list: which field to order by, and which end
+// to start from. Combining them into "newest / oldest / document date" made
+// the two questions look like one, and left no way to ask for the oldest
+// document date at all.
+
+func (p page) SortOn(field string) bool { return p.Query.SortField() == field }
+
+// WithSort keeps the current direction, so switching fields does not silently
+// flip the order under you.
+func (p page) WithSort(field string) string { return p.WithParam("sort", field) }
+
+func (p page) ToggleDir() string {
+	if p.Query.Descending() {
+		return p.WithParam("dir", "asc")
+	}
+	return p.WithParam("dir", "")
+}
+
+// DirLabel names what you are looking at, not what the click would do — the
+// arrow shows the current order the way a sorted table header does.
+func (p page) DirLabel() string {
+	if p.Query.Descending() {
+		return "↓ Newest first"
+	}
+	return "↑ Oldest first"
+}
+
+// IsLatest reports the plain default view: everything, newest arrival first.
+// It is the only state the design's "Latest additions" heading is true for.
+func (p page) IsLatest() bool {
+	return p.Query.Q == "" && !p.HasFilters() &&
+		p.Query.SortField() == "added" && p.Query.Descending()
+}
+
 func (p page) RangeOn(r string) bool {
 	if r == "" {
 		// All time is the default, so an unrecognised or absent value reads as
@@ -493,11 +551,18 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		Tags:   v["tag"],
 		Status: v.Get("status"),
 		Sort:   v.Get("sort"),
+		Dir:    v.Get("dir"),
 		Range:  v.Get("range"),
 		From:   joinYM(v.Get("from_y"), v.Get("from_m")),
 		To:     joinYM(v.Get("to_y"), v.Get("to_m")),
 	}
 	q.Page, _ = strconv.Atoi(v.Get("page"))
+
+	// Sorting used to be one list where "oldest" meant oldest-by-arrival.
+	// Keep old links meaning what they meant.
+	if q.Sort == "oldest" {
+		q.Sort, q.Dir = "added", "asc"
+	}
 
 	// Picking "Custom" for the first time should open on a usable window
 	// rather than on two empty selects that filter nothing.

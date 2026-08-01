@@ -60,6 +60,12 @@ type Doc struct {
 	Confidence  int    `json:"confidence"`
 	Enriched    bool   `json:"enriched"`
 	Content     string `json:"content"`
+	// When each visible step finished, so the document page can say when it
+	// was read and when the model described it rather than only when it
+	// arrived. Zero on documents ingested before these were recorded; the
+	// timeline simply omits the time in that case.
+	TextTS     int64 `json:"text_ts,omitempty"`
+	EnrichedTS int64 `json:"enriched_ts,omitempty"`
 }
 
 // Store owns the data directory. Sidecars are the durable state; the only

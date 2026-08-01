@@ -412,6 +412,7 @@ func (p *Pipeline) stages(ctx context.Context, path string, job *Job, doc *Doc) 
 		logf("doc %d text extraction: %v", doc.ID, err)
 	}
 	doc.Content = strings.TrimSpace(text)
+	doc.TextTS = time.Now().Unix()
 	if doc.OCRSource == "" {
 		doc.OCRSource = OCRNone
 	}

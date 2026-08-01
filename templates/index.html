@@ -80,19 +80,30 @@
 
   <div class="results-head">
     <p class="count">
-      <strong>{{commaNum .Result.Found}}</strong>
       {{if .Query.Q}}
-        result{{if ne .Result.Found 1}}s{{end}} for “{{.Query.Q}}”
+        <strong>{{commaNum .Result.Found}}</strong> result{{if ne .Result.Found 1}}s{{end}} for “{{.Query.Q}}”
+      {{else if $page.IsLatest}}
+        {{/* Only said when it is true: everything, newest arrival first. */}}
+        <strong>Latest additions</strong>
       {{else}}
-        document{{if ne .Result.Found 1}}s{{end}}
+        <strong>{{commaNum .Result.Found}}</strong> document{{if ne .Result.Found 1}}s{{end}}
       {{end}}
     </p>
-    <p class="sort">
-      <span>Sort</span>
-      <a href="{{$page.WithParam "sort" ""}}"{{if eq .Query.Sort ""}} class="on"{{end}}>{{if .Query.Q}}Relevance{{else}}Newest{{end}}</a>
-      <a href="{{$page.WithParam "sort" "created"}}"{{if eq .Query.Sort "created"}} class="on"{{end}}>Document date</a>
-      <a href="{{$page.WithParam "sort" "oldest"}}"{{if eq .Query.Sort "oldest"}} class="on"{{end}}>Oldest</a>
-    </p>
+    <div class="sort">
+      <span class="micro">Sort</span>
+      <nav class="seg" aria-label="Sort by">
+        {{if .Query.Q}}
+          <a href="{{$page.WithSort ""}}"{{if $page.SortOn "relevance"}} class="on"{{end}}>Relevance</a>
+        {{end}}
+        <a href="{{$page.WithSort "added"}}"{{if $page.SortOn "added"}} class="on"{{end}}>Upload date</a>
+        <a href="{{$page.WithSort "created"}}"{{if $page.SortOn "created"}} class="on"{{end}}>Doc date</a>
+      </nav>
+      {{/* Relevance has no meaningful reverse, so the direction control only
+           appears once the ordering is by a date. */}}
+      {{if not ($page.SortOn "relevance")}}
+        <nav class="seg"><a href="{{$page.ToggleDir}}">{{$page.DirLabel}}</a></nav>
+      {{end}}
+    </div>
   </div>
 
   {{if not .Result.Hits}}
