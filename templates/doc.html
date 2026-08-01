@@ -13,6 +13,13 @@
       {{if $d.FileSize}}<span>{{humanSize $d.FileSize}}</span>{{end}}
     </p>
 
+    {{if .Search}}
+      <p class="searching">
+        Jumped to <strong>{{.Search}}</strong> in the document ·
+        <a href="/doc/{{$d.ID}}">clear</a>
+      </p>
+    {{end}}
+
     <p class="openlinks">
       <a href="/doc/{{$d.ID}}/pdf" target="_blank" rel="noopener">Open in new tab ↗</a>
       <a href="/doc/{{$d.ID}}/original">Download original</a>
@@ -90,7 +97,9 @@
     {{/* PDF.js rather than the browser's own viewer, so the find bar is
          consistent and always reachable. Scanned documents are searchable
          here too, because ocrmypdf embeds a real text layer. */}}
-    <iframe src="/static/pdfjs/web/viewer.html?file=/doc/{{$d.ID}}/pdf#search="
+    {{/* Only append the hash when there is something to look for; an empty
+         #search= makes the viewer open its find bar for no reason. */}}
+    <iframe src="/static/pdfjs/web/viewer.html?file=/doc/{{$d.ID}}/pdf{{if .Search}}#search={{.Search}}&phrase=true&highlightall=true{{end}}"
             title="{{$d.Title}}" allow="fullscreen"></iframe>
   </section>
 </div>

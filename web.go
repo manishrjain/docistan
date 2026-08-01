@@ -255,12 +255,15 @@ type page struct {
 	Doc       *Doc
 	Stages    []Stage
 	KnownTags []string
-	Jobs      []Job
-	Dupes     []DupeEvent
-	Failed    []Hit
-	Flash     []Flash
-	Spend     *SpendSummary
-	URL       *url.URL
+	// Search carries the term that led here, so the PDF viewer can jump
+	// straight to it instead of making the reader find it twice.
+	Search string
+	Jobs   []Job
+	Dupes  []DupeEvent
+	Failed []Hit
+	Flash  []Flash
+	Spend  *SpendSummary
+	URL    *url.URL
 }
 
 // SpendSummary reports actual model usage rather than an estimate, alongside
@@ -381,7 +384,7 @@ func (a *App) handleDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	a.render(w, "doc.html", page{
 		Title: doc.Title, Doc: doc, Stages: a.stagesFor(doc),
-		KnownTags: known, URL: r.URL,
+		KnownTags: known, Search: r.URL.Query().Get("q"), URL: r.URL,
 	})
 }
 

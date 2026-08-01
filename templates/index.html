@@ -61,7 +61,9 @@
             {{/* The title link is stretched over the whole card by CSS, so the
                  box is clickable without nesting anchors, which is invalid.
                  Tag links sit above it and keep their own behaviour. */}}
-            <a class="title stretch" href="/doc/{{$d.ID}}">{{$d.Title}}</a>
+            {{/* The query rides along so the document opens with the match
+                 already found in the PDF rather than only in the snippet. */}}
+            <a class="title stretch" href="/doc/{{$d.ID}}{{if $page.Query.Q}}?q={{$page.Query.Q}}{{end}}">{{$d.Title}}</a>
             <p class="sub">
               <span class="id">#{{$d.ID}}</span>
               {{if $d.CreatedDate}}<span>{{monthLabel $d.CreatedDate}}</span>{{end}}
