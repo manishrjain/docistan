@@ -396,15 +396,33 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+	// ParseForm ignores multipart bodies, leaving every value empty — which,
+	// combined with assigning fields unconditionally, is how a save could wipe
+	// a record. Pick the parser that matches the encoding.
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
+			http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	doc.Title = strings.TrimSpace(r.FormValue("title"))
-	doc.CreatedDate = normalizeMonth(r.FormValue("created_date"))
-	doc.CreatedTS = parseDateTS(doc.CreatedDate)
-	doc.Tags = splitTags(r.FormValue("tags"))
+	// Apply only the fields this request actually carries. Assigning every
+	// field from the form meant a request containing just one of them silently
+	// blanked the rest — a partial save has to be a partial update, not a
+	// whole-record overwrite.
+	if r.PostForm.Has("title") {
+		doc.Title = strings.TrimSpace(r.PostFormValue("title"))
+	}
+	if r.PostForm.Has("created_date") {
+		doc.CreatedDate = normalizeMonth(r.PostFormValue("created_date"))
+		doc.CreatedTS = parseDateTS(doc.CreatedDate)
+	}
+	if r.PostForm.Has("tags") {
+		doc.Tags = splitTags(r.PostFormValue("tags"))
+	}
 
 	// Write durably first, then index: a 200 must mean both.
 	if err := a.store.Save(doc); err != nil {

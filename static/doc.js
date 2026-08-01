@@ -28,60 +28,76 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // --- autosave ----------------------------------------------------------
-  // One save at a time. A change arriving mid-flight sets a flag rather than
-  // firing a second request, so rapid edits collapse into one follow-up and
-  // responses can never land out of order.
+  // Only the fields that actually changed are sent, and the server applies
+  // only what it receives. Posting the whole form meant any request missing a
+  // field blanked it, which is a data-loss bug waiting for a client change.
+  //
+  // One request at a time: further edits accumulate in `dirty` and go out in a
+  // single follow-up, so responses cannot land out of order.
   let saving = false;
-  let again = false;
+  const dirty = new Set();
 
-  async function save() {
-    if (saving) {
-      again = true;
-      return;
-    }
+  async function flush() {
+    if (saving || dirty.size === 0) return;
     saving = true;
-    setStatus("Saving…");
 
+    const names = [...dirty];
+    dirty.clear();
+
+    const body = new URLSearchParams();
+    for (const name of names) {
+      const el = form.elements[name];
+      if (el) body.set(name, el.value);
+    }
+
+    setStatus("Saving…");
     try {
       const res = await fetch(form.action, {
         method: "POST",
-        body: new FormData(form),
-        headers: { Accept: "application/json" },
+        body,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
       });
-      if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
       const data = await res.json();
       if (heading && data.title) heading.textContent = data.title;
       setStatus("Saved", "ok");
     } catch (err) {
-      // Never silently drop an edit: the field keeps the user's value and the
-      // message stays until the next successful save.
+      // Put the fields back so a later save retries them rather than dropping
+      // the edit on the floor.
+      names.forEach((n) => dirty.add(n));
       setStatus(`Not saved — ${String(err.message || err).slice(0, 120)}`, "bad");
     } finally {
       saving = false;
-      if (again) {
-        again = false;
-        save();
-      }
+      if (dirty.size) flush();
     }
   }
 
+  function save(...names) {
+    names.forEach((n) => dirty.add(n));
+    flush();
+  }
+
   let debounce;
-  function saveSoon(delay = 700) {
+  function saveSoon(name, delay = 700) {
+    dirty.add(name);
     clearTimeout(debounce);
-    debounce = setTimeout(save, delay);
+    debounce = setTimeout(flush, delay);
   }
 
   // Typing saves shortly after you stop; leaving the field saves at once.
   for (const el of form.querySelectorAll('input[type="text"], input[type="month"]')) {
-    if (el === field) continue;
-    el.addEventListener("input", () => saveSoon());
+    if (el === field || !el.name) continue;
+    el.addEventListener("input", () => saveSoon(el.name));
     el.addEventListener("change", () => {
       clearTimeout(debounce);
-      save();
+      save(el.name);
     });
     el.addEventListener("blur", () => {
       clearTimeout(debounce);
-      save();
+      save(el.name);
     });
   }
 
@@ -89,7 +105,7 @@ document.addEventListener("DOMContentLoaded", () => {
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     clearTimeout(debounce);
-    save();
+    save("title", "created_date", "tags");
   });
 
   // The button is redundant once edits save themselves.
@@ -139,8 +155,9 @@ document.addEventListener("DOMContentLoaded", () => {
   function sync() {
     field.value = tags.join(", ");
     render();
-    clearTimeout(debounce);
-    save();
+    // A tag going on or off is a decision, not typing, so it saves at once —
+    // and sends only the tags field.
+    save("tags");
   }
 
   function render() {
