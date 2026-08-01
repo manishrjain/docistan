@@ -247,17 +247,18 @@ func plural(n int) string {
 
 // page is the data every template receives.
 type page struct {
-	Title  string
-	Query  Query
-	Result *Result
-	Doc    *Doc
-	Stages []Stage
-	Jobs   []Job
-	Dupes  []DupeEvent
-	Failed []Hit
-	Flash  []Flash
-	Spend  *SpendSummary
-	URL    *url.URL
+	Title     string
+	Query     Query
+	Result    *Result
+	Doc       *Doc
+	Stages    []Stage
+	KnownTags []string
+	Jobs      []Job
+	Dupes     []DupeEvent
+	Failed    []Hit
+	Flash     []Flash
+	Spend     *SpendSummary
+	URL       *url.URL
 }
 
 // SpendSummary reports actual model usage rather than an estimate, alongside
@@ -369,7 +370,17 @@ func (a *App) handleDoc(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "doc.html", page{Title: doc.Title, Doc: doc, Stages: a.stagesFor(doc), URL: r.URL})
+	// The tag vocabulary drives autocomplete, so adding a tag that already
+	// exists is a pick rather than a retype — which is what keeps the
+	// vocabulary from filling with near-duplicates.
+	known, err := a.search.Vocabulary(r.Context(), "tags", 200)
+	if err != nil {
+		logf("doc %d: reading tag vocabulary: %v", id, err)
+	}
+	a.render(w, "doc.html", page{
+		Title: doc.Title, Doc: doc, Stages: a.stagesFor(doc),
+		KnownTags: known, URL: r.URL,
+	})
 }
 
 func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {

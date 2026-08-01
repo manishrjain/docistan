@@ -1,10 +1,6 @@
 {{define "content"}}
 {{$d := .Doc}}
 <div class="doc-layout">
-  <section class="preview">
-    <iframe src="/doc/{{$d.ID}}/pdf" title="{{$d.Title}}"></iframe>
-  </section>
-
   <aside class="doc-meta">
     <h1>{{$d.Title}}</h1>
     <p class="sub">
@@ -12,6 +8,11 @@
       <span>{{$d.OriginalName}}</span>
       {{if $d.PageCount}}<span>{{$d.PageCount}} page{{if ne $d.PageCount 1}}s{{end}}</span>{{end}}
       {{if $d.FileSize}}<span>{{humanSize $d.FileSize}}</span>{{end}}
+    </p>
+
+    <p class="openlinks">
+      <a href="/doc/{{$d.ID}}/pdf" target="_blank" rel="noopener">Open in new tab ↗</a>
+      <a href="/doc/{{$d.ID}}/original">Download original</a>
     </p>
 
     {{if ne $d.Status "ready"}}
@@ -32,9 +33,15 @@
       <label>Document month
         <input type="month" name="created_date" value="{{$d.CreatedDate}}">
       </label>
-      <label>Tags <small>comma separated — tags are the only classifier</small>
-        <input type="text" name="tags" value="{{joinTags $d.Tags}}">
-      </label>
+
+      <div class="field">
+        <span class="field-label">Tags</span>
+        <div class="tag-editor" data-known="{{joinTags .KnownTags}}">
+          <input type="text" name="tags" id="tags-field" value="{{joinTags $d.Tags}}"
+                 aria-label="Tags, comma separated">
+        </div>
+      </div>
+
       <button type="submit" class="primary">Save</button>
     </form>
 
@@ -62,7 +69,6 @@
     </details>
 
     <div class="actions">
-      <a href="/doc/{{$d.ID}}/original" class="button">Download original</a>
       <form method="post" action="/doc/{{$d.ID}}/enrich"><button type="submit">Re-tag with AI</button></form>
       <form method="post" action="/doc/{{$d.ID}}/retry"
             onsubmit="return confirm('Redo OCR and metadata for #{{$d.ID}}? This re-runs the model.')">
@@ -74,5 +80,11 @@
       </form>
     </div>
   </aside>
+
+  <section class="preview">
+    <iframe src="/doc/{{$d.ID}}/pdf" title="{{$d.Title}}"></iframe>
+  </section>
 </div>
 {{end}}
+
+{{define "head"}}<script src="/static/tags.js" defer></script>{{end}}

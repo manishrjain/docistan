@@ -54,11 +54,14 @@
       {{range .Result.Hits}}
         {{$d := .Doc}}
         <li class="card">
-          <a class="thumb" href="/doc/{{$d.ID}}">
+          <span class="thumb">
             <img src="/doc/{{$d.ID}}/thumb" alt="" loading="lazy">
-          </a>
+          </span>
           <div class="meta">
-            <a class="title" href="/doc/{{$d.ID}}">{{$d.Title}}</a>
+            {{/* The title link is stretched over the whole card by CSS, so the
+                 box is clickable without nesting anchors, which is invalid.
+                 Tag links sit above it and keep their own behaviour. */}}
+            <a class="title stretch" href="/doc/{{$d.ID}}">{{$d.Title}}</a>
             <p class="sub">
               <span class="id">#{{$d.ID}}</span>
               {{if $d.CreatedDate}}<span>{{monthLabel $d.CreatedDate}}</span>{{end}}
