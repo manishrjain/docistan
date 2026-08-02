@@ -24,6 +24,16 @@ const (
 	StatusDeleted = "deleted"
 )
 
+// trashRetention is how long a document sits in the trash before the sweeper
+// destroys it for good. Long enough that a mistake is noticed and undone, short
+// enough that the trash is not a second archive.
+const trashRetention = 30 * 24 * time.Hour
+
+// failReasonLimit bounds the failure text a result row carries. A wrapped tool
+// error runs to a couple of hundred characters and carries an absolute path;
+// the row has one line for it and the document page has the whole thing.
+const failReasonLimit = 160
+
 // TagNeedsReview is ours, not a description of the document: it marks a
 // document the model failed to describe. Named once because three places act
 // on it — the prompt withholds it, the failure path adds it, and the timeline
@@ -56,7 +66,13 @@ type Doc struct {
 	Tags         []string `json:"tags"`
 	CreatedDate  string   `json:"created_date"`
 	DeletedTS    int64    `json:"deleted_ts,omitempty"`
-	OCRSource    string   `json:"ocr_source"`
+	// DeleteAfterTS records when a trashed document may be purged, rather than
+	// merely that it was trashed. The deadline is the state: it survives
+	// restarts without a timer to rebuild, and anyone reading the sidecar sees
+	// the date itself instead of having to know the retention period and do the
+	// arithmetic. Zero means the document is not in the trash.
+	DeleteAfterTS int64  `json:"delete_after_ts,omitempty"`
+	OCRSource     string `json:"ocr_source"`
 	// NativeText records that the source PDF had its own text layer. That text
 	// is exact, so it must never be replaced by a transcription of an image.
 	NativeText bool `json:"native_text"`
@@ -80,6 +96,50 @@ type Doc struct {
 	// timeline simply omits the time in that case.
 	TextTS     int64 `json:"text_ts,omitempty"`
 	EnrichedTS int64 `json:"enriched_ts,omitempty"`
+}
+
+// Trashed reports whether the document is in the trash. Every view and the
+// enrichment queue ask this question, so it is answered in one place rather
+// than by each of them remembering which way the comparison goes.
+func (d *Doc) Trashed() bool { return d.DeleteAfterTS > 0 }
+
+// Trash moves the document to the trash by setting its purge deadline. Nothing
+// on disk is touched: the original, the archival copy, the thumbnail and the
+// extracted text all stay exactly where they are, which is what makes Restore
+// lossless rather than a best effort.
+//
+// now is a parameter so the transition can be exercised without waiting a
+// month for it.
+func (d *Doc) Trash(now time.Time) { d.DeleteAfterTS = now.Add(trashRetention).Unix() }
+
+// Restore takes it back out. Clearing the deadline is the whole operation —
+// there is nothing to put back.
+func (d *Doc) Restore() { d.DeleteAfterTS = 0 }
+
+// duePurge is the sweeper's candidate test: in the trash at all, and past its
+// deadline. It is a function rather than an expression written twice because
+// the index filter and the sidecar re-check that follows it have to agree about
+// what "due" means, and only one of those two can be tested directly.
+func duePurge(deleteAfterTS, now int64) bool {
+	return deleteAfterTS > 0 && deleteAfterTS <= now
+}
+
+// FailReason is the one-line explanation a failed document carries on a result
+// row. The pipeline's error is a wrapped tool message and can run long, so it
+// is bounded here; the document page shows it whole.
+func (d *Doc) FailReason() string {
+	if d.Status != StatusFailed {
+		return ""
+	}
+	if msg := strings.TrimSpace(d.Error); msg != "" {
+		return clip(msg, failReasonLimit)
+	}
+	// A failure with no message still has to say something, or the row would
+	// carry a badge and no reason for it.
+	if d.FailedStage != "" {
+		return "failed at " + d.FailedStage
+	}
+	return "processing failed"
 }
 
 // Store owns the data directory. Sidecars are the durable state; the only
@@ -215,6 +275,10 @@ func (s *Store) LoadMeta(id int) (*Doc, error) {
 		OriginalExt  string `json:"original_ext"`
 		Status       string `json:"status"`
 		AddedTS      int64  `json:"added_ts"`
+		// The purge deadline rides along because the sweeper checks it against
+		// the sidecar before destroying anything, and it would otherwise have to
+		// read every candidate's full text to ask a one-field question.
+		DeleteAfterTS int64 `json:"delete_after_ts"`
 	}
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("sidecar %d: %w", id, err)
@@ -222,6 +286,7 @@ func (s *Store) LoadMeta(id int) (*Doc, error) {
 	return &Doc{
 		ID: m.ID, Title: m.Title, OriginalName: m.OriginalName,
 		OriginalExt: m.OriginalExt, Status: m.Status, AddedTS: m.AddedTS,
+		DeleteAfterTS: m.DeleteAfterTS,
 	}, nil
 }
 

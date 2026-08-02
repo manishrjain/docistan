@@ -98,6 +98,9 @@ func (s *Search) schema() *api.CollectionSchema {
 			f("failed_stage", "string", stored),
 			f("created_ts", "int64", sortable),
 			f("added_ts", "int64", sortable),
+			// Indexed rather than `stored`: every query filters on this, and
+			// `stored` sets index:false, which makes a field unfilterable.
+			f("delete_after_ts", "int64"),
 			// Faceted purely for the stats Typesense returns with a facet, which
 			// is what lets the archive total outlive the process.
 			f("llm_in", "int64", facet),
@@ -157,20 +160,23 @@ func tsDoc(d *Doc) map[string]any {
 		// Derived here, at index-write time, rather than kept on the document.
 		// The sidecar then stores only the date it was told, and the number the
 		// index sorts and filters on cannot drift away from it.
-		"created_ts":   parseDateTS(d.CreatedDate),
-		"added_ts":     d.AddedTS,
-		"created_date": d.CreatedDate,
-		"page_count":   d.PageCount,
-		"file_size":    d.FileSize,
-		"ocr_source":   d.OCRSource,
-		"signed":       d.Signed,
-		"enriched":     d.Enriched,
-		"native_text":  d.NativeText,
-		"llm_in":       d.LLMIn,
-		"llm_out":      d.LLMOut,
-		"llm_cents":    d.LLMCents,
-		"text_ts":      d.TextTS,
-		"enriched_ts":  d.EnrichedTS,
+		"created_ts": parseDateTS(d.CreatedDate),
+		"added_ts":   d.AddedTS,
+		// Zero for everything that is not in the trash, so the default view can
+		// be a filter on this field rather than an absence of one.
+		"delete_after_ts": d.DeleteAfterTS,
+		"created_date":    d.CreatedDate,
+		"page_count":      d.PageCount,
+		"file_size":       d.FileSize,
+		"ocr_source":      d.OCRSource,
+		"signed":          d.Signed,
+		"enriched":        d.Enriched,
+		"native_text":     d.NativeText,
+		"llm_in":          d.LLMIn,
+		"llm_out":         d.LLMOut,
+		"llm_cents":       d.LLMCents,
+		"text_ts":         d.TextTS,
+		"enriched_ts":     d.EnrichedTS,
 	}
 }
 
@@ -215,11 +221,26 @@ func (s *Search) Import(ctx context.Context, docs []*Doc) error {
 	return nil
 }
 
+// The three views the archive offers. They partition it: everything is in
+// exactly one of "not trashed" and "trashed", and Failed is the slice of the
+// first that did not process. Failed documents therefore appear under All as
+// well — All means the whole archive, not the part of it that worked.
+const (
+	ViewAll    = ""
+	ViewFailed = "failed"
+	ViewTrash  = "trash"
+)
+
 // Query is a parsed search request from the URL.
 type Query struct {
 	Q      string
 	Tags   []string // every tag must match, so picking more narrows
 	Status string
+	// View selects which of the three slices is being looked at. It is a mode
+	// rather than a filter — it decides what the archive is, and the filters
+	// then narrow that — which is why it is not part of HasFilters and is not
+	// cleared by "Clear filters".
+	View string
 	// Sort names the field: "" for relevance, "added" for when the document
 	// arrived, "created" for the date on the document itself. Direction is
 	// separate, because which field to order by and which end to start from
@@ -380,6 +401,19 @@ func (s *Search) query(ctx context.Context, q Query, perPage int, idsOnly bool) 
 			filters = append(filters, fmt.Sprintf(`%s:="%s"`, field, escapeFilterValue(value)))
 		}
 	}
+	// The view goes on first, and every query gets one whether it asked or not.
+	// That is what makes the trash actually hidden: the index, the status page's
+	// failed table and the bulk download all build their requests through Query,
+	// so none of them can forget to exclude a document that is on its way out.
+	if q.View == ViewTrash {
+		filters = append(filters, "delete_after_ts:>0")
+	} else {
+		filters = append(filters, "delete_after_ts:=0")
+		if q.View == ViewFailed {
+			filters = append(filters, "status:="+StatusFailed)
+		}
+	}
+
 	// Chained rather than combined into one list filter, because chaining is
 	// what gives AND: each selected tag narrows further.
 	for _, t := range q.Tags {
@@ -521,22 +555,80 @@ func (s *Search) AllIDs(ctx context.Context, q Query, limit int) ([]int, error) 
 	}
 }
 
-// Count returns how many documents are indexed, for the search placeholder.
-// Asking Typesense for zero results makes this a metadata lookup rather than
-// a fetch, so it costs almost nothing on every index render.
-func (s *Search) Count(ctx context.Context) (int, error) {
-	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
-		Q:       pointer.String("*"),
-		QueryBy: pointer.String("title"),
-		PerPage: pointer.Int(0),
-	})
-	if err != nil {
-		return 0, err
+// ViewCounts is how many documents each of the three views holds. Archive-wide
+// rather than narrowed by whatever is currently searched or filtered: the
+// control says how big each view is, so that a search finding nothing in Failed
+// still shows there is nothing there rather than reporting the search.
+//
+// Three metadata lookups, each asking for zero results so Typesense counts
+// rather than fetches, which is cheap enough to pay on every index render. The
+// All figure doubles as the size of the searchable archive, which is what the
+// search placeholder used to make a fourth lookup for. A multi_search could
+// fold the three into one round trip later; it is not worth the extra shape
+// yet.
+func (s *Search) ViewCounts(ctx context.Context) (all, failed, trash int, err error) {
+	count := func(filter string) (int, error) {
+		res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
+			Q:        pointer.String("*"),
+			QueryBy:  pointer.String("title"),
+			FilterBy: pointer.String(filter),
+			PerPage:  pointer.Int(0),
+		})
+		if err != nil {
+			return 0, err
+		}
+		if res.Found == nil {
+			return 0, nil
+		}
+		return *res.Found, nil
 	}
-	if res.Found == nil {
-		return 0, nil
+	if all, err = count("delete_after_ts:=0"); err != nil {
+		return 0, 0, 0, err
 	}
-	return *res.Found, nil
+	if failed, err = count("delete_after_ts:=0 && status:=" + StatusFailed); err != nil {
+		return 0, 0, 0, err
+	}
+	if trash, err = count("delete_after_ts:>0"); err != nil {
+		return 0, 0, 0, err
+	}
+	return all, failed, trash, nil
+}
+
+// ExpiredTrashIDs lists documents whose purge deadline has passed, for the
+// sweeper. Paged the way AllIDs is, and asking for nothing but the id, because
+// a sweep after a large bulk trash can match thousands of documents and none of
+// their contents are wanted here. The whole list is read before anything is
+// deleted, so the pages are walking a set that is not changing underneath them.
+func (s *Search) ExpiredTrashIDs(ctx context.Context, now int64) ([]int, error) {
+	const batch = 250
+	var out []int
+	for page := 1; ; page++ {
+		res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
+			Q:             pointer.String("*"),
+			QueryBy:       pointer.String("title"),
+			FilterBy:      pointer.String(fmt.Sprintf("delete_after_ts:>0 && delete_after_ts:<=%d", now)),
+			IncludeFields: pointer.String("id"),
+			PerPage:       pointer.Int(batch),
+			Page:          pointer.Int(page),
+		})
+		if err != nil {
+			return out, err
+		}
+		if res.Hits == nil || len(*res.Hits) == 0 {
+			return out, nil
+		}
+		for _, h := range *res.Hits {
+			if h.Document == nil {
+				continue
+			}
+			if id, ok := hitID(*h.Document); ok {
+				out = append(out, id)
+			}
+		}
+		if len(*res.Hits) < batch {
+			return out, nil
+		}
+	}
 }
 
 // TokenTotals sums model usage across every indexed document. Typesense
@@ -691,27 +783,28 @@ func docFromMap(m map[string]any) *Doc {
 	}
 
 	d := &Doc{
-		OriginalName: str("original_name"),
-		Title:        str("title"),
-		Summary:      str("summary"),
-		Status:       str("status"),
-		Error:        str("error"),
-		FailedStage:  str("failed_stage"),
-		SHA256:       str("sha256"),
-		CreatedDate:  str("created_date"),
-		OCRSource:    str("ocr_source"),
-		Content:      str("content"),
-		AddedTS:      num("added_ts"),
-		LLMIn:        num("llm_in"),
-		LLMOut:       num("llm_out"),
-		LLMCents:     flt("llm_cents"),
-		TextTS:       num("text_ts"),
-		EnrichedTS:   num("enriched_ts"),
-		FileSize:     num("file_size"),
-		PageCount:    int(num("page_count")),
-		Signed:       boolean("signed"),
-		Enriched:     boolean("enriched"),
-		NativeText:   boolean("native_text"),
+		OriginalName:  str("original_name"),
+		Title:         str("title"),
+		Summary:       str("summary"),
+		Status:        str("status"),
+		Error:         str("error"),
+		FailedStage:   str("failed_stage"),
+		SHA256:        str("sha256"),
+		CreatedDate:   str("created_date"),
+		OCRSource:     str("ocr_source"),
+		Content:       str("content"),
+		AddedTS:       num("added_ts"),
+		LLMIn:         num("llm_in"),
+		LLMOut:        num("llm_out"),
+		LLMCents:      flt("llm_cents"),
+		TextTS:        num("text_ts"),
+		EnrichedTS:    num("enriched_ts"),
+		DeleteAfterTS: num("delete_after_ts"),
+		FileSize:      num("file_size"),
+		PageCount:     int(num("page_count")),
+		Signed:        boolean("signed"),
+		Enriched:      boolean("enriched"),
+		NativeText:    boolean("native_text"),
 	}
 	d.ID, _ = hitID(m)
 	if tags, ok := m["tags"].([]any); ok {

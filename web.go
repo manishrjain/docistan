@@ -251,6 +251,9 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /doc/{id}", a.handleDoc)
 	mux.HandleFunc("POST /doc/{id}", a.handleDocUpdate)
 	mux.HandleFunc("POST /doc/{id}/delete", a.handleDocDelete)
+	mux.HandleFunc("POST /doc/{id}/trash", a.handleDocTrash)
+	mux.HandleFunc("POST /doc/{id}/restore", a.handleDocRestore)
+	mux.HandleFunc("POST /docs/action", a.handleDocsAction)
 	mux.HandleFunc("POST /doc/{id}/retry", a.handleDocRetry)
 	mux.HandleFunc("POST /doc/{id}/enrich", a.handleDocEnrich)
 	mux.HandleFunc("GET /doc/{id}/meta", a.handleDocMeta)
@@ -459,6 +462,11 @@ type page struct {
 	Doc       *Doc
 	Stages    []Stage
 	KnownTags []string
+	// Views is the size of each of the three slices of the archive, for the
+	// segmented control. A value rather than a pointer: a lookup that failed
+	// leaves zeros, which is a control that renders rather than a page that
+	// does not.
+	Views ViewCounts
 	// Search carries the term that led here, so the PDF viewer can jump
 	// straight to it instead of making the reader find it twice.
 	Search  string
@@ -603,6 +611,17 @@ func (p page) ToggleTag(tag string) string {
 }
 
 func (p page) TagOn(tag string) bool { return slices.Contains(p.Query.Tags, tag) }
+
+// ViewCounts is how many documents each view holds, in the order the control
+// shows them.
+type ViewCounts struct{ All, Failed, Trash int }
+
+func (p page) ViewOn(v string) bool { return p.Query.View == v }
+
+// InTrash decides which bulk actions the selection offers and how an empty
+// listing explains itself. Asked of the page rather than of the query, because
+// every template that needs it has the page in hand.
+func (p page) InTrash() bool { return p.Query.View == ViewTrash }
 
 // BackLink returns to the search that led here, so "All results" means the
 // results you actually came from rather than an unfiltered list.
@@ -768,6 +787,10 @@ func (p page) FilterFields(withDates bool) []Field {
 		add("tag", t)
 	}
 	add("status", q.Status)
+	// The view rides along with the filters even though it is not one: both
+	// forms post back to the index, and a submit that dropped it would answer a
+	// change of sort order by moving you out of the trash.
+	add("view", q.View)
 	// The raw values, not SortField(): resolving "" to "added" here would turn
 	// a relevance-ordered search into an arrival-ordered one on submit.
 	add("sort", q.Sort)
@@ -790,6 +813,7 @@ func parseQuery(v url.Values) Query {
 		Q:      v.Get("q"),
 		Tags:   v["tag"],
 		Status: v.Get("status"),
+		View:   v.Get("view"),
 		Sort:   v.Get("sort"),
 		Dir:    v.Get("dir"),
 		Range:  v.Get("range"),
@@ -797,6 +821,13 @@ func parseQuery(v url.Values) Query {
 		To:     joinYM(v.Get("to_y"), v.Get("to_m")),
 	}
 	q.Page, _ = strconv.Atoi(v.Get("page"))
+
+	// A view we do not have is All rather than an empty listing. Normalising
+	// here rather than at the point of use means the value carried through the
+	// forms and shown as the selected segment is one of exactly three things.
+	if q.View != ViewFailed && q.View != ViewTrash {
+		q.View = ViewAll
+	}
 
 	// Sorting used to be one list where "oldest" meant oldest-by-arrival.
 	// Keep old links meaning what they meant.
@@ -826,18 +857,31 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "search unavailable: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	// The placeholder says how many documents are searchable, which is only
-	// the same as the result count when nothing is filtered.
-	total := res.Found
-	if q.Q != "" || q.HasFilters() {
-		if n, err := a.search.Count(r.Context()); err == nil {
-			total = n
-		}
+	// The counts are the archive's, not this page's, so they are asked for
+	// separately. A failure here leaves zeros rather than a broken page: the
+	// results themselves are already rendered by the time it matters.
+	var views ViewCounts
+	if all, failed, trash, err := a.search.ViewCounts(r.Context()); err != nil {
+		logf("view counts: %v", err)
+	} else {
+		views = ViewCounts{All: all, Failed: failed, Trash: trash}
 	}
+	// The placeholder says how many documents are searchable, which is only the
+	// same as the result count when nothing is filtered — and which is exactly
+	// what the All view counts, so it comes from there rather than from a
+	// second archive-wide lookup that would now have to learn about the trash
+	// to stay honest. res.Found is the fallback if that lookup failed.
+	total := res.Found
+	if views.All > 0 {
+		total = views.All
+	}
+
 	a.render(w, "index.html", page{
 		Query:  q,
 		Result: res,
 		Total:  total,
+		Views:  views,
+		Flash:  actionNotice(r.URL.Query()),
 		URL:    r.URL,
 	})
 }
@@ -958,11 +1002,24 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)
 }
 
-func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
-	if !ok {
-		return
-	}
+// Why a document was destroyed, for the journal line that outlives it. The two
+// are not the same event to whoever reads that line later: one is a person
+// having decided, the other is a deadline having passed.
+const (
+	purgeByHand    = "delete forever"
+	purgeBySweeper = "trash expired"
+)
+
+// purge is permanent deletion, shared by the three ways to reach it: the
+// document page, the bulk action, and the sweeper. Files go, the sidecar
+// becomes a tombstone so the id stays spoken for, and the index entry is
+// removed.
+//
+// The event name is the caller's because these are not one act: a person
+// deleting one document by hand is "deleted", the way it always was, while the
+// trash emptying itself is "purged". why says which flavour of purge it was, or
+// is empty for the plain delete that needs no explanation.
+func (a *App) purge(ctx context.Context, id int, event, why string) error {
 	// Read the title before the document goes, so the journal can name what was
 	// deleted. The tombstone keeps it too, but a line that says only "DOC-12
 	// deleted" makes the reader go looking.
@@ -971,25 +1028,203 @@ func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
 		title = doc.Title
 	}
 	if err := a.store.Delete(id); err != nil {
-		http.Error(w, "deleting document: "+err.Error(), http.StatusInternalServerError)
-		return
+		return err
 	}
-	a.journal("deleted", id, "", title)
+	detail := title
+	if why != "" {
+		detail = strings.TrimPrefix(title+" — "+why, " — ")
+	}
+	a.journal(event, id, "", detail)
+
 	// Removal gets the same contract as a write: the index is what every page
 	// is drawn from, so a document deleted from disk but left in it is a search
-	// result that 404s. Retried until Typesense accepts it, holding the request
+	// result that 404s. Retried until Typesense accepts it, holding the caller
 	// the way persist does.
 	//
 	// The accepted edge is the client hanging up mid-retry: the ghost then
 	// survives until the next start, whose replay rebuilds the index from the
 	// sidecars and skips tombstones — so it goes then, and no earlier.
-	if err := retryUntil(r.Context(), retryInitial, retryMax,
+	if err := retryUntil(ctx, retryInitial, retryMax,
 		fmt.Sprintf("doc %d: removing from index", id),
-		func() error { return a.search.Delete(r.Context(), id) },
+		func() error { return a.search.Delete(ctx, id) },
 	); err != nil {
 		logf("doc %d: gave up removing from index (%v); it stays visible until the next restart", id, err)
 	}
+	return nil
+}
+
+// handleDocDelete destroys one document. This route has always been the
+// permanent one; what changed is that the button which used to point at it now
+// points at the trash, so reaching it means someone asked for "delete forever".
+func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := a.purge(r.Context(), id, "deleted", ""); err != nil {
+		http.Error(w, "deleting document: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handleDocTrash and handleDocRestore move one document in and out of the
+// trash. Neither touches a file: trashing writes a purge deadline into the
+// sidecar and restoring clears it, which is what makes a restore lossless
+// rather than a reconstruction.
+func (a *App) handleDocTrash(w http.ResponseWriter, r *http.Request)   { a.setTrashed(w, r, true) }
+func (a *App) handleDocRestore(w http.ResponseWriter, r *http.Request) { a.setTrashed(w, r, false) }
+
+func (a *App) setTrashed(w http.ResponseWriter, r *http.Request, trash bool) {
+	doc, ok := a.loadDoc(w, r)
+	if !ok {
+		return
+	}
+	if trash {
+		doc.Trash(time.Now())
+	} else {
+		doc.Restore()
+	}
+	// Sidecar first, then the index, both retried until they land — the same
+	// contract every other write has. Only a dead request context comes back.
+	if err := a.persist(r.Context(), doc); err != nil {
+		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.journalTrash(doc, trash)
+
+	if wantsJSON(r) {
+		writeJSON(w, map[string]any{"trashed": doc.Trashed(), "delete_after_ts": doc.DeleteAfterTS})
+		return
+	}
+	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)
+}
+
+// journalTrash records the move. The trashing line carries the date rather than
+// the retention period, because "purges 2026-09-01" is a fact about this
+// document and "30 days" is a fact about the configuration.
+func (a *App) journalTrash(doc *Doc, trash bool) {
+	if !trash {
+		a.journal("restored", doc.ID, "", "")
+		return
+	}
+	a.journal("trashed", doc.ID, "", "purges "+time.Unix(doc.DeleteAfterTS, 0).Format("2006-01-02"))
+}
+
+// The bulk actions the index offers, as the form posts them.
+const (
+	actionTrash   = "trash"
+	actionRestore = "restore"
+	actionPurge   = "purge"
+)
+
+// handleDocsAction applies one action to a posted selection. It shares the
+// index's existing form with Download — the buttons carry formaction and their
+// own action name — so a selection can be trashed, restored or destroyed
+// without JavaScript and without a second set of checkboxes.
+func (a *App) handleDocsAction(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	action := r.PostFormValue("action")
+	switch action {
+	case actionTrash, actionRestore, actionPurge:
+	default:
+		http.Error(w, "unknown action", http.StatusBadRequest)
+		return
+	}
+
+	var done int
+	for _, id := range postedIDs(r.PostForm) {
+		var err error
+		if action == actionPurge {
+			err = a.purge(r.Context(), id, "purged", purgeByHand)
+		} else {
+			err = a.setTrashedByID(r.Context(), id, action == actionTrash)
+		}
+		if err != nil {
+			// One document that could not be moved does not cancel the rest of
+			// the selection; the count reports what actually happened.
+			logf("%s %s: %v", action, docCode(id), err)
+			continue
+		}
+		done++
+	}
+	// Back to the listing the selection was made in, filters and view intact,
+	// with the outcome to report. Page one, because the documents that were on
+	// the page are the ones that just moved.
+	http.Redirect(w, r, indexURL(parseQuery(r.PostForm), action, done), http.StatusSeeOther)
+}
+
+func (a *App) setTrashedByID(ctx context.Context, id int, trash bool) error {
+	doc, err := a.store.Load(id)
+	if err != nil {
+		return err
+	}
+	if trash {
+		doc.Trash(time.Now())
+	} else {
+		doc.Restore()
+	}
+	if err := a.persist(ctx, doc); err != nil {
+		return err
+	}
+	a.journalTrash(doc, trash)
+	return nil
+}
+
+// postedIDs reads a selection out of a form. Download and the bulk actions post
+// the same checkboxes, so they read them the same way.
+func postedIDs(v url.Values) []int {
+	var ids []int
+	for _, raw := range v["id"] {
+		if id, err := strconv.Atoi(raw); err == nil && id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// indexURL is the way back to a listing after a bulk action, built from
+// FilterFields — the same list the forms post — so the way back cannot drift
+// from the way in. The outcome travels as an action and a count rather than as
+// the sentence itself: a URL is not a place to put text that will be shown to
+// whoever opens it.
+func indexURL(q Query, action string, n int) string {
+	v := url.Values{}
+	for _, f := range (page{Query: q}).FilterFields(true) {
+		v.Add(f.Name, f.Value)
+	}
+	if n > 0 {
+		v.Set("done", action)
+		v.Set("n", strconv.Itoa(n))
+	}
+	if len(v) == 0 {
+		return "/"
+	}
+	return "/?" + v.Encode()
+}
+
+// actionNotice turns that back into the line the index shows. The wording lives
+// here, in one place, so the three notices are written once and a hand-edited
+// URL can only ever produce one of them.
+func actionNotice(v url.Values) []Flash {
+	n, _ := strconv.Atoi(v.Get("n"))
+	if n <= 0 {
+		return nil
+	}
+	switch v.Get("done") {
+	case actionTrash:
+		// The retention is named in days rather than spelled out, so the notice
+		// cannot come to disagree with the deadline actually written.
+		return []Flash{{Text: fmt.Sprintf("%d moved to trash — purged after %d days.", n, int(trashRetention/(24*time.Hour)))}}
+	case actionRestore:
+		return []Flash{{Text: fmt.Sprintf("%d restored.", n)}}
+	case actionPurge:
+		return []Flash{{Text: fmt.Sprintf("%d deleted permanently.", n)}}
+	}
+	return nil
 }
 
 // handleDocRetry rebuilds a document from its original: OCR, thumbnail, text
@@ -1217,11 +1452,7 @@ func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		for _, v := range r.PostForm["id"] {
-			if id, err := strconv.Atoi(v); err == nil && id > 0 {
-				ids = append(ids, id)
-			}
-		}
+		ids = postedIDs(r.PostForm)
 	}
 	if len(ids) == 0 {
 		http.Error(w, "nothing selected", http.StatusBadRequest)

@@ -280,6 +280,7 @@ func TestExtensionTaxonomy(t *testing.T) {
 func TestFilterFieldsRoundTrip(t *testing.T) {
 	want := Query{
 		Q: "oceanside", Tags: []string{"alta", "escrow"}, Status: StatusReady,
+		View: ViewTrash,
 		Sort: "created", Dir: "asc", Range: "custom", From: "2025-03", To: "2026-01",
 	}
 	p := page{Query: want}
@@ -297,7 +298,7 @@ func TestFilterFieldsRoundTrip(t *testing.T) {
 	for _, f := range p.FilterFields(false) {
 		names[f.Name] = true
 	}
-	for _, n := range []string{"q", "tag", "status", "sort", "dir"} {
+	for _, n := range []string{"q", "tag", "status", "view", "sort", "dir"} {
 		if !names[n] {
 			t.Errorf("FilterFields(false) dropped %q", n)
 		}
@@ -331,6 +332,42 @@ func TestIndexFormsCarrySortDirection(t *testing.T) {
 	// Once in the custom-range form, once in the download picker.
 	if n := strings.Count(buf.String(), `name="dir" value="asc"`); n != 2 {
 		t.Errorf("dir hidden input appears %d time(s), want 2 (custom-range form and picker)", n)
+	}
+}
+
+// The view has to travel with the filters for the same reason the sort
+// direction does, but the consequence is worse: a form that dropped it would
+// answer "sort by document date" by moving you out of the trash and back to
+// All, which reads as the documents having been restored. parseQuery keeps it —
+// TestFilterFieldsRoundTrip covers that — so what is left to check is that both
+// forms actually put it on the page.
+func TestIndexFormsCarryTheView(t *testing.T) {
+	a := &App{}
+	tpl, err := a.templates("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := page{
+		Query: Query{
+			View: ViewTrash, Range: "custom", From: "2025-03", To: "2026-01",
+		},
+		Result: &Result{Facets: map[string][]FacetValue{}},
+	}
+	var buf bytes.Buffer
+	if err := tpl.ExecuteTemplate(&buf, "layout", data); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(buf.String(), `name="view" value="trash"`); n != 2 {
+		t.Errorf("view hidden input appears %d time(s), want 2 (custom-range form and picker)", n)
+	}
+	// And the trash offers the two ways out of itself rather than the way in.
+	for _, want := range []string{`value="restore"`, `value="purge"`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("the trash view does not offer %s", want)
+		}
+	}
+	if strings.Contains(buf.String(), ">Move to trash<") {
+		t.Error("the trash view offers Move to trash, which is where you already are")
 	}
 }
 
@@ -497,6 +534,117 @@ func TestSidecarKeepsCost(t *testing.T) {
 	}
 	if !bytes.Contains(b, []byte(`"llm_cents"`)) {
 		t.Errorf("sidecar does not record the cost:\n%s", b)
+	}
+}
+
+// Trashing is a deadline rather than a flag: what goes on the document is when
+// it may be destroyed, so the thirty days survive a restart with no timer to
+// rebuild and can be read straight off the sidecar. The period is restated here
+// rather than taken from trashRetention, because a test that reads the constant
+// it is checking would agree with any value that constant ever had.
+//
+// Restoring has to clear the deadline completely. A document left carrying a
+// stale one would be swept away weeks after somebody rescued it, which is the
+// one failure this feature must not have.
+func TestTrashSetsAPurgeDeadlineAndRestoreClearsIt(t *testing.T) {
+	now := time.Date(2026, 8, 2, 9, 30, 0, 0, time.UTC)
+	d := &Doc{ID: 7, Status: StatusReady}
+	if d.Trashed() {
+		t.Fatal("a document that was never trashed reports itself as trashed")
+	}
+
+	d.Trash(now)
+	if !d.Trashed() {
+		t.Error("Trash left the document out of the trash")
+	}
+	if want := now.AddDate(0, 0, 30).Unix(); d.DeleteAfterTS != want {
+		t.Errorf("purge deadline is %s, want %s",
+			time.Unix(d.DeleteAfterTS, 0).UTC(), time.Unix(want, 0).UTC())
+	}
+
+	d.Restore()
+	if d.Trashed() || d.DeleteAfterTS != 0 {
+		t.Errorf("Restore left delete_after_ts at %d, want 0", d.DeleteAfterTS)
+	}
+}
+
+// The sweeper deletes files and cannot be undone, so what counts as due is
+// worth stating once and checking directly rather than inferring from a live
+// sweep. Zero is the case that matters most: every document in the archive
+// carries it, so a predicate that called zero due would empty the archive on
+// the first pass.
+func TestDuePurge(t *testing.T) {
+	const now int64 = 1_800_000_000
+	cases := []struct {
+		what          string
+		deleteAfterTS int64
+		want          bool
+	}{
+		{"deadline passed", now - 1, true},
+		{"deadline is exactly now", now, true},
+		{"deadline still ahead", now + 1, false},
+		{"a day short", now + 86400, false},
+		{"not in the trash at all", 0, false},
+	}
+	for _, c := range cases {
+		if got := duePurge(c.deleteAfterTS, now); got != c.want {
+			t.Errorf("duePurge(%d, %d) = %v (%s), want %v", c.deleteAfterTS, now, got, c.what, c.want)
+		}
+	}
+}
+
+// The deadline is the only record that a document is in the trash, so it has to
+// survive the trip to disk and back — under the name the index filters on,
+// since a rename would leave every trashed document visible in the listing and
+// never swept. LoadMeta reads it too: the sweeper re-checks the sidecar before
+// destroying anything, and reading whole documents to ask one question would
+// make the check cost the archive's entire text.
+//
+// A document that is not in the trash must carry no key at all, which is what
+// keeps the field from appearing in thousands of sidecars to say nothing.
+func TestSidecarKeepsPurgeDeadline(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	trashed := &Doc{ID: 3, Status: StatusReady, Title: "Water bill"}
+	trashed.Trash(time.Now())
+	if err := s.Save(trashed); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Load(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeleteAfterTS != trashed.DeleteAfterTS || !got.Trashed() {
+		t.Errorf("deadline came back as %d, want %d", got.DeleteAfterTS, trashed.DeleteAfterTS)
+	}
+	meta, err := s.LoadMeta(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.DeleteAfterTS != trashed.DeleteAfterTS {
+		t.Errorf("LoadMeta reported deadline %d, want %d", meta.DeleteAfterTS, trashed.DeleteAfterTS)
+	}
+
+	b, err := os.ReadFile(s.DocPath(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"delete_after_ts"`)) {
+		t.Errorf("sidecar does not record the purge deadline:\n%s", b)
+	}
+
+	if err := s.Save(&Doc{ID: 4, Status: StatusReady, Title: "Gas bill"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err = os.ReadFile(s.DocPath(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte(`"delete_after_ts"`)) {
+		t.Errorf("a document that is not in the trash still records a deadline:\n%s", b)
 	}
 }
 

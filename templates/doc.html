@@ -43,20 +43,45 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg>
           </button>
         </form>
-        <form method="post" action="/doc/{{$d.ID}}/delete" data-confirms="delete"
-              onsubmit="return confirm('Delete document {{docCode $d.ID}}? The original file will be removed.')">
-          <button type="submit" class="tool danger" title="Delete document">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg>
-          </button>
-        </form>
+        {{/* The bin moves the document to the trash, where it waits 30 days.
+             A document already in there gets the two ways out instead: back to
+             the archive, or gone for good. */}}
+        {{if $d.Trashed}}
+          <form method="post" action="/doc/{{$d.ID}}/restore">
+            <button type="submit" class="tool" title="Restore from trash">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5"/></svg>
+            </button>
+          </form>
+          <form method="post" action="/doc/{{$d.ID}}/delete" data-confirms="delete"
+                onsubmit="return confirm('Delete {{docCode $d.ID}} forever? The files are removed and cannot be restored.')">
+            <button type="submit" class="tool danger" title="Delete forever">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg>
+            </button>
+          </form>
+        {{else}}
+          <form method="post" action="/doc/{{$d.ID}}/trash" data-confirms="trash"
+                onsubmit="return confirm('Move {{docCode $d.ID}} to the trash? It is purged after 30 days.')">
+            <button type="submit" class="tool danger" title="Move to trash">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg>
+            </button>
+          </form>
+        {{end}}
       </div>
 
       {{/* Revealed by doc.js in place of the browser's confirm dialog. */}}
-      <div class="confirm" data-confirm="delete" hidden>
-        <h5>Delete this document?</h5>
-        <p>The original file, the archival copy and the extracted text are all removed. The number {{docCode $d.ID}} is never reissued.</p>
+      <div class="confirm" data-confirm="trash" hidden>
+        <h5>Move this document to the trash?</h5>
+        <p>Nothing is removed yet. The document leaves the archive listing and is deleted for good after 30 days, unless it is restored first.</p>
         <div class="confirm-actions">
-          <button type="button" class="btn btn-primary" data-go>Delete</button>
+          <button type="button" class="btn btn-primary" data-go>Move to trash</button>
+          <button type="button" class="btn btn-secondary" data-cancel>Cancel</button>
+        </div>
+      </div>
+      <div class="confirm" data-confirm="delete" hidden>
+        <h5>Delete this document forever?</h5>
+        <p>The original file, the archival copy and the extracted text are all removed, and this cannot be undone. The number {{docCode $d.ID}} is never reissued.</p>
+        <div class="confirm-actions">
+          <button type="button" class="btn btn-primary" data-go>Delete forever</button>
           <button type="button" class="btn btn-secondary" data-cancel>Cancel</button>
         </div>
       </div>
@@ -74,6 +99,11 @@
           {{$d.Status}}{{if $d.FailedStage}} at {{$d.FailedStage}}{{end}}
           {{if $d.Error}}<small>{{$d.Error}}</small>{{end}}
         </p>
+      {{end}}
+      {{if $d.Trashed}}
+        {{/* The date rather than "in the trash": what someone needs to know
+             here is how long they have to change their mind. */}}
+        <p class="banner info">In trash — deleted for good on {{shortDate $d.DeleteAfterTS}}.</p>
       {{end}}
       {{if $d.Signed}}
         <p class="banner info">Digitally signed — the signature was preserved, so this document was not OCR'd.</p>

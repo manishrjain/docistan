@@ -516,6 +516,15 @@ main {
 }
 .seg a + a { border-left: 1px solid var(--color-divider); }
 .seg a.on { background: var(--color-text); color: var(--color-bg); }
+/* Each view names itself and then says how big it is. The count is quieter
+   than the name because it is the second thing you read, and it fades with the
+   ink rather than to a fixed grey so it works on the selected segment too. */
+.seg .n { margin-left: 6px; opacity: 0.6; }
+
+/* The views sit at the head of the filter row, ahead of the tags, and keep
+   their own line when the row wraps: which slice of the archive is on screen
+   is not one of the filters applied to it. */
+.filters > .views { flex: none; }
 .sort-dir .dir-arrow { display: none; }
 
 .range-custom {
@@ -717,6 +726,24 @@ button.pill-plain {
   color: var(--color-neutral-600);
 }
 .row-meta .status { color: var(--color-accent-700); }
+/* A failure wears the accent as a fill rather than as text: the design draws
+   it as a label on the row, not as one more word in the meta line, because it
+   is the reason that row looks the way it does. Only failed — a document that
+   is merely processing is not an alarm. */
+.row-meta .status.failed {
+  padding: 3px 6px;
+  background: var(--color-accent);
+  color: var(--color-bg);
+}
+/* In the trash is a state the document is in, not an alarm about it: outlined
+   and grey, where a failure is the one thing on the row that wears the accent.
+   Boxed rather than bare text so it reads as a label on a document rather than
+   as one more fact in the meta line beside it. */
+.row-meta .status.trashed {
+  padding: 3px 6px;
+  border: 1px solid var(--color-neutral-400);
+  color: var(--color-neutral-600);
+}
 
 .row-head {
   display: flex;
@@ -751,13 +778,18 @@ button.pill-plain {
   text-decoration: none;
 }
 
+/* A failed row carries the reason where a summary or a snippet would have
+   gone — it has neither — so it reads in the same voice, in the accent the
+   FAILED badge above it already uses. */
 .row .snippet,
-.row .summary {
+.row .summary,
+.row .fail-reason {
   margin: 0 0 var(--space-3);
   max-width: 72ch;
   color: var(--color-neutral-800);
   text-wrap: pretty;
 }
+.row .fail-reason { color: var(--color-accent-700); }
 
 .row-tags {
   position: relative;
@@ -1251,6 +1283,10 @@ button.pill-plain {
   border-color: var(--color-accent);
   background: var(--color-accent-100);
 }
+/* On the index the flash is a direct child of <main>, which has no padding of
+   its own — the rows and the header bring their own gutter — so it asks for the
+   same one rather than sitting flush against the edge. */
+.results-notice { margin: var(--space-4) var(--space-6) 0; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Drag-and-drop overlay and toasts

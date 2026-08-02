@@ -133,6 +133,7 @@ func run(cfg Config) error {
 		logf("%d document(s) awaiting metadata", pending)
 	}
 	go app.enrichq.Run(ctx)
+	go app.sweepTrash(ctx)
 
 	mux := http.NewServeMux()
 	app.routes(mux)
@@ -248,6 +249,78 @@ func (a *App) persist(ctx context.Context, doc *Doc) error {
 	return retryUntil(ctx, retryInitial, retryMax, fmt.Sprintf("doc %d: indexing", doc.ID), func() error {
 		return a.search.Upsert(ctx, doc)
 	})
+}
+
+// sweepInterval is how often the trash is looked at. The deadline is a date
+// thirty days out, so the only thing the frequency decides is how long past it
+// a document can linger — three times a day is comfortably inside the margin of
+// error of "30 days" and costs one search each time.
+const sweepInterval = 8 * time.Hour
+
+// sweepTrash purges documents whose retention has run out: once at startup, and
+// then every eight hours.
+//
+// The pass at startup is the one that matters. A laptop or a home server that
+// is shut down every night never stays up for eight hours in a row, so an
+// interval-only sweeper would tick on exactly the machines that do not need it
+// and never on the ones that do, and the trash would grow forever.
+func (a *App) sweepTrash(ctx context.Context) {
+	for {
+		a.sweepOnce(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(sweepInterval):
+		}
+	}
+}
+
+// sweepOnce destroys everything past its deadline right now. Candidates come
+// from the index, so the cost is one search rather than a walk of every sidecar
+// in the archive — but the deadline is then re-read from the sidecar before
+// anything is destroyed, because the sidecar is the source of truth and this is
+// the one operation that cannot be undone.
+func (a *App) sweepOnce(ctx context.Context) {
+	now := time.Now().Unix()
+	ids, err := a.search.ExpiredTrashIDs(ctx, now)
+	if err != nil {
+		// Nothing is lost by a sweep that could not run: the deadlines are on
+		// disk and the next pass, or the next start, finds the same documents.
+		if ctx.Err() == nil {
+			logf("trash sweep: %v", err)
+		}
+		return
+	}
+
+	var purged int
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return
+		}
+		doc, err := a.store.LoadMeta(id)
+		if err != nil {
+			logf("trash sweep: doc %d: %v", id, err)
+			continue
+		}
+		if !duePurge(doc.DeleteAfterTS, now) {
+			// The index said due and the sidecar does not — a restore whose
+			// index write was lost, most likely. The sidecar wins, and saying so
+			// is worth a line because the two are meant to agree.
+			logf("trash sweep: doc %d is not due after all, leaving it (the index disagrees with its sidecar)", id)
+			continue
+		}
+		if err := a.purge(ctx, id, "purged", purgeBySweeper); err != nil {
+			logf("trash sweep: doc %d: %v", id, err)
+			continue
+		}
+		purged++
+	}
+	// Silent when there was nothing to do, which is the ordinary outcome three
+	// times a day; a log that says "purged 0" every eight hours teaches whoever
+	// reads it to stop reading it.
+	if purged > 0 {
+		logf("trash sweep: purged %d document(s) whose %d days were up", purged, int(trashRetention/(24*time.Hour)))
+	}
 }
 
 // replaySidecars rebuilds the whole index from disk. Documents are streamed in

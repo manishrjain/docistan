@@ -567,10 +567,14 @@ document.addEventListener("DOMContentLoaded", () => {
     }),
   );
 
-  guarded(document.querySelector('form[action$="/delete"]'), () => {
-    // Deletion navigates away, so it is the one action with nothing to watch.
-    document.querySelector('form[action$="/delete"]').submit();
-  });
+  // Trashing and deleting both navigate away, so they are the actions with
+  // nothing to watch: the panel confirms, then the form posts as it would
+  // have. Restore is not here — it needs no confirmation, so it is left as the
+  // plain form it already is.
+  for (const sel of ['form[action$="/trash"]', 'form[action$="/delete"]']) {
+    const form = document.querySelector(sel);
+    guarded(form, () => form.submit());
+  }
 
   // A document still mid-flight when the page opened — ingested moments ago,
   // or reprocessing in another tab — is watched without anyone pressing

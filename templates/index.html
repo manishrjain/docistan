@@ -19,6 +19,20 @@
       <span class="sheet-title">Filters</span>
       <label class="sheet-done" for="filters-open">Done</label>
     </div>
+
+    {{/* Which slice of the archive is on screen. A mode rather than a filter —
+         the same distinction the date range makes — so it takes the segmented
+         control rather than a pill, and it survives every other control being
+         changed. All includes failed documents; only the trash is held back. */}}
+    <nav class="seg views" aria-label="View">
+      <a href="{{$page.WithParam "view" ""}}"{{if $page.ViewOn ""}} class="on"{{end}}
+        >All <span class="n">{{commaNum $page.Views.All}}</span></a>
+      <a href="{{$page.WithParam "view" "failed"}}"{{if $page.ViewOn "failed"}} class="on"{{end}}
+        >Failed <span class="n">{{commaNum $page.Views.Failed}}</span></a>
+      <a href="{{$page.WithParam "view" "trash"}}"{{if $page.ViewOn "trash"}} class="on"{{end}}
+        >Trash <span class="n">{{commaNum $page.Views.Trash}}</span></a>
+    </nav>
+
     <div class="filter-tags">
       <span class="micro">Tags</span>
       {{range $page.TopTags}}
@@ -96,6 +110,13 @@
   </div>
   </div>
 
+  {{/* What the last bulk action did. A redirect carries the outcome as an
+       action and a count, and the server turns that back into this sentence —
+       so a reload says it again rather than re-running anything. */}}
+  {{range .Flash}}
+    <p class="flash results-notice">{{.Text}}</p>
+  {{end}}
+
   {{/* A real form: the checkboxes are checkboxes and Download is a submit, so
        selecting and downloading work with scripting off. picker.js only adds
        the running count, the select-all, and hiding the actions until there is
@@ -122,6 +143,20 @@
       <div class="picker-actions">
         <span class="picked-count"></span>
         <button type="submit" class="btn btn-primary btn-sm">Download</button>
+        {{/* The same form and the same checkboxes as Download; only the action
+             differs, which formaction says without a second form or any
+             script. The trash view offers the two ways out of it, everywhere
+             else offers the way in. */}}
+        {{if $page.InTrash}}
+          <button type="submit" formaction="/docs/action" name="action" value="restore"
+                  class="btn btn-primary btn-sm">Restore</button>
+          <button type="submit" formaction="/docs/action" name="action" value="purge"
+                  class="btn btn-ghost btn-sm"
+                  onclick="return confirm('Delete the selected documents forever? The files are removed and cannot be restored.')">Delete forever</button>
+        {{else}}
+          <button type="submit" formaction="/docs/action" name="action" value="trash"
+                  class="btn btn-primary btn-sm">Move to trash</button>
+        {{end}}
         {{if gt .Result.Pages 1}}
           <button type="submit" name="scope" value="filtered" class="pill-plain"
                   title="Every document matching these filters, not just this page">All {{commaNum .Result.Found}}</button>
@@ -150,7 +185,11 @@
   {{if not .Result.Hits}}
     <div class="empty">
       <h4>Nothing here.</h4>
-      {{if $page.HasFilters}}
+      {{if $page.ViewOn "trash"}}
+        <p>The trash is empty. Documents moved here are kept for 30 days.</p>
+      {{else if $page.ViewOn "failed"}}
+        <p>Nothing has failed. <a href="{{$page.WithParam "view" ""}}">Back to all documents</a>.</p>
+      {{else if $page.HasFilters}}
         <p>No document matches these filters. <a href="{{$page.ClearFilters}}">Clear them</a> and try again.</p>
       {{else if .Query.Q}}
         <p>Nothing matched “{{.Query.Q}}”.</p>
@@ -177,6 +216,7 @@
               {{if $d.CreatedDate}}<span>{{monthLabel $d.CreatedDate}}</span>{{end}}
               {{if $d.PageCount}}<span>{{$d.PageCount}} page{{if ne $d.PageCount 1}}s{{end}}</span>{{end}}
               {{if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>{{end}}
+              {{if $d.Trashed}}<span class="status trashed">In trash</span>{{end}}
             </span>
           </div>
 
@@ -189,7 +229,14 @@
             <a class="open-link" href="/doc/{{$d.ID}}/pdf" target="_blank" rel="noopener" title="Open the PDF in a new tab">Open ↗</a>
           </div>
 
-          {{if .Snippet}}
+          {{/* A failed document shows why instead of a summary or a snippet:
+               it has no extracted text, so the summary is empty and the only
+               thing a search could have matched is its filename. The reason is
+               the useful thing to put in that space. It is clipped — the whole
+               message is on the document page. */}}
+          {{if $d.FailReason}}
+            <p class="fail-reason">{{$d.FailReason}}</p>
+          {{else if .Snippet}}
             <p class="snippet">{{.Snippet}}</p>
           {{else if .Summary}}
             <p class="summary">{{.Summary}}</p>

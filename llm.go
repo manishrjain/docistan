@@ -503,6 +503,13 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	if doc.Status != StatusReady || doc.Enriched || strings.TrimSpace(doc.Content) == "" {
 		return
 	}
+	// A document in the trash is queued for deletion, so paying the model to
+	// title and tag it is money spent on something nobody will read. It is
+	// dropped rather than requeued; if it comes back out of the trash, the
+	// document page's Re-tag asks for this again, and so does the next restart.
+	if doc.Trashed() {
+		return
+	}
 
 	known, _ := q.app.search.Vocabulary(ctx, "tags", 50)
 	meta, used, err := q.app.enricher.Enrich(ctx, EnrichInput{
