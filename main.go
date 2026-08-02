@@ -48,7 +48,7 @@ type App struct {
 
 func main() {
 	var cfg Config
-	flag.StringVar(&cfg.DataDir, "data", "./data", "data directory")
+	flag.StringVar(&cfg.DataDir, "data", defaultDataDir(), "document archive directory")
 	flag.StringVar(&cfg.Listen, "listen", "127.0.0.1:8080", "listen address")
 	flag.StringVar(&cfg.TypesenseURL, "typesense-url", "http://localhost:8108", "Typesense URL")
 	flag.StringVar(&cfg.TypesenseKey, "typesense-key", envOr("TYPESENSE_API_KEY", "docistan-dev-key"), "Typesense API key")
@@ -205,6 +205,18 @@ func waitForSearch(ctx context.Context, s *Search, limit time.Duration) error {
 // and the archive total can never disagree.
 func (c Config) LLMCost(in, out int64) float64 {
 	return float64(in)*c.PriceIn/1e6 + float64(out)*c.PriceOut/1e6
+}
+
+// defaultDataDir keeps the archive out of the source tree. Defaulting to
+// ./data put a directory of personal documents inside a git working copy,
+// one careless `git add -f` away from being published — and made a fresh
+// clone write into the repo the moment it ran.
+func defaultDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "./data"
+	}
+	return filepath.Join(home, "docistan-data")
 }
 
 func defaultKeyFile() string {
