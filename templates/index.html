@@ -70,10 +70,8 @@
              no JavaScript. filters.js submits it on change and drops the
              button. */}}
         <form class="range-custom" method="get" action="/">
-          {{if .Query.Q}}<input type="hidden" name="q" value="{{.Query.Q}}">{{end}}
-          {{range .Query.Tags}}<input type="hidden" name="tag" value="{{.}}">{{end}}
-          {{if .Query.Status}}<input type="hidden" name="status" value="{{.Query.Status}}">{{end}}
-          {{if .Query.Sort}}<input type="hidden" name="sort" value="{{.Query.Sort}}">{{end}}
+          {{/* Everything except the dates, which this form is here to set. */}}
+          {{range $page.FilterFields false}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">{{end}}
           <input type="hidden" name="range" value="custom">
 
           {{$fm := ymMonth .Query.From}}{{$fy := ymYear .Query.From}}
@@ -103,18 +101,9 @@
        the running count, the select-all, and hiding the actions until there is
        something to act on. */}}
   <form class="picker" method="post" action="/download">
-    {{if .Query.Q}}<input type="hidden" name="q" value="{{.Query.Q}}">{{end}}
-    {{range .Query.Tags}}<input type="hidden" name="tag" value="{{.}}">{{end}}
-    {{if .Query.Status}}<input type="hidden" name="status" value="{{.Query.Status}}">{{end}}
-    {{if .Query.Sort}}<input type="hidden" name="sort" value="{{.Query.Sort}}">{{end}}
-    {{if .Query.Dir}}<input type="hidden" name="dir" value="{{.Query.Dir}}">{{end}}
-    {{if .Query.Range}}
-      <input type="hidden" name="range" value="{{.Query.Range}}">
-      <input type="hidden" name="from_y" value="{{ymYear .Query.From}}">
-      <input type="hidden" name="from_m" value="{{ymMonth .Query.From}}">
-      <input type="hidden" name="to_y" value="{{ymYear .Query.To}}">
-      <input type="hidden" name="to_m" value="{{ymMonth .Query.To}}">
-    {{end}}
+    {{/* The dates too: "download everything matching" has to mean the filter
+         actually on screen. */}}
+    {{range $page.FilterFields true}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">{{end}}
 
   <div class="results-head">
     <div class="picked">

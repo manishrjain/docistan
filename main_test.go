@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -259,5 +262,67 @@ func TestExtensionTaxonomy(t *testing.T) {
 	// The picker offers exactly what the server accepts.
 	if got := acceptedExts(); got != ".jpeg,.jpg,.md,.pdf,.png,.tif,.tiff,.txt,.webp" {
 		t.Errorf("acceptedExts() = %q", got)
+	}
+}
+
+// A form that re-posts the current filters has to re-post all of them. The
+// custom-range form used to leave out dir, so choosing a date range silently
+// flipped the sort back to newest-first. Round-tripping through parseQuery is
+// the check that cannot be fooled by adding a field to one list and not the
+// other.
+func TestFilterFieldsRoundTrip(t *testing.T) {
+	want := Query{
+		Q: "oceanside", Tags: []string{"alta", "escrow"}, Status: StatusReady,
+		Sort: "created", Dir: "asc", Range: "custom", From: "2025-03", To: "2026-01",
+	}
+	p := page{Query: want}
+
+	v := url.Values{}
+	for _, f := range p.FilterFields(true) {
+		v.Add(f.Name, f.Value)
+	}
+	if got := parseQuery(v); !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip lost something:\n got %+v\nwant %+v", got, want)
+	}
+
+	// The form that edits the dates carries everything except them.
+	names := map[string]bool{}
+	for _, f := range p.FilterFields(false) {
+		names[f.Name] = true
+	}
+	for _, n := range []string{"q", "tag", "status", "sort", "dir"} {
+		if !names[n] {
+			t.Errorf("FilterFields(false) dropped %q", n)
+		}
+	}
+	for _, n := range []string{"range", "from_y", "from_m", "to_y", "to_m"} {
+		if names[n] {
+			t.Errorf("FilterFields(false) carried %q, which that form sets itself", n)
+		}
+	}
+}
+
+// The omission was in the template rather than in any helper, so this renders
+// the real page and looks for the input on both forms.
+func TestIndexFormsCarrySortDirection(t *testing.T) {
+	a := &App{}
+	tpl, err := a.templates("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := page{
+		Query: Query{
+			Range: "custom", From: "2025-03", To: "2026-01",
+			Sort: "created", Dir: "asc",
+		},
+		Result: &Result{Facets: map[string][]FacetValue{}},
+	}
+	var buf bytes.Buffer
+	if err := tpl.ExecuteTemplate(&buf, "layout", data); err != nil {
+		t.Fatal(err)
+	}
+	// Once in the custom-range form, once in the download picker.
+	if n := strings.Count(buf.String(), `name="dir" value="asc"`); n != 2 {
+		t.Errorf("dir hidden input appears %d time(s), want 2 (custom-range form and picker)", n)
 	}
 }

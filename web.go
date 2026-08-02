@@ -99,18 +99,8 @@ var templateFuncs = template.FuncMap{
 	"usd":          usd,
 	"monthOptions": monthOptions,
 	"yearOptions":  yearOptions,
-	"ymYear": func(s string) string {
-		if len(s) >= 4 {
-			return s[:4]
-		}
-		return ""
-	},
-	"ymMonth": func(s string) string {
-		if len(s) >= 7 {
-			return s[5:7]
-		}
-		return ""
-	},
+	"ymYear":       ymYear,
+	"ymMonth":      ymMonth,
 	// The file picker's accept list comes from the same table the server
 	// validates against, so the two cannot disagree about what may be sent.
 	"acceptedExts": acceptedExts,
@@ -168,6 +158,22 @@ func joinYM(year, month string) string {
 		return ""
 	}
 	return normalizeMonth(year + "-" + month)
+}
+
+// ymYear and ymMonth split a YYYY-MM back into the two selects that produced
+// it, for rendering which option is currently chosen.
+func ymYear(s string) string {
+	if len(s) >= 4 {
+		return s[:4]
+	}
+	return ""
+}
+
+func ymMonth(s string) string {
+	if len(s) >= 7 {
+		return s[5:7]
+	}
+	return ""
 }
 
 // commaNum takes any so templates can pass either an int count or an int64
@@ -702,6 +708,44 @@ func (p page) MoreTags() int {
 		return 0
 	}
 	return n
+}
+
+// Field is one hidden input, so that submitting a form does not throw away the
+// filters that form is not itself editing.
+type Field struct{ Name, Value string }
+
+// FilterFields is the current view's filters, ready to be carried through a
+// submit. Both forms on the index have to re-post what they do not edit, and
+// writing that list out once per form is precisely how the custom-range form
+// came to omit dir: choosing a date range quietly reset the sort back to
+// newest-first. One list, rendered twice, cannot drift.
+//
+// withDates is false for the form that edits the dates, since it posts its own.
+func (p page) FilterFields(withDates bool) []Field {
+	q := p.Query
+	var out []Field
+	add := func(name, value string) {
+		if value != "" {
+			out = append(out, Field{Name: name, Value: value})
+		}
+	}
+	add("q", q.Q)
+	for _, t := range q.Tags {
+		add("tag", t)
+	}
+	add("status", q.Status)
+	// The raw values, not SortField(): resolving "" to "added" here would turn
+	// a relevance-ordered search into an arrival-ordered one on submit.
+	add("sort", q.Sort)
+	add("dir", q.Dir)
+	if withDates {
+		add("range", q.Range)
+		add("from_y", ymYear(q.From))
+		add("from_m", ymMonth(q.From))
+		add("to_y", ymYear(q.To))
+		add("to_m", ymMonth(q.To))
+	}
+	return out
 }
 
 // parseQuery reads a search out of URL or form values. The download posts the
