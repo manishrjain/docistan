@@ -94,23 +94,27 @@
     {{end}}
   </section>
 
+  {{/* What was done, newest first. The sidecars say what each document is
+       now; this is the only place that says what happened to it — including
+       to the files that were rejected and no longer exist. */}}
   <section>
-    <h6>Duplicates rejected</h6>
-    {{if .Dupes}}
+    <h6>Journal</h6>
+    {{if .Journal}}
       <table class="table">
-        <thead><tr><th>File</th><th>Already stored as</th></tr></thead>
+        <thead><tr><th>When</th><th>Event</th><th>Document</th><th>Detail</th></tr></thead>
         <tbody>
-          {{range .Dupes}}
+          {{range .Journal}}
             <tr>
-              <td>{{.Name}}</td>
-              <td><a href="/doc/{{.DupOf}}">{{docCode .DupOf}}</a></td>
+              <td>{{stamp .TS}}</td>
+              <td>{{.Event}}</td>
+              <td>{{if gt .DocID 0}}<a href="/doc/{{.DocID}}">{{docCode .DocID}}</a>{{else}}{{.Name}}{{end}}</td>
+              <td>{{.Detail}}</td>
             </tr>
           {{end}}
         </tbody>
       </table>
-      <p class="quiet" style="margin-top:8px">The rejected files were deleted — the copy already in the archive is the one that is kept.</p>
     {{else}}
-      <p class="quiet">None this session.</p>
+      <p class="quiet">Nothing recorded yet.</p>
     {{end}}
   </section>
 </div>

@@ -523,6 +523,7 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 		logf("doc %d: enrichment failed: %v", id, err)
 		doc.Tags = appendTag(doc.Tags, TagNeedsReview)
 		q.save(ctx, doc)
+		q.app.journal("failed", id, "", "enrichment: "+err.Error())
 		q.mu.Lock()
 		q.failed++
 		q.mu.Unlock()
@@ -548,14 +549,22 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	q.mu.Lock()
 	q.done++
 	q.mu.Unlock()
-	// The cost is appended only when the table knows this model, so an unpriced
-	// run says nothing rather than claiming it was free.
+	// The cost is named only when the table knows this model, so an unpriced
+	// run says nothing rather than claiming it was free. Both the log line and
+	// the journal entry are silent on the same terms.
+	cents := centsStr(llmCents(q.app.cfg.LLMModel, used))
 	var cost string
-	if c := centsStr(llmCents(q.app.cfg.LLMModel, used)); c != "" {
-		cost = ", " + c
+	if cents != "" {
+		cost = ", " + cents
 	}
 	logf("doc %d tagged: %q %v %s (%d in / %d out tokens%s)",
 		doc.ID, doc.Title, doc.Tags, doc.CreatedDate, used.In, used.Out, cost)
+
+	detail := fmt.Sprintf("%s in · %s out", commaNum(used.In), commaNum(used.Out))
+	if cents != "" {
+		detail += " · " + cents
+	}
+	q.app.journal("enriched", id, "", detail)
 }
 
 func (q *EnrichQueue) save(ctx context.Context, doc *Doc) {

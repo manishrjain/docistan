@@ -47,6 +47,11 @@ type App struct {
 	// rather than a parse. Empty under -dev, which never caches.
 	tplMu sync.Mutex
 	tpl   map[string]*template.Template
+
+	// journalMu serialises appends to journal.jsonl. Ingest workers, the
+	// enrichment queue and request handlers all write to that one file, and
+	// two lines interleaved are two lines lost.
+	journalMu sync.Mutex
 }
 
 func main() {

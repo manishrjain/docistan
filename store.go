@@ -113,7 +113,7 @@ func (s *Store) DocPath(id int) string     { return s.path("docs", strconv.Itoa(
 func (s *Store) ArchivePath(id int) string { return s.path("archive", strconv.Itoa(id)+".pdf") }
 func (s *Store) ThumbPath(id int) string   { return s.path("thumbs", strconv.Itoa(id)+".jpg") }
 func (s *Store) ConsumeDir() string        { return s.path("consume") }
-func (s *Store) DuplicatesLog() string     { return s.path("duplicates.jsonl") }
+func (s *Store) JournalPath() string       { return s.path("journal.jsonl") }
 func (s *Store) OriginalPath(id int, ext string) string {
 	return s.path("originals", strconv.Itoa(id)+ext)
 }

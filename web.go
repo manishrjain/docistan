@@ -80,6 +80,9 @@ var templateFuncs = template.FuncMap{
 		return time.Unix(ts, 0).Format("2 Jan 2006")
 	},
 	"joinTags": func(tags []string) string { return strings.Join(tags, ", ") },
+	// When something happened, to the minute — the journal is a sequence, and
+	// the order of two events within an hour is the point of reading it.
+	"stamp": stamp,
 	// Document dates are month precision: the day on a statement is rarely
 	// meaningful and rarely unambiguous.
 	"monthLabel": func(s string) string {
@@ -459,13 +462,13 @@ type page struct {
 	KnownTags []string
 	// Search carries the term that led here, so the PDF viewer can jump
 	// straight to it instead of making the reader find it twice.
-	Search string
-	Jobs   []Job
-	Dupes  []DupeEvent
-	Failed []Hit
-	Flash  []Flash
-	Spend  *SpendSummary
-	URL    *url.URL
+	Search  string
+	Jobs    []Job
+	Journal []JournalEvent
+	Failed  []Hit
+	Flash   []Flash
+	Spend   *SpendSummary
+	URL     *url.URL
 }
 
 // SpendSummary reports actual model usage rather than an estimate, alongside
@@ -909,6 +912,11 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Kept whole so the journal can say what this save changed rather than
+	// only that a save happened. Doc has no reference fields other than Tags,
+	// which the update replaces rather than edits in place.
+	before := *doc
+
 	// Apply only the fields this request actually carries. Assigning every
 	// field from the form meant a request containing just one of them silently
 	// blanked the rest — a partial save has to be a partial update, not a
@@ -933,6 +941,12 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only after the edit is durable, and only when it was an edit at all: the
+	// page autosaves, so most of these requests change nothing.
+	if detail := editDetail(&before, doc); detail != "" {
+		a.journal("edited", doc.ID, "", detail)
+	}
+
 	// Autosave posts in the background and stays on the page.
 	if wantsJSON(r) {
 		writeJSON(w, map[string]any{
@@ -951,10 +965,18 @@ func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Read the title before the document goes, so the journal can name what was
+	// deleted. The tombstone keeps it too, but a line that says only "DOC-12
+	// deleted" makes the reader go looking.
+	var title string
+	if doc, err := a.store.LoadMeta(id); err == nil {
+		title = doc.Title
+	}
 	if err := a.store.Delete(id); err != nil {
 		http.Error(w, "deleting document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	a.journal("deleted", id, "", title)
 	if err := a.search.Delete(r.Context(), id); err != nil {
 		logf("doc %d: removing from index: %v", id, err)
 	}
@@ -986,6 +1008,7 @@ func (a *App) handleDocRetry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot reprocess: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	a.journal("reprocessed", doc.ID, "", "")
 	if wantsJSON(r) {
 		writeJSON(w, map[string]any{"status": "processing"})
 		return
@@ -1358,7 +1381,7 @@ func (a *App) acceptUpload(ctx context.Context, fh *multipart.FileHeader) Flash 
 		logf("upload dedup lookup: %v", err)
 	} else if found {
 		os.Remove(tmpName)
-		a.pipeline.recordDupe(name, id)
+		a.journal("duplicate", id, name, "already in the archive")
 		return Flash{Text: fmt.Sprintf("%s is already in the archive", name), DocID: id}
 	}
 
@@ -1430,12 +1453,15 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.render(w, "status.html", page{
-		Title:  "Status",
-		Jobs:   a.pipeline.ActiveJobs(),
-		Dupes:  a.pipeline.RecentDupes(20),
-		Failed: failed.Hits,
-		Spend:  spend,
-		URL:    r.URL,
+		Title: "Status",
+		Jobs:  a.pipeline.ActiveJobs(),
+		// Bounded at both ends: this page is polled every few seconds while
+		// anything is processing, so it reads the tail of the file rather than
+		// the file.
+		Journal: readJournalTail(a.store.JournalPath(), journalTailBytes, 50),
+		Failed:  failed.Hits,
+		Spend:   spend,
+		URL:     r.URL,
 	})
 }
 

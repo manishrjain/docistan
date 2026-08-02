@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"math"
 	"net/url"
@@ -522,6 +523,149 @@ func TestNewStoreCreatesOnlyTheDirectoriesItUses(t *testing.T) {
 	want := []string{"archive", "consume", "docs", "originals", "thumbs"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewStore created %v, want exactly %v", got, want)
+	}
+}
+
+// The journal is the only record that a thing was done — the file a duplicate
+// arrived as is deleted, and an edit leaves nothing behind but its result — so
+// what goes in has to come back out intact. Newest first, because the status
+// page shows the top of the list and the most recent event is the one being
+// waited on.
+func TestJournalRoundTrip(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{store: s}
+
+	a.journal("ingested", 1, "scan_001.pdf", "3 pages, tesseract")
+	a.journal("rejected", 0, "notes.docx", `unsupported type ".docx"`)
+	a.journal("enriched", 1, "", "397 in · 107 out · 0.02¢")
+
+	got := readJournalTail(s.JournalPath(), journalTailBytes, 50)
+	if len(got) != 3 {
+		t.Fatalf("read %d events, want the 3 that were written", len(got))
+	}
+	for i, want := range []string{"enriched", "rejected", "ingested"} {
+		if got[i].Event != want {
+			t.Errorf("event %d is %q, want %q — the list is not newest first", i, got[i].Event, want)
+		}
+	}
+
+	// The rejected file never became a document, so its line carries a name and
+	// no id; that pairing is what the status page reads to decide what to link.
+	if rejected := got[1]; rejected.DocID != 0 || rejected.Name != "notes.docx" ||
+		rejected.Detail != `unsupported type ".docx"` {
+		t.Errorf("rejected event came back as %+v", rejected)
+	}
+	ingested := got[2]
+	if ingested.DocID != 1 || ingested.Name != "scan_001.pdf" || ingested.Detail != "3 pages, tesseract" {
+		t.Errorf("ingested event came back as %+v", ingested)
+	}
+	if ingested.TS <= 0 {
+		t.Errorf("ingested event has no timestamp: %+v", ingested)
+	}
+}
+
+// The status page is polled every few seconds while anything is processing, so
+// the reader takes the end of the file rather than the file — which means it
+// almost always lands in the middle of a line. That half line is not an event
+// and must not be reported as one.
+func TestJournalTailBounds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "journal.jsonl")
+
+	var buf bytes.Buffer
+	for i := 1; i <= 5; i++ {
+		fmt.Fprintf(&buf, `{"ts":%d,"event":"ingested","doc_id":%d}`+"\n", 1785400000+i, i)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Every line here is the same length, so a budget of two and a half lines
+	// puts the seek squarely inside the third from the end.
+	line := int64(buf.Len() / 5)
+	partial := line*2 + line/2
+
+	got := readJournalTail(path, partial, 50)
+	if len(got) != 2 {
+		t.Fatalf("read %d events from a two-and-a-half line budget, want the 2 whole ones: %+v", len(got), got)
+	}
+	if got[0].DocID != 5 || got[1].DocID != 4 {
+		t.Errorf("got documents %d and %d, want 5 then 4", got[0].DocID, got[1].DocID)
+	}
+
+	// n bounds the answer independently of the byte budget.
+	if got := readJournalTail(path, partial, 1); len(got) != 1 || got[0].DocID != 5 {
+		t.Errorf("n=1 returned %+v, want only the newest event", got)
+	}
+	// A budget larger than the file starts at the beginning, where there is no
+	// partial line to drop and nothing may be discarded.
+	if got := readJournalTail(path, journalTailBytes, 50); len(got) != 5 {
+		t.Errorf("read %d events with the whole file in budget, want 5", len(got))
+	}
+
+	// Nothing has happened yet is the ordinary state of a fresh archive: the
+	// file does not exist until the first event, and the page still renders.
+	if got := readJournalTail(filepath.Join(dir, "absent.jsonl"), journalTailBytes, 50); len(got) != 0 {
+		t.Errorf("a missing journal returned %+v, want no events", got)
+	}
+}
+
+// An edit event has to say what changed, not that a save happened: the document
+// page autosaves, so a field that was focused and left alone posts exactly like
+// a real edit. Nothing changed has to produce nothing at all, or the journal
+// fills with lines that record no information.
+func TestEditDetail(t *testing.T) {
+	cases := []struct {
+		name          string
+		before, after Doc
+		want          string
+	}{
+		{
+			"title only",
+			Doc{Title: "scan_001", Tags: []string{"car"}, CreatedDate: "2026-01"},
+			Doc{Title: "Northwind Statement", Tags: []string{"car"}, CreatedDate: "2026-01"},
+			`title: "scan_001" → "Northwind Statement"`,
+		},
+		{
+			"one tag in, one tag out",
+			Doc{Title: "Northwind Statement", Tags: []string{"medical", "statement"}},
+			Doc{Title: "Northwind Statement", Tags: []string{"statement", "car"}},
+			"tags: +car −medical",
+		},
+		{
+			// Reordering the same tags is not an edit anyone made.
+			"tags reordered",
+			Doc{Tags: []string{"car", "statement"}},
+			Doc{Tags: []string{"statement", "car"}},
+			"",
+		},
+		{
+			"a date where there was none",
+			Doc{Title: "Northwind Statement"},
+			Doc{Title: "Northwind Statement", CreatedDate: "2026-02"},
+			"date: none → 2026-02",
+		},
+		{
+			"everything at once",
+			Doc{Title: "scan_001", Tags: []string{"medical"}, CreatedDate: "2026-01"},
+			Doc{Title: "Northwind Statement", Tags: []string{"car"}, CreatedDate: "2026-02"},
+			`title: "scan_001" → "Northwind Statement"; tags: +car −medical; date: 2026-01 → 2026-02`,
+		},
+		{
+			"nothing changed",
+			Doc{Title: "Northwind Statement", Tags: []string{"car"}, CreatedDate: "2026-01"},
+			Doc{Title: "Northwind Statement", Tags: []string{"car"}, CreatedDate: "2026-01"},
+			"",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := editDetail(&tc.before, &tc.after); got != tc.want {
+				t.Errorf("editDetail = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

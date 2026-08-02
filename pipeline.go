@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -36,16 +35,9 @@ type Pipeline struct {
 	mu     sync.Mutex
 	active map[string]*Job
 	queued map[string]bool
-	dupes  []DupeEvent
 	// retries counts how often a file has been put back for the same reason,
 	// so contention cannot become a permanent loop.
 	retries map[string]int
-}
-
-type DupeEvent struct {
-	TS    int64  `json:"ts"`
-	Name  string `json:"name"`
-	DupOf int    `json:"dup_of"`
 }
 
 func NewPipeline(app *App) *Pipeline {
@@ -283,19 +275,6 @@ func (p *Pipeline) ActiveJobs() []Job {
 	return out
 }
 
-func (p *Pipeline) RecentDupes(n int) []DupeEvent {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.dupes) <= n {
-		out := make([]DupeEvent, len(p.dupes))
-		copy(out, p.dupes)
-		return out
-	}
-	out := make([]DupeEvent, n)
-	copy(out, p.dupes[len(p.dupes)-n:])
-	return out
-}
-
 // process runs one file through every stage. Stages are idempotent and skip
 // when their output already exists, so a retry costs only the unfinished work.
 func (p *Pipeline) process(ctx context.Context, path string) {
@@ -323,10 +302,10 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 		// An unsupported file never becomes a document: no sidecar, no id. The
 		// upload path (acceptUpload in web.go) already refuses these with a
 		// visible flash before they ever reach the inbox, so this branch only
-		// fires for consume-folder drops and this log line is their only trace.
-		// That is the accepted trade for an archive that holds nothing it
-		// cannot read.
+		// fires for consume-folder drops — and since the file is then deleted,
+		// the journal line is all that says the archive ever saw that name.
 		logf("rejecting %s: unsupported type %q, deleting — the archive keeps only supported documents", name, ext)
+		p.app.journal("rejected", 0, name, fmt.Sprintf("unsupported type %q", ext))
 		// The fromConsume guard is sacred: reprocessing hands this function
 		// paths inside originals/, and the delete must never be able to reach
 		// outside the inbox.
@@ -372,10 +351,9 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 		} else if found {
 			// Deleting is safe by construction here: FindByHash has just proved
 			// byte-identical content is already sitting in originals/, so the
-			// bytes are not lost. The name→id trace survives in
-			// duplicates.jsonl and on the status page.
+			// bytes are not lost. The name→id trace survives in the journal.
 			logf("%s duplicates document %d, deleting", name, existing)
-			p.recordDupe(name, existing)
+			p.app.journal("duplicate", existing, name, "already in the archive")
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				logf("deleting duplicate %s: %v", name, err)
 			}
@@ -397,6 +375,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 		doc.FailedStage = job.Stage
 		logf("doc %d failed at %s: %v", doc.ID, job.Stage, err)
 		p.save(ctx, doc)
+		p.app.journal("failed", doc.ID, "", fmt.Sprintf("%s: %v", job.Stage, err))
 		return
 	}
 
@@ -405,6 +384,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	doc.FailedStage = ""
 	p.save(ctx, doc)
 	logf("doc %d ready: %q (%s)", doc.ID, doc.Title, doc.OCRSource)
+	p.app.journal("ingested", doc.ID, doc.OriginalName, ingestDetail(doc))
 
 	// The document is complete and usable now. Metadata is a separate concern
 	// that depends on a remote service with its own budget, so it is queued
@@ -412,6 +392,17 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	if !doc.Enriched && p.app.enrichq != nil {
 		p.app.enrichq.Add(doc.ID)
 	}
+}
+
+// ingestDetail is what the journal records about a finished document: how much
+// of it there is, and where its text came from. Those are the two facts a later
+// reader needs to judge whether the document was read well, and the second one
+// is not visible from the file itself.
+func ingestDetail(doc *Doc) string {
+	if doc.PageCount <= 0 {
+		return doc.OCRSource
+	}
+	return fmt.Sprintf("%d page%s, %s", doc.PageCount, plural(doc.PageCount), doc.OCRSource)
 }
 
 func (p *Pipeline) intake(ctx context.Context, path, name, ext, sum string, size int64) (*Doc, error) {
@@ -520,25 +511,6 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 func (p *Pipeline) save(ctx context.Context, doc *Doc) {
 	if err := p.app.persist(ctx, doc); err != nil {
 		logf("doc %d: %v", doc.ID, err)
-	}
-}
-
-// recordDupe is the whole record of a rejected duplicate: the file itself is
-// deleted, so this line in duplicates.jsonl and the matching entry on the
-// status page are what say the archive ever saw that name.
-func (p *Pipeline) recordDupe(name string, dupOf int) {
-	ev := DupeEvent{TS: time.Now().Unix(), Name: name, DupOf: dupOf}
-	p.mu.Lock()
-	p.dupes = append(p.dupes, ev)
-	p.mu.Unlock()
-
-	f, err := os.OpenFile(p.app.store.DuplicatesLog(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	if b, err := json.Marshal(ev); err == nil {
-		f.Write(append(b, '\n'))
 	}
 }
 
