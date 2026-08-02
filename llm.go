@@ -567,8 +567,12 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	q.app.journal("enriched", id, "", detail)
 }
 
+// save stores the metadata the model produced. persist holds until the write
+// and the index both accept it, so the only error left is shutdown — the
+// tokens are already spent either way, and the document stays unenriched on
+// disk, which puts it back in this queue on the next start.
 func (q *EnrichQueue) save(ctx context.Context, doc *Doc) {
-	if err := q.app.persist(ctx, doc); err != nil {
+	if err := q.app.persist(ctx, doc); err != nil && !errors.Is(err, context.Canceled) {
 		logf("doc %d: after enrichment: %v", doc.ID, err)
 	}
 }

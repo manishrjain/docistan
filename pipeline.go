@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -505,11 +506,16 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 	return nil
 }
 
-// save persists a document, logging what went wrong. The pipeline has nobody
-// to report to but the log, and neither failure is worth abandoning the
-// document over: the sidecar is authoritative and the next boot reindexes it.
+// save persists a document. persist retries the sidecar write and the index
+// update until both take, so a worker here will sit on a document for as long
+// as the disk or Typesense is refusing it — deliberately: the queue backing up
+// is what makes the outage visible, and persist's own log lines say why.
+//
+// That leaves cancellation as the only error, which means the process is
+// stopping. The document keeps whatever state it already has on disk and the
+// next start picks it up, so this is not a fault and does not get a line.
 func (p *Pipeline) save(ctx context.Context, doc *Doc) {
-	if err := p.app.persist(ctx, doc); err != nil {
+	if err := p.app.persist(ctx, doc); err != nil && !errors.Is(err, context.Canceled) {
 		logf("doc %d: %v", doc.ID, err)
 	}
 }

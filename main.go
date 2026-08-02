@@ -157,24 +157,97 @@ func run(cfg Config) error {
 	return nil
 }
 
-// ErrIndexLagging means the sidecar is written — the document is durable — but
-// the index does not know about it yet. It is separate from a write failure
-// because a caller answering a person has to say which happened: one of them
-// lost the edit and the other did not.
-var ErrIndexLagging = errors.New("saved to disk, but indexing failed")
+const (
+	// What a write waits between attempts when the disk or the index is not
+	// taking it. Fifteen seconds is short enough that a service coming back is
+	// noticed almost immediately and long enough that a long outage costs a few
+	// requests a minute rather than a hammering.
+	retryInitial = 500 * time.Millisecond
+	retryMax     = 15 * time.Second
+	// retryLogEvery bounds how often one stuck write repeats itself. An outage
+	// lasting an hour should leave sixty lines, not sixty thousand.
+	retryLogEvery = time.Minute
+)
+
+// retryUntil runs fn until it succeeds or ctx is canceled, backing off from
+// `initial` doubling to `max` between attempts. what names the work in the log,
+// as the subject of "<what>: <what went wrong>".
+//
+// It returns nil once fn succeeds and ctx.Err() if the context is canceled,
+// including part-way through a backoff — there is no third outcome, and no
+// attempt limit: the caller has decided the work must happen.
+//
+// The bounds are parameters rather than constants so a test can drive this in
+// microseconds; everything in the running system passes retryInitial/retryMax.
+func retryUntil(ctx context.Context, initial, max time.Duration, what string, fn func() error) error {
+	start := time.Now()
+	var lastLog time.Time
+	delay := initial
+
+	for attempt := 1; ; attempt++ {
+		err := fn()
+		if err == nil {
+			// Silent on the ordinary path: only a write that had to wait is
+			// worth a line, and then it says how long the wait was so the
+			// outage has a measured length rather than a remembered one.
+			if attempt > 1 {
+				logf("%s: succeeded after %d attempts over %s", what, attempt, time.Since(start).Round(time.Millisecond))
+			}
+			return nil
+		}
+		if ctx.Err() != nil {
+			// Shutting down, or whoever was waiting has gone. Announcing a
+			// retry we are not going to make would be a lie, so say nothing
+			// and let the caller decide what an abandoned write means.
+			return ctx.Err()
+		}
+		// The first failure goes out at once, because a stall with no
+		// explanation is the thing this is meant to prevent. After that the
+		// rate limit takes over.
+		if attempt == 1 {
+			logf("%s: %v — retrying until it succeeds", what, err)
+			lastLog = time.Now()
+		} else if time.Since(lastLog) >= retryLogEvery {
+			logf("%s: still failing after %d attempts over %s: %v", what, attempt, time.Since(start).Round(time.Second), err)
+			lastLog = time.Now()
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, max)
+	}
+}
 
 // persist writes the sidecar and only then updates the index, so the durable
 // copy is never behind what a reader can see. Every write goes through here:
-// the ordering is now a property of the code rather than a rule restated in a
+// the ordering is a property of the code rather than a rule restated in a
 // comment beside each copy of it, and no path can save without indexing.
+//
+// Both halves are retried until they succeed. The index is not a cache to be
+// caught up later — every list, search and document page is served out of it,
+// so a document that is on disk but not in it is a document nobody can find.
+// A write that cannot reach the index therefore holds its caller, pipeline
+// worker or HTTP request, until it can. Ingestion stalling while Typesense is
+// down is the intended, visible behaviour: the queue backs up and the log says
+// why, which is what brings someone to fix it. The alternatives — skipping
+// ahead, or handing the gap to a reconciler that has to be right about which
+// copy is newer — are how an archive quietly loses documents.
+//
+// So the only way out other than success is the context: shutdown, or a client
+// that has given up. Callers get nil or ctx.Err(), nothing else.
 func (a *App) persist(ctx context.Context, doc *Doc) error {
-	if err := a.store.Save(doc); err != nil {
-		return fmt.Errorf("writing sidecar: %w", err)
+	err := retryUntil(ctx, retryInitial, retryMax, fmt.Sprintf("doc %d: writing sidecar", doc.ID), func() error {
+		return a.store.Save(doc)
+	})
+	if err != nil {
+		return err
 	}
-	if err := a.search.Upsert(ctx, doc); err != nil {
-		return fmt.Errorf("%w: %v", ErrIndexLagging, err)
-	}
-	return nil
+	return retryUntil(ctx, retryInitial, retryMax, fmt.Sprintf("doc %d: indexing", doc.ID), func() error {
+		return a.search.Upsert(ctx, doc)
+	})
 }
 
 // replaySidecars rebuilds the whole index from disk. Documents are streamed in

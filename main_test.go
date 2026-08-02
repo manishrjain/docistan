@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -688,5 +691,129 @@ func TestIndexDerivesCreatedTimestamp(t *testing.T) {
 	// filters are written to exclude.
 	if got := tsDoc(&Doc{})["created_ts"]; got != int64(0) {
 		t.Errorf("created_ts for an undated document = %v, want 0", got)
+	}
+}
+
+// A write that cannot reach the index is not allowed to be skipped or handed to
+// a later reconciliation, so the helper under persist has to keep going through
+// failures — and stop the instant one attempt works, rather than paying for a
+// backoff nobody is waiting on.
+func TestRetryUntilSucceedsAfterFailures(t *testing.T) {
+	calls := 0
+	err := retryUntil(context.Background(), time.Microsecond, 10*time.Microsecond, "test write", func() error {
+		calls++
+		if calls < 4 {
+			return errors.New("typesense is down")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retryUntil = %v, want nil once the write went through", err)
+	}
+	if calls != 4 {
+		t.Errorf("fn ran %d times, want 4: three failures and the one that worked", calls)
+	}
+}
+
+// The context is the only way out other than success, and it has to be a fast
+// one. A worker parked on a dead index must come back on SIGTERM well inside
+// Drain's thirty seconds, or a clean shutdown becomes a kill and whatever was
+// mid-flight is left for the next start to redo.
+func TestRetryUntilStopsWhenContextIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	calls := 0
+	done := make(chan error, 1)
+	go func() {
+		done <- retryUntil(ctx, time.Millisecond, 5*time.Millisecond, "test write", func() error {
+			calls++
+			// Stand in for the signal arriving while a write is in progress.
+			if calls == 3 {
+				cancel()
+			}
+			return errors.New("typesense is down")
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("retryUntil = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("retryUntil was still retrying ten seconds after its context was canceled")
+	}
+	// Generous, because the point is that it stopped rather than exactly when:
+	// an unbounded loop would be in the thousands by now.
+	if calls > 20 {
+		t.Errorf("fn ran %d times, want it to give up within an attempt or two of the cancel", calls)
+	}
+}
+
+// The ordinary write succeeds first time, and that path must cost nothing: no
+// sleep, no second attempt, and — though only the log can show this — no line
+// claiming a retry that never happened.
+func TestRetryUntilFirstTrySucceeds(t *testing.T) {
+	calls := 0
+	err := retryUntil(context.Background(), time.Hour, time.Hour, "test write", func() error {
+		calls++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retryUntil = %v, want nil", err)
+	}
+	if calls != 1 {
+		t.Errorf("fn ran %d times, want 1", calls)
+	}
+}
+
+// The backoff is what keeps an hour-long outage from becoming an hour of
+// hammering, so the delay has to actually grow — and stop growing at the cap,
+// or a service that comes back after a long silence would not be noticed for
+// minutes. The timing here is deliberately loose: Go's timers never fire early,
+// which is the only guarantee this leans on, and everything else is given room
+// for a busy machine.
+func TestRetryUntilBackoffGrowsUpToTheCap(t *testing.T) {
+	const (
+		initial  = time.Millisecond
+		maxDelay = 4 * time.Millisecond
+		attempts = 8
+	)
+
+	var gaps []time.Duration
+	calls := 0
+	last := time.Now()
+	err := retryUntil(context.Background(), initial, maxDelay, "test write", func() error {
+		now := time.Now()
+		calls++
+		if calls > 1 {
+			gaps = append(gaps, now.Sub(last))
+		}
+		last = now
+		if calls < attempts {
+			return errors.New("typesense is down")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retryUntil = %v, want nil", err)
+	}
+	if len(gaps) != attempts-1 {
+		t.Fatalf("recorded %d gaps over %d attempts, want %d", len(gaps), calls, attempts-1)
+	}
+
+	// Growth: by the last gap the delay has doubled at least twice, and a timer
+	// cannot go off before its deadline, so this cannot be a scheduling fluke.
+	if gaps[len(gaps)-1] < 2*initial {
+		t.Errorf("last gap was %s, no longer than the first delay of %s: the backoff never grew", gaps[len(gaps)-1], initial)
+	}
+	// The cap holds: doubling without one would have put the seventh gap a
+	// minute out. The slack absorbs a loaded machine, not a missing cap.
+	const slack = 500 * time.Millisecond
+	for i, gap := range gaps {
+		if gap > maxDelay+slack {
+			t.Errorf("gap %d was %s, past the %s cap by more than %s", i+1, gap, maxDelay, slack)
+		}
 	}
 }

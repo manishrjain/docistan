@@ -7,7 +7,6 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -931,12 +930,11 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 		doc.Tags = splitTags(r.PostFormValue("tags"))
 	}
 
-	// A 200 has to mean durable and queryable, so the two are reported apart:
-	// one of these outcomes lost the edit and the other did not.
-	if err := a.persist(r.Context(), doc); errors.Is(err, ErrIndexLagging) {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	} else if err != nil {
+	// A 200 has to mean durable and queryable, and persist now delivers exactly
+	// that: it writes the sidecar, then indexes, retrying each until it lands.
+	// The one error it can still return is this request's context ending, so
+	// there is usually nobody left to read the answer — send one anyway.
+	if err := a.persist(r.Context(), doc); err != nil {
 		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -977,8 +975,19 @@ func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.journal("deleted", id, "", title)
-	if err := a.search.Delete(r.Context(), id); err != nil {
-		logf("doc %d: removing from index: %v", id, err)
+	// Removal gets the same contract as a write: the index is what every page
+	// is drawn from, so a document deleted from disk but left in it is a search
+	// result that 404s. Retried until Typesense accepts it, holding the request
+	// the way persist does.
+	//
+	// The accepted edge is the client hanging up mid-retry: the ghost then
+	// survives until the next start, whose replay rebuilds the index from the
+	// sidecars and skips tombstones — so it goes then, and no earlier.
+	if err := retryUntil(r.Context(), retryInitial, retryMax,
+		fmt.Sprintf("doc %d: removing from index", id),
+		func() error { return a.search.Delete(r.Context(), id) },
+	); err != nil {
+		logf("doc %d: gave up removing from index (%v); it stays visible until the next restart", id, err)
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -997,10 +1006,11 @@ func (a *App) handleDocRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	doc.Status = StatusProcessing
 	doc.Enriched = false
-	// Indexed as well as saved: the document page reads its copy out of the
-	// index, so writing only the sidecar left it reporting the state it was in
-	// before the reprocess was asked for.
-	if err := a.persist(r.Context(), doc); err != nil && !errors.Is(err, ErrIndexLagging) {
+	// Indexed as well as saved, in that order: the document page reads its copy
+	// out of the index, so writing only the sidecar left it reporting the state
+	// it was in before the reprocess was asked for. An error here means this
+	// request's context ended, nothing else.
+	if err := a.persist(r.Context(), doc); err != nil {
 		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1031,7 +1041,9 @@ func (a *App) handleDocEnrich(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	doc.Enriched = false
-	if err := a.persist(r.Context(), doc); err != nil && !errors.Is(err, ErrIndexLagging) {
+	// Durable first, then indexed, both retried until they take; only a dead
+	// request context comes back as an error.
+	if err := a.persist(r.Context(), doc); err != nil {
 		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
