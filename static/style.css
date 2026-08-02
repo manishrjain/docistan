@@ -855,15 +855,22 @@ main {
   padding: 7px 7px 7px 9px;
   border: 1px solid var(--color-divider);
 }
+/* A tag pill is only clickable at its ×, so the × carries the weight the
+   pill itself does not: bigger and bolder than the label beside it, and in
+   the pill's own colour at reduced opacity rather than a fixed grey that
+   would disappear once the pill fills on hover. */
 .pill-x {
   border: 0;
   background: none;
   padding: 0;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 16px;
+  font-weight: 700;
   line-height: 1;
-  color: var(--color-neutral-600);
+  color: currentColor;
+  opacity: 0.55;
 }
+.pill-x:hover { opacity: 1; }
 .tag-add {
   display: inline-flex;
   align-items: center;
@@ -1378,6 +1385,7 @@ main {
   .doc-head-title { flex-basis: 100%; order: 3; }
   .doc-head-actions { margin-left: auto; }
   .tool { width: 44px; height: 44px; }
+  .pill-x { font-size: 17px; }
   .page { padding: var(--space-4); }
 }
 
@@ -1409,8 +1417,3 @@ main {
    ride the fill rather than keeping a grey of their own. */
 .pill-tag:hover .n,
 .filter-summary:hover .caret { color: color-mix(in srgb, var(--color-bg) 75%, transparent); }
-
-/* A tag pill is only clickable at its ×, so the × takes the pill's colour
-   rather than a fixed grey that would vanish against the fill. */
-.pill-x { color: currentColor; opacity: 0.55; font-weight: 700; }
-.pill-x:hover { opacity: 1; }
