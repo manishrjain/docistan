@@ -178,6 +178,12 @@ main {
 .quiet { color: var(--color-neutral-600); }
 .hidden { display: none !important; }
 
+/* The hidden attribute has to outrank whatever display a component sets, or
+   it silently does nothing: the browser's own [hidden] rule comes from the UA
+   stylesheet, and any author `display:` beats it regardless of specificity.
+   That is what stopped the tag search from filtering anything. */
+[hidden] { display: none !important; }
+
 /* The uppercase monospace micro-label the whole system leans on. */
 .micro {
   font-family: var(--font-mono);
