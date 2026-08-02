@@ -174,7 +174,8 @@
 
           {{if $d.Tags}}
             <div class="row-tags">
-              {{range $d.Tags}}<a class="chip{{if $page.TagOn .}} on{{end}}" href="{{$page.ToggleTag .}}">{{.}}</a>{{end}}
+              {{range $d.Tags}}<a class="chip{{if $page.TagOn .}} on{{end}}" href="{{$page.ToggleTag .}}"
+                 title="{{if $page.TagOn .}}Stop filtering by{{else}}Filter by{{end}} this tag">{{.}}</a>{{end}}
             </div>
           {{end}}
         </div>

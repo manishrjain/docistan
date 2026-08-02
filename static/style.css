@@ -227,10 +227,6 @@ main {
 .btn-primary:hover { background: var(--color-accent-600); color: var(--color-bg); }
 .btn-primary:active { background: var(--color-accent-700); }
 .btn-secondary { border-color: var(--color-divider); }
-.btn-secondary:hover {
-  background: color-mix(in srgb, var(--color-text) 7%, transparent);
-  color: var(--color-text);
-}
 .btn-secondary:active { background: color-mix(in srgb, var(--color-text) 14%, transparent); }
 .btn-ghost { color: var(--color-accent); padding-inline: var(--space-1); }
 .btn-ghost:hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
@@ -395,25 +391,15 @@ main {
   color: var(--color-neutral-800);
   background: transparent;
 }
-.pill-tag:hover {
-  border-color: var(--color-text);
-  color: var(--color-text);
-}
 .pill-tag.on {
   border-color: var(--color-accent);
   background: var(--color-accent);
   color: var(--color-bg);
 }
-.pill-tag.on:hover { color: var(--color-bg); }
 .pill-tag .n { margin-left: 6px; color: var(--color-neutral-600); }
 .pill-tag.on .n { color: color-mix(in srgb, var(--color-bg) 75%, transparent); }
 .pill-dashed {
   border: 1px dashed var(--color-accent);
-  color: var(--color-accent-700);
-}
-.pill-dashed:hover {
-  border-color: var(--color-accent);
-  background: var(--color-accent-100);
   color: var(--color-accent-700);
 }
 .pill-plain {
@@ -516,10 +502,8 @@ main {
   background: transparent;
 }
 .seg a + a { border-left: 1px solid var(--color-divider); }
-.seg a:hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
 .seg a.on { background: var(--color-text); color: var(--color-bg); }
 .sort-dir .dir-arrow { display: none; }
-.sort-dir:hover { border-color: var(--color-accent); color: var(--color-accent-700); }
 
 .range-custom {
   display: flex;
@@ -666,11 +650,6 @@ main {
   color: var(--color-neutral-700);
   text-decoration: none;
 }
-.open-link:hover {
-  border-color: var(--color-accent);
-  color: var(--color-accent-700);
-  background: var(--color-accent-100);
-}
 
 .row .snippet,
 .row .summary {
@@ -697,11 +676,6 @@ main {
   border: 1px solid var(--color-divider);
   color: var(--color-neutral-800);
   text-decoration: none;
-}
-.chip:hover {
-  border-color: var(--color-accent);
-  color: var(--color-accent-700);
-  background: var(--color-accent-100);
 }
 .chip.on {
   border-color: var(--color-accent);
@@ -749,11 +723,6 @@ main {
   border-bottom: 2px solid var(--color-divider);
 }
 .doc-head .code { cursor: pointer; }
-.doc-head .code:hover {
-  border-color: var(--color-accent);
-  color: var(--color-accent-700);
-  background: var(--color-accent-100);
-}
 .doc-head-title { flex: 1; min-width: 220px; }
 .doc-head-actions { display: flex; gap: var(--space-2); flex: none; }
 
@@ -839,15 +808,6 @@ main {
   color: var(--color-neutral-800);
   padding: 0;
 }
-.tool:hover {
-  border-color: var(--color-text);
-  background: var(--color-neutral-200);
-}
-.tool.danger:hover {
-  border-color: var(--color-accent);
-  background: var(--color-accent-100);
-  color: var(--color-accent-700);
-}
 .tool[disabled] { opacity: 0.45; cursor: not-allowed; }
 .tool svg { display: block; }
 
@@ -904,7 +864,6 @@ main {
   line-height: 1;
   color: var(--color-neutral-600);
 }
-.pill-x:hover { color: var(--color-accent); }
 .tag-add {
   display: inline-flex;
   align-items: center;
@@ -919,7 +878,6 @@ main {
   color: var(--color-accent-700);
   cursor: pointer;
 }
-.tag-add:hover { background: var(--color-accent-100); }
 
 .tag-input-row {
   position: relative;
@@ -1422,3 +1380,37 @@ main {
   .tool { width: 44px; height: 44px; }
   .page { padding: var(--space-4); }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Hover
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* Everything that responds to a click fills with the accent. One treatment
+   across pills, chips, segments, icon buttons and secondary buttons, so
+   "this does something" is a single learnable signal rather than a different
+   guess per component. Declared last so it beats each component's resting
+   state without needing !important. */
+.btn-secondary:hover,
+.pill-tag:hover,
+.pill-dashed:hover,
+.seg a:hover,
+.chip:hover,
+.open-link:hover,
+.code:hover,
+.tool:hover,
+.tag-add:hover,
+.pill:hover,
+.filter-summary:hover {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-bg);
+}
+/* The count inside a pill and the caret on the collapsed filter control both
+   ride the fill rather than keeping a grey of their own. */
+.pill-tag:hover .n,
+.filter-summary:hover .caret { color: color-mix(in srgb, var(--color-bg) 75%, transparent); }
+
+/* A tag pill is only clickable at its ×, so the × takes the pill's colour
+   rather than a fixed grey that would vanish against the fill. */
+.pill-x { color: currentColor; opacity: 0.55; font-weight: 700; }
+.pill-x:hover { opacity: 1; }
