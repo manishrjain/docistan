@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -205,6 +206,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /doc/{id}/pdf", a.handleDocPDF)
 	mux.HandleFunc("GET /doc/{id}/original", a.handleDocOriginal)
 	mux.HandleFunc("GET /doc/{id}/thumb", a.handleDocThumb)
+	mux.HandleFunc("POST /download", a.handleDownload)
 	mux.HandleFunc("GET /upload", a.handleUploadForm)
 	mux.HandleFunc("POST /upload", a.handleUpload)
 	mux.HandleFunc("GET /status", a.handleStatus)
@@ -666,8 +668,10 @@ func (p page) MoreTags() int {
 	return n
 }
 
-func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
-	v := r.URL.Query()
+// parseQuery reads a search out of URL or form values. The download posts the
+// same names the index reads, so one parser serves both and a filter cannot
+// mean one thing on screen and another in the zip.
+func parseQuery(v url.Values) Query {
 	q := Query{
 		Q:      v.Get("q"),
 		Tags:   v["tag"],
@@ -697,6 +701,11 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 			q.To = now.Format("2006-01")
 		}
 	}
+	return q
+}
+
+func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
+	q := parseQuery(r.URL.Query())
 
 	res, err := a.search.Query(r.Context(), q)
 	if err != nil {
@@ -1027,6 +1036,10 @@ func (a *App) handleDocOriginal(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	a.serveOriginal(w, r, id)
+}
+
+func (a *App) serveOriginal(w http.ResponseWriter, r *http.Request, id int) {
 	path, err := a.store.OriginalGlob(id)
 	if err != nil {
 		http.NotFound(w, r)
@@ -1052,6 +1065,131 @@ func (a *App) handleDocThumb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeFile(w, r, path)
+}
+
+// maxBulkDownload bounds "download everything matching" so a stray click on an
+// unfiltered archive does not start an eight-gigabyte stream. Well above any
+// deliberate selection.
+const maxBulkDownload = 2000
+
+// handleDownload streams the selected documents as a zip. Either the ids the
+// form posted, or — when the whole filtered set was asked for — every document
+// the same filter matches, which is more than the page can show.
+func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var ids []int
+	if r.PostFormValue("scope") == "filtered" {
+		var err error
+		if ids, err = a.search.AllIDs(r.Context(), parseQuery(r.PostForm), maxBulkDownload); err != nil {
+			http.Error(w, "search unavailable: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+	} else {
+		for _, v := range r.PostForm["id"] {
+			if id, err := strconv.Atoi(v); err == nil && id > 0 {
+				ids = append(ids, id)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		http.Error(w, "nothing selected", http.StatusBadRequest)
+		return
+	}
+
+	// A single document goes out as itself. Making someone unzip one file to
+	// reach one file is a rude way to answer a click.
+	if len(ids) == 1 {
+		a.serveOriginal(w, r, ids[0])
+		return
+	}
+	a.streamZip(w, r, ids)
+}
+
+// streamZip writes the archive straight to the connection. Nothing is
+// buffered, so the size of the selection does not become the size of a
+// temporary file — but it also means the headers are gone before the first
+// document is read, and a failure part way through can only be logged.
+func (a *App) streamZip(w http.ResponseWriter, r *http.Request, ids []int) {
+	name := fmt.Sprintf("docistan-%s.zip", time.Now().Format("2006-01-02"))
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", disposition("attachment", name))
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	used := map[string]bool{}
+	var written, skipped int
+	for _, id := range ids {
+		doc, err := a.store.Load(id)
+		if err != nil || doc.Status == StatusDeleted {
+			skipped++
+			continue
+		}
+		path, err := a.store.OriginalGlob(id)
+		if err != nil {
+			skipped++
+			continue
+		}
+		if err := a.addToZip(zw, doc, path, used); err != nil {
+			logf("download: %s: %v", docCode(id), err)
+			skipped++
+			continue
+		}
+		written++
+	}
+	logf("download: %d document(s) zipped, %d skipped", written, skipped)
+}
+
+func (a *App) addToZip(zw *zip.Writer, doc *Doc, path string, used map[string]bool) error {
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	hdr := &zip.FileHeader{
+		Name: uniqueName(used, downloadName(doc, filepath.Ext(path)), doc),
+		// PDFs, JPEGs and PNGs are already compressed; deflating them again
+		// costs time and saves nothing. Text is worth compressing.
+		Method: zip.Store,
+	}
+	if isTextExt(strings.ToLower(filepath.Ext(path))) {
+		hdr.Method = zip.Deflate
+	}
+	if doc.AddedTS > 0 {
+		hdr.Modified = time.Unix(doc.AddedTS, 0)
+	}
+	f, err := zw.CreateHeader(hdr)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, src)
+	return err
+}
+
+// uniqueName keeps two documents the model gave the same title from colliding
+// inside one archive, by falling back to the number that is unique by design.
+func uniqueName(used map[string]bool, name string, doc *Doc) string {
+	if !used[name] {
+		used[name] = true
+		return name
+	}
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s (%s).%s", base, docCode(doc.ID), strings.TrimPrefix(ext, "."))
+		if n > 2 {
+			candidate = fmt.Sprintf("%s (%s-%d).%s", base, docCode(doc.ID), n, strings.TrimPrefix(ext, "."))
+		}
+		if !used[candidate] {
+			used[candidate] = true
+			return candidate
+		}
+	}
 }
 
 func (a *App) handleUploadForm(w http.ResponseWriter, r *http.Request) {

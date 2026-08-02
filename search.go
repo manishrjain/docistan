@@ -291,6 +291,45 @@ func escapeFilterValue(v string) string {
 }
 
 func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
+	res, err := s.query(ctx, q, perPage)
+	if err != nil {
+		return nil, err
+	}
+	out := &Result{Page: max(q.Page, 1), PerPage: perPage, Facets: map[string][]FacetValue{}}
+	if res.Found != nil {
+		out.Found = *res.Found
+		out.Pages = (out.Found + perPage - 1) / perPage
+	}
+	if res.Hits != nil {
+		for _, h := range *res.Hits {
+			if h.Document == nil {
+				continue
+			}
+			out.Hits = append(out.Hits, newHit(docFromMap(*h.Document), h))
+		}
+	}
+	if res.FacetCounts != nil {
+		for _, fc := range *res.FacetCounts {
+			if fc.FieldName == nil || fc.Counts == nil {
+				continue
+			}
+			var vals []FacetValue
+			for _, c := range *fc.Counts {
+				if c.Value == nil || c.Count == nil || *c.Value == "" {
+					continue
+				}
+				vals = append(vals, FacetValue{Value: *c.Value, Count: *c.Count})
+			}
+			out.Facets[*fc.FieldName] = vals
+		}
+	}
+	return out, nil
+}
+
+// query builds and runs the search. Separated from Query so the bulk download
+// can page through the same filters at its own size without a second, drifting
+// copy of how a filter is spelled.
+func (s *Search) query(ctx context.Context, q Query, perPage int) (*api.SearchResult, error) {
 	if q.Page < 1 {
 		q.Page = 1
 	}
@@ -356,41 +395,7 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 	}
 	params.SortBy = pointer.String(sortBy)
 
-	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, params)
-	if err != nil {
-		return nil, err
-	}
-
-	out := &Result{Page: q.Page, PerPage: perPage, Facets: map[string][]FacetValue{}}
-	if res.Found != nil {
-		out.Found = *res.Found
-		out.Pages = (out.Found + perPage - 1) / perPage
-	}
-	if res.Hits != nil {
-		for _, h := range *res.Hits {
-			if h.Document == nil {
-				continue
-			}
-			hit := newHit(docFromMap(*h.Document), h)
-			out.Hits = append(out.Hits, hit)
-		}
-	}
-	if res.FacetCounts != nil {
-		for _, fc := range *res.FacetCounts {
-			if fc.FieldName == nil || fc.Counts == nil {
-				continue
-			}
-			var vals []FacetValue
-			for _, c := range *fc.Counts {
-				if c.Value == nil || c.Count == nil || *c.Value == "" {
-					continue
-				}
-				vals = append(vals, FacetValue{Value: *c.Value, Count: *c.Count})
-			}
-			out.Facets[*fc.FieldName] = vals
-		}
-	}
-	return out, nil
+	return s.client.Collection(s.collectionName).Documents().Search(ctx, params)
 }
 
 func newHit(doc *Doc, h api.SearchResultHit) Hit {
@@ -434,6 +439,40 @@ func clip(s string, n int) string {
 		return s
 	}
 	return strings.TrimSpace(string(r[:n])) + "…"
+}
+
+// AllIDs walks every page of a query and returns the ids in order. Used by
+// the bulk download, where "all matching" has to mean all of them and not
+// just the two dozen on screen.
+func (s *Search) AllIDs(ctx context.Context, q Query, limit int) ([]int, error) {
+	const batch = 250
+	var out []int
+	for page := 1; ; page++ {
+		q.Page = page
+		res, err := s.query(ctx, q, batch)
+		if err != nil {
+			return out, err
+		}
+		if res.Hits == nil || len(*res.Hits) == 0 {
+			return out, nil
+		}
+		for _, h := range *res.Hits {
+			if h.Document == nil {
+				continue
+			}
+			if raw, ok := (*h.Document)["id"].(string); ok {
+				if id, err := strconv.Atoi(raw); err == nil {
+					out = append(out, id)
+				}
+			}
+			if limit > 0 && len(out) >= limit {
+				return out, nil
+			}
+		}
+		if len(*res.Hits) < batch {
+			return out, nil
+		}
+	}
 }
 
 // Count returns how many documents are indexed, for the search placeholder.

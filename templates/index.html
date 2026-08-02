@@ -98,17 +98,47 @@
   </div>
   </div>
 
+  {{/* A real form: the checkboxes are checkboxes and Download is a submit, so
+       selecting and downloading work with scripting off. picker.js only adds
+       the running count, the select-all, and hiding the actions until there is
+       something to act on. */}}
+  <form class="picker" method="post" action="/download">
+    {{if .Query.Q}}<input type="hidden" name="q" value="{{.Query.Q}}">{{end}}
+    {{range .Query.Tags}}<input type="hidden" name="tag" value="{{.}}">{{end}}
+    {{if .Query.Status}}<input type="hidden" name="status" value="{{.Query.Status}}">{{end}}
+    {{if .Query.Sort}}<input type="hidden" name="sort" value="{{.Query.Sort}}">{{end}}
+    {{if .Query.Dir}}<input type="hidden" name="dir" value="{{.Query.Dir}}">{{end}}
+    {{if .Query.Range}}
+      <input type="hidden" name="range" value="{{.Query.Range}}">
+      <input type="hidden" name="from_y" value="{{ymYear .Query.From}}">
+      <input type="hidden" name="from_m" value="{{ymMonth .Query.From}}">
+      <input type="hidden" name="to_y" value="{{ymYear .Query.To}}">
+      <input type="hidden" name="to_m" value="{{ymMonth .Query.To}}">
+    {{end}}
+
   <div class="results-head">
-    <p class="count">
-      {{if .Query.Q}}
-        <strong>{{commaNum .Result.Found}}</strong> result{{if ne .Result.Found 1}}s{{end}} for “{{.Query.Q}}”
-      {{else if $page.IsLatest}}
-        {{/* Only said when it is true: everything, newest arrival first. */}}
-        <strong>Latest additions</strong>
-      {{else}}
-        <strong>{{commaNum .Result.Found}}</strong> document{{if ne .Result.Found 1}}s{{end}}
-      {{end}}
-    </p>
+    <div class="picked">
+      <input type="checkbox" class="pick pick-all" aria-label="Select every document on this page">
+      <p class="count">
+        <strong>{{commaNum .Result.Found}}</strong>
+        {{if .Query.Q}}
+          result{{if ne .Result.Found 1}}s{{end}} for “{{.Query.Q}}”
+        {{else}}
+          doc{{if ne .Result.Found 1}}s{{end}}
+        {{end}}
+      </p>
+      {{/* Always in the layout so selecting something does not shove the
+           results down; picker.js makes it invisible rather than absent. */}}
+      <div class="picker-actions">
+        <span class="picked-count"></span>
+        <button type="submit" class="btn btn-primary btn-sm">Download</button>
+        {{if gt .Result.Pages 1}}
+          <button type="submit" name="scope" value="filtered" class="pill-plain"
+                  title="Every document matching these filters, not just this page">All {{commaNum .Result.Found}}</button>
+        {{end}}
+        <button type="button" class="pill-plain picker-clear">Clear</button>
+      </div>
+    </div>
     <div class="sort">
       <span class="micro">Sort</span>
       <nav class="seg" aria-label="Sort by">
@@ -144,6 +174,8 @@
     {{range .Result.Hits}}
       {{$d := .Doc}}
       <li class="row">
+        <input type="checkbox" class="pick" name="id" value="{{$d.ID}}"
+               aria-label="Select {{docCode $d.ID}}">
         <span class="thumb">
           <img src="/doc/{{$d.ID}}/thumb" alt="" loading="lazy">
         </span>
@@ -194,7 +226,9 @@
       {{end}}
     </nav>
   {{end}}
+  </form>
 </main>
 {{end}}
 
-{{define "head"}}<script src="/static/filters.js" defer></script>{{end}}
+{{define "head"}}<script src="/static/filters.js" defer></script>
+<script src="/static/picker.js" defer></script>{{end}}

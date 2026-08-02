@@ -542,7 +542,7 @@ main {
 
 .results-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
   padding: 14px var(--space-6);
@@ -567,6 +567,75 @@ main {
   gap: var(--space-2);
 }
 .results-head .sort > .micro { margin-right: 2px; }
+
+/* — selection — */
+
+/* The design's own square, drawn rather than the browser's. 18px with a 2px
+   edge, filling with the accent when ticked, like every other control. */
+.pick {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  border: 2px solid var(--color-neutral-400);
+  background: transparent;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  /* Above the row's stretched link, or ticking a box would open the
+     document instead. */
+  position: relative;
+  z-index: 2;
+}
+.pick:checked,
+.pick:indeterminate {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+}
+.pick:checked::after,
+.pick:indeterminate::after {
+  content: "✓";
+  font: 700 12px/1 var(--font-body);
+  color: var(--color-bg);
+}
+.pick:indeterminate::after { content: "–"; }
+.row > .pick { margin-top: 2px; }
+
+.picked {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.picker-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+/* Invisible, not absent: removing it would shove the results down and back
+   every time the first box is ticked. Keyed off a count on the form rather
+   than a class on the element — a generic name like .empty is already taken
+   by the no-results state, and quietly inherited its 64px of padding. */
+.picker[data-picked="0"] .picker-actions { visibility: hidden; }
+.picked-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-accent-700);
+  white-space: nowrap;
+}
+/* The two secondary actions are buttons for the form's sake but read as the
+   plain text links they sit beside. */
+button.pill-plain {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
 
 .rows { list-style: none; margin: 0; padding: 0; }
 
