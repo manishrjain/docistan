@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -39,65 +40,91 @@ var assets embed.FS
 // page into a single set would not work: they all define "content", and in a
 // shared namespace the last one parsed silently wins.
 //
-// Reads from the embedded copy normally, and from disk under -dev so the UI
-// can be iterated on without rebuilding.
+// Each page is parsed once and kept. html/template redoes its escape analysis
+// on every parse — measured at 209us and 154KB per render on this repo — and
+// the index re-fetches itself every few seconds while anything is processing,
+// so this was being paid over and over for an identical result. A parsed
+// template may be executed in parallel, which is what makes sharing one safe.
+// Under -dev nothing is cached, so the UI can be edited without rebuilding.
 func (a *App) templates(page string) (*template.Template, error) {
-	var src fs.FS = assets
 	if a.cfg.Dev {
-		src = os.DirFS(".")
+		return parsePage(os.DirFS("."), page)
 	}
-	return template.New("").Funcs(templateFuncs()).
+	a.tplMu.Lock()
+	defer a.tplMu.Unlock()
+	if t, ok := a.tpl[page]; ok {
+		return t, nil
+	}
+	t, err := parsePage(assets, page)
+	if err != nil {
+		return nil, err
+	}
+	if a.tpl == nil {
+		a.tpl = map[string]*template.Template{}
+	}
+	a.tpl[page] = t
+	return t, nil
+}
+
+func parsePage(src fs.FS, page string) (*template.Template, error) {
+	return template.New("").Funcs(templateFuncs).
 		ParseFS(src, "templates/layout.html", "templates/"+page)
 }
 
-func templateFuncs() template.FuncMap {
-	return template.FuncMap{
-		"humanSize": humanSize,
-		"shortDate": func(ts int64) string {
-			if ts <= 0 {
-				return ""
-			}
-			return time.Unix(ts, 0).Format("2 Jan 2006")
-		},
-		"joinTags": func(tags []string) string { return strings.Join(tags, ", ") },
-		// Document dates are month precision: the day on a statement is rarely
-		// meaningful and rarely unambiguous.
-		"monthLabel": func(s string) string {
-			t, err := time.Parse("2006-01", s)
-			if err != nil {
-				return s
-			}
-			return t.Format("Jan 2006")
-		},
-		"add": func(a, b int) int { return a + b },
-		// The number as it is written and spoken: on the paper original, in
-		// a filing box, out loud. Rendered in one place so it cannot drift.
-		"docCode": docCode,
-		// Counts in the chrome read as quantities, not identifiers, so they
-		// get separators. Document ids deliberately do not.
-		"commaNum":     commaNum,
-		"usd":          usd,
-		"monthOptions": monthOptions,
-		"yearOptions":  yearOptions,
-		"ymYear": func(s string) string {
-			if len(s) >= 4 {
-				return s[:4]
-			}
+var templateFuncs = template.FuncMap{
+	"humanSize": humanSize,
+	"shortDate": func(ts int64) string {
+		if ts <= 0 {
 			return ""
-		},
-		"ymMonth": func(s string) string {
-			if len(s) >= 7 {
-				return s[5:7]
-			}
-			return ""
-		},
-	}
+		}
+		return time.Unix(ts, 0).Format("2 Jan 2006")
+	},
+	"joinTags": func(tags []string) string { return strings.Join(tags, ", ") },
+	// Document dates are month precision: the day on a statement is rarely
+	// meaningful and rarely unambiguous.
+	"monthLabel": func(s string) string {
+		t, err := time.Parse("2006-01", s)
+		if err != nil {
+			return s
+		}
+		return t.Format("Jan 2006")
+	},
+	"add": func(a, b int) int { return a + b },
+	// The number as it is written and spoken: on the paper original, in
+	// a filing box, out loud. Rendered in one place so it cannot drift.
+	"docCode": docCode,
+	// Counts in the chrome read as quantities, not identifiers, so they
+	// get separators. Document ids deliberately do not.
+	"commaNum":     commaNum,
+	"usd":          usd,
+	"monthOptions": monthOptions,
+	"yearOptions":  yearOptions,
+	"ymYear": func(s string) string {
+		if len(s) >= 4 {
+			return s[:4]
+		}
+		return ""
+	},
+	"ymMonth": func(s string) string {
+		if len(s) >= 7 {
+			return s[5:7]
+		}
+		return ""
+	},
+	// The file picker's accept list comes from the same table the server
+	// validates against, so the two cannot disagree about what may be sent.
+	"acceptedExts": acceptedExts,
 }
 
 // docCode renders a document's number for display. The id itself stays a bare
 // integer everywhere it is used as an identifier — in URLs, in filenames, in
 // the sidecar — because that is what makes it easy to type and to sort.
 func docCode(id int) string { return "DOC-" + strconv.Itoa(id) }
+
+// docPath is the same number as a URL. The id is a bare integer in a link for
+// the same reason it is bare in a filename: it is an identifier there, not a
+// label.
+func docPath(id int) string { return "/doc/" + strconv.Itoa(id) }
 
 // stamp is the timeline's date format: precise to the minute, because the
 // point of "Landed" is when this arrived relative to everything else that day.
@@ -288,11 +315,13 @@ func readStage(doc *Doc) Stage {
 	// the sidecar until the new pass replaces it, so counting characters
 	// would report the step finished while it is still running.
 	if doc.Status == StatusProcessing {
-		return Stage{Key: "text", Name: "OCR", State: "pending", Detail: "Working…"}
+		s.State, s.Detail = "pending", "Working…"
+		return s
 	}
 	if chars == 0 {
-		return Stage{Key: "text", Name: "OCR — no text found", State: "failed",
-			Detail: "nothing to search or summarise"}
+		s.Name, s.State = "OCR — no text found", "failed"
+		s.Detail = "nothing to search or summarise"
+		return s
 	}
 
 	s.State = "done"
@@ -343,14 +372,14 @@ func (a *App) taggingStage(doc *Doc) Stage {
 	case a.enrichq != nil && a.enrichq.Has(doc.ID):
 		s.State = "pending"
 		s.Detail = "Queued"
-		if _, resetIn, stopped := a.enricher.Budget(); stopped != "" {
-			s.Detail = "Stopped: " + stopped
-		} else if resetIn > 0 {
-			if remaining, _, _ := a.enricher.Budget(); remaining == 0 {
-				s.Detail = "Waiting — rate limit resets in " + resetIn.Round(time.Second).String()
+		if stopped, reason := a.budgetReason(); reason != "" {
+			if stopped {
+				s.Detail = "Stopped: " + reason
+			} else {
+				s.Detail = "Waiting — " + reason
 			}
 		}
-	case hasTag(doc.Tags, "needs-review"):
+	case slices.Contains(doc.Tags, TagNeedsReview):
 		s.State = "failed"
 		s.Detail = "the model call did not succeed — use Re-tag with AI"
 	default:
@@ -360,13 +389,22 @@ func (a *App) taggingStage(doc *Doc) Stage {
 	return s
 }
 
-func hasTag(tags []string, want string) bool {
-	for _, t := range tags {
-		if t == want {
-			return true
-		}
+// budgetReason says why the model is not working right now, or "" when nothing
+// is in the way. Three routes asked this and answered it three different ways,
+// so the same waiting document could explain itself on one and stay silent on
+// another. stopped separates "will not resume" from "not yet".
+func (a *App) budgetReason() (stopped bool, reason string) {
+	if a.enricher == nil {
+		return false, ""
 	}
-	return false
+	remaining, resetIn, halted := a.enricher.Budget()
+	switch {
+	case halted != "":
+		return true, halted
+	case remaining == 0 && resetIn > 0:
+		return false, "rate limit resets in " + resetIn.Round(time.Second).String()
+	}
+	return false, ""
 }
 
 func plural(n int) string {
@@ -422,6 +460,20 @@ type SpendSummary struct {
 	Budget  int
 	ResetIn string
 	Stopped string
+}
+
+// wantsJSON reports whether the caller is our own JavaScript rather than a
+// browser following a form. Spelled once so every background action agrees on
+// what counts as an asynchronous request.
+func wantsJSON(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "application/json")
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		logf("writing json response: %v", err)
+	}
 }
 
 func (a *App) render(w http.ResponseWriter, name string, data page) {
@@ -510,7 +562,7 @@ func (p page) ToggleTag(tag string) string {
 	})
 }
 
-func (p page) TagOn(tag string) bool { return hasTag(p.Query.Tags, tag) }
+func (p page) TagOn(tag string) bool { return slices.Contains(p.Query.Tags, tag) }
 
 // BackLink returns to the search that led here, so "All results" means the
 // results you actually came from rather than an unfiltered list.
@@ -561,13 +613,6 @@ func (p page) DirArrow() string {
 	return "↑"
 }
 
-// IsLatest reports the plain default view: everything, newest arrival first.
-// It is the only state the design's "Latest additions" heading is true for.
-func (p page) IsLatest() bool {
-	return p.Query.Q == "" && !p.HasFilters() &&
-		p.Query.SortField() == "added" && p.Query.Descending()
-}
-
 func (p page) RangeOn(r string) bool {
 	if r == "" {
 		// All time is the default, so an unrecognised or absent value reads as
@@ -577,9 +622,7 @@ func (p page) RangeOn(r string) bool {
 	return p.Query.Range == r
 }
 
-func (p page) HasFilters() bool {
-	return len(p.Query.Tags) > 0 || p.Query.Status != "" || p.Query.HasDateFilter()
-}
+func (p page) HasFilters() bool { return p.Query.HasFilters() }
 
 // ClearFilters keeps the search term — clearing filters and clearing the
 // query are separate actions, and the header has its own Clear for the query.
@@ -643,16 +686,9 @@ func (p page) TopTags() []FacetValue {
 	if len(top) > topTagCount {
 		top = top[:topTagCount]
 	}
-	out := append([]FacetValue(nil), top...)
+	out := slices.Clone(top)
 	for _, t := range p.Query.Tags {
-		shown := false
-		for _, f := range out {
-			if f.Value == t {
-				shown = true
-				break
-			}
-		}
-		if !shown {
+		if !slices.ContainsFunc(out, func(f FacetValue) bool { return f.Value == t }) {
 			out = append(out, FacetValue{Value: t})
 		}
 	}
@@ -715,7 +751,7 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// The placeholder says how many documents are searchable, which is only
 	// the same as the result count when nothing is filtered.
 	total := res.Found
-	if q.Q != "" || len(q.Tags) > 0 || q.Status != "" || q.HasDateFilter() {
+	if q.Q != "" || q.HasFilters() {
 		if n, err := a.search.Count(r.Context()); err == nil {
 			total = n
 		}
@@ -728,18 +764,37 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func docID(r *http.Request) (int, error) {
+// pathID parses the document number out of the route and answers the request
+// itself when it cannot. With integer ids the parse is the validation, so a
+// malformed id and a missing document are the same 404 to the caller.
+func pathID(w http.ResponseWriter, r *http.Request) (int, bool) {
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil || id < 1 {
-		return 0, errors.New("bad document id")
+		http.NotFound(w, r)
+		return 0, false
 	}
-	return id, nil
+	return id, true
+}
+
+// loadDoc goes one step further and reads the sidecar, which is what every
+// handler that intends to change a document needs. Edits apply to the sidecar
+// because it, not the indexed copy, is authoritative.
+func (a *App) loadDoc(w http.ResponseWriter, r *http.Request) (*Doc, bool) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return nil, false
+	}
+	doc, err := a.store.Load(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return nil, false
+	}
+	return doc, true
 }
 
 func (a *App) handleDoc(w http.ResponseWriter, r *http.Request) {
-	id, err := docID(r)
-	if err != nil {
-		http.NotFound(w, r)
+	id, ok := pathID(w, r)
+	if !ok {
 		return
 	}
 	doc, err := a.search.Get(r.Context(), id)
@@ -761,16 +816,8 @@ func (a *App) handleDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
-	id, err := docID(r)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	// The sidecar is authoritative, so edits are applied to it rather than to
-	// the indexed copy.
-	doc, err := a.store.Load(id)
-	if err != nil {
-		http.NotFound(w, r)
+	doc, ok := a.loadDoc(w, r)
+	if !ok {
 		return
 	}
 	// ParseForm ignores multipart bodies, leaving every value empty — which,
@@ -801,20 +848,19 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 		doc.Tags = splitTags(r.PostFormValue("tags"))
 	}
 
-	// Write durably first, then index: a 200 must mean both.
-	if err := a.store.Save(doc); err != nil {
-		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
+	// A 200 has to mean durable and queryable, so the two are reported apart:
+	// one of these outcomes lost the edit and the other did not.
+	if err := a.persist(r.Context(), doc); errors.Is(err, ErrIndexLagging) {
+		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
-	}
-	if err := a.search.Upsert(r.Context(), doc); err != nil {
-		http.Error(w, "saved to disk, but indexing failed: "+err.Error(), http.StatusBadGateway)
+	} else if err != nil {
+		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	// Autosave posts in the background and stays on the page.
-	if strings.Contains(r.Header.Get("Accept"), "application/json") {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+	if wantsJSON(r) {
+		writeJSON(w, map[string]any{
 			"ok":           true,
 			"title":        doc.Title,
 			"tags":         doc.Tags,
@@ -822,13 +868,12 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	http.Redirect(w, r, fmt.Sprintf("/doc/%d", id), http.StatusSeeOther)
+	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)
 }
 
 func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
-	id, err := docID(r)
-	if err != nil {
-		http.NotFound(w, r)
+	id, ok := pathID(w, r)
+	if !ok {
 		return
 	}
 	if err := a.store.Delete(id); err != nil {
@@ -845,97 +890,78 @@ func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
 // and metadata are all redone. Unlike startup recovery, which deliberately
 // skips finished stages, this clears them first so the work actually happens.
 func (a *App) handleDocRetry(w http.ResponseWriter, r *http.Request) {
-	id, err := docID(r)
-	if err != nil {
-		http.NotFound(w, r)
+	doc, ok := a.loadDoc(w, r)
+	if !ok {
 		return
 	}
-	doc, err := a.store.Load(id)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	if err := a.store.ClearDerived(id); err != nil {
+	if err := a.store.ClearDerived(doc.ID); err != nil {
 		http.Error(w, "clearing derived files: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	doc.Status = StatusProcessing
 	doc.Enriched = false
-	if err := a.store.Save(doc); err != nil {
+	// Indexed as well as saved: the document page reads its copy out of the
+	// index, so writing only the sidecar left it reporting the state it was in
+	// before the reprocess was asked for.
+	if err := a.persist(r.Context(), doc); err != nil && !errors.Is(err, ErrIndexLagging) {
 		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := a.pipeline.EnqueueDoc(id); err != nil {
+	if err := a.pipeline.EnqueueDoc(doc.ID); err != nil {
 		http.Error(w, "cannot reprocess: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if strings.Contains(r.Header.Get("Accept"), "application/json") {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"status": "processing"})
+	if wantsJSON(r) {
+		writeJSON(w, map[string]any{"status": "processing"})
 		return
 	}
 	// Without JavaScript, back to the document: the timeline there already
 	// reports the work, and the status page is about the queue as a whole.
-	http.Redirect(w, r, fmt.Sprintf("/doc/%d", id), http.StatusSeeOther)
+	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)
 }
 
 // handleDocEnrich re-runs just the metadata call, leaving OCR alone. Useful
 // when a document was ingested while the model was unavailable or rate
 // limited, without paying to redo the OCR.
 func (a *App) handleDocEnrich(w http.ResponseWriter, r *http.Request) {
-	id, err := docID(r)
-	if err != nil {
-		http.NotFound(w, r)
+	doc, ok := a.loadDoc(w, r)
+	if !ok {
 		return
 	}
 	if a.enricher == nil {
 		http.Error(w, "no model configured: set OPENAI_API_KEY", http.StatusPreconditionFailed)
 		return
 	}
-	doc, err := a.store.Load(id)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
 	doc.Enriched = false
-	if err := a.store.Save(doc); err != nil {
+	if err := a.persist(r.Context(), doc); err != nil && !errors.Is(err, ErrIndexLagging) {
 		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	// Queued rather than run inline: the request should not hang waiting on a
 	// rate limit that may be hours from resetting.
-	a.enrichq.Add(id)
+	a.enrichq.Add(doc.ID)
 
-	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+	if wantsJSON(r) {
 		// Say which of the three states this is, so the page can report
 		// "working" versus "waiting on a limit" rather than a blank pause.
 		out := map[string]any{"status": "queued"}
-		remaining, resetIn, stopped := a.enricher.Budget()
-		switch {
-		case stopped != "":
-			out["status"], out["reason"] = "blocked", stopped
-		case remaining == 0 && resetIn > 0:
-			out["status"] = "waiting"
-			out["reason"] = "rate limit resets in " + resetIn.Round(time.Second).String()
+		if stopped, reason := a.budgetReason(); reason != "" {
+			out["status"], out["reason"] = "waiting", reason
+			if stopped {
+				out["status"] = "blocked"
+			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(out)
+		writeJSON(w, out)
 		return
 	}
-	http.Redirect(w, r, fmt.Sprintf("/doc/%d", id), http.StatusSeeOther)
+	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)
 }
 
 // handleDocMeta reports a document's current metadata, so a page waiting on
 // background tagging can show the result without a reload.
 func (a *App) handleDocMeta(w http.ResponseWriter, r *http.Request) {
-	id, err := docID(r)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	doc, err := a.store.Load(id)
-	if err != nil {
-		http.NotFound(w, r)
+	doc, ok := a.loadDoc(w, r)
+	if !ok {
 		return
 	}
 	out := map[string]any{
@@ -951,15 +977,10 @@ func (a *App) handleDocMeta(w http.ResponseWriter, r *http.Request) {
 		// would rather than a second implementation of the same labels.
 		"stages": a.stagesFor(doc),
 	}
-	if a.enricher != nil {
-		if _, resetIn, stopped := a.enricher.Budget(); stopped != "" {
-			out["reason"] = stopped
-		} else if resetIn > 0 {
-			out["reason"] = "rate limit resets in " + resetIn.Round(time.Second).String()
-		}
+	if _, reason := a.budgetReason(); reason != "" {
+		out["reason"] = reason
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
+	writeJSON(w, out)
 }
 
 // downloadName is what a browser should save this document as. The title is
@@ -1015,15 +1036,14 @@ func disposition(kind, name string) string {
 }
 
 func (a *App) handleDocPDF(w http.ResponseWriter, r *http.Request) {
-	id, err := docID(r)
-	if err != nil {
-		http.NotFound(w, r)
+	id, ok := pathID(w, r)
+	if !ok {
 		return
 	}
 	// Inline, but named: the viewer's own download button and "save as" both
 	// take the name from here.
 	name := docCode(id) + ".pdf"
-	if doc, err := a.store.Load(id); err == nil {
+	if doc, err := a.store.LoadMeta(id); err == nil {
 		name = downloadName(doc, ".pdf")
 	}
 	w.Header().Set("Content-Disposition", disposition("inline", name))
@@ -1031,14 +1051,13 @@ func (a *App) handleDocPDF(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDocOriginal(w http.ResponseWriter, r *http.Request) {
-	id, err := docID(r)
-	if err != nil {
-		http.NotFound(w, r)
-		return
+	if id, ok := pathID(w, r); ok {
+		a.serveOriginal(w, r, id)
 	}
-	a.serveOriginal(w, r, id)
 }
 
+// serveOriginal is shared with the download route, which reaches it with an id
+// it has already chosen rather than one from the path.
 func (a *App) serveOriginal(w http.ResponseWriter, r *http.Request, id int) {
 	path, err := a.store.OriginalGlob(id)
 	if err != nil {
@@ -1046,7 +1065,7 @@ func (a *App) serveOriginal(w http.ResponseWriter, r *http.Request, id int) {
 		return
 	}
 	name := filepath.Base(path)
-	if doc, err := a.store.Load(id); err == nil {
+	if doc, err := a.store.LoadMeta(id); err == nil {
 		name = downloadName(doc, filepath.Ext(path))
 	}
 	w.Header().Set("Content-Disposition", disposition("attachment", name))
@@ -1054,9 +1073,8 @@ func (a *App) serveOriginal(w http.ResponseWriter, r *http.Request, id int) {
 }
 
 func (a *App) handleDocThumb(w http.ResponseWriter, r *http.Request) {
-	id, err := docID(r)
-	if err != nil {
-		http.NotFound(w, r)
+	id, ok := pathID(w, r)
+	if !ok {
 		return
 	}
 	path := a.store.ThumbPath(id)
@@ -1124,7 +1142,7 @@ func (a *App) streamZip(w http.ResponseWriter, r *http.Request, ids []int) {
 	used := map[string]bool{}
 	var written, skipped int
 	for _, id := range ids {
-		doc, err := a.store.Load(id)
+		doc, err := a.store.LoadMeta(id)
 		if err != nil || doc.Status == StatusDeleted {
 			skipped++
 			continue
@@ -1215,9 +1233,8 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Drag-and-drop posts from any page and stays where it is, so it asks for
 	// JSON rather than a whole rendered upload page.
-	if strings.Contains(r.Header.Get("Accept"), "application/json") {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"flash": flash})
+	if wantsJSON(r) {
+		writeJSON(w, map[string]any{"flash": flash})
 		return
 	}
 	a.render(w, "upload.html", page{Title: "Upload", Flash: flash, URL: r.URL})
@@ -1233,7 +1250,7 @@ func (a *App) acceptUpload(ctx context.Context, fh *multipart.FileHeader) Flash 
 	}
 
 	ext := strings.ToLower(filepath.Ext(name))
-	if !SupportedExts[ext] {
+	if !isSupportedExt(ext) {
 		return fail("unsupported file type %q", ext)
 	}
 

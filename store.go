@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +23,12 @@ const (
 	// the id it consumed can never be handed out to a different document.
 	StatusDeleted = "deleted"
 )
+
+// TagNeedsReview is ours, not a description of the document: it marks a
+// document the model failed to describe. Named once because three places act
+// on it — the prompt withholds it, the failure path adds it, and the timeline
+// reads it to explain itself.
+const TagNeedsReview = "needs-review"
 
 // OCR source values, recorded so the UI can explain where text came from.
 const (
@@ -152,20 +160,22 @@ func (s *Store) AllocID() int {
 // ClaimHash reserves a content hash for ingestion. It returns false when
 // another worker is already ingesting identical bytes, which closes the race
 // that a Typesense-only dedup check would leave open.
-func (s *Store) ClaimHash(sha string) bool {
+//
+// The release is returned rather than exposed as a second method, so it cannot
+// be forgotten or deferred in the wrong scope — a claim that is never released
+// wedges those bytes for the life of the process.
+func (s *Store) ClaimHash(sha string) (release func(), ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.inflight[sha] {
-		return false
+		return nil, false
 	}
 	s.inflight[sha] = true
-	return true
-}
-
-func (s *Store) ReleaseHash(sha string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.inflight, sha)
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.inflight, sha)
+	}, true
 }
 
 func (s *Store) Save(d *Doc) error {
@@ -186,6 +196,33 @@ func (s *Store) Load(id int) (*Doc, error) {
 		return nil, fmt.Errorf("sidecar %d: %w", id, err)
 	}
 	return &d, nil
+}
+
+// LoadMeta reads only what is needed to name and label a document. The
+// extracted text is the bulk of a sidecar, and json.Unmarshal skips keys the
+// target struct does not have rather than allocating them — which is the
+// difference between reading two thousand titles and reading two thousand
+// full documents when a bulk download builds its filenames.
+func (s *Store) LoadMeta(id int) (*Doc, error) {
+	b, err := os.ReadFile(s.DocPath(id))
+	if err != nil {
+		return nil, err
+	}
+	var m struct {
+		ID           int    `json:"id"`
+		Title        string `json:"title"`
+		OriginalName string `json:"original_name"`
+		OriginalExt  string `json:"original_ext"`
+		Status       string `json:"status"`
+		AddedTS      int64  `json:"added_ts"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("sidecar %d: %w", id, err)
+	}
+	return &Doc{
+		ID: m.ID, Title: m.Title, OriginalName: m.OriginalName,
+		OriginalExt: m.OriginalExt, Status: m.Status, AddedTS: m.AddedTS,
+	}, nil
 }
 
 // Delete removes a document's files but replaces its sidecar with a tombstone
@@ -247,7 +284,7 @@ func (s *Store) SidecarIDs() ([]int, error) {
 			ids = append(ids, id)
 		}
 	}
-	sort.Ints(ids)
+	slices.Sort(ids)
 	return ids, nil
 }
 
@@ -275,6 +312,12 @@ func (s *Store) Each(fn func(*Doc) error) error {
 // writeFileAtomic writes via a temp file in the same directory and renames, so
 // readers never observe a partially written file.
 func writeFileAtomic(path string, b []byte) error {
+	return writeFileAtomicFrom(path, bytes.NewReader(b))
+}
+
+// writeFileAtomicFrom is the streaming form, for content that should never be
+// held in memory in one piece.
+func writeFileAtomicFrom(path string, r io.Reader) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
@@ -283,7 +326,7 @@ func writeFileAtomic(path string, b []byte) error {
 	tmp := f.Name()
 	defer os.Remove(tmp)
 
-	if _, err := f.Write(b); err != nil {
+	if _, err := io.Copy(f, r); err != nil {
 		f.Close()
 		return err
 	}

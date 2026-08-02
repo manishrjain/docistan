@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/typesense/typesense-go/v3/typesense"
@@ -24,6 +26,22 @@ type Search struct {
 	// the collection. Two instances sharing one Typesense would otherwise
 	// silently wipe each other's index on startup.
 	collectionName string
+
+	vocabMu sync.Mutex
+	vocab   map[string]vocabEntry
+}
+
+// vocabTTL is how long a facet sweep of the whole archive is reused. The
+// vocabulary is asked for on every document page view and again for every
+// document enriched, so at eight thousand documents an uncached call is a
+// full-corpus facet count per page view and per backfilled document. A tag
+// added now appears in autocomplete within this window, which is a better
+// trade than counting the archive again to shave seconds off that.
+const vocabTTL = 30 * time.Second
+
+type vocabEntry struct {
+	values []string
+	at     time.Time
 }
 
 func NewSearch(url, key, collection string) *Search {
@@ -73,6 +91,11 @@ func (s *Search) schema() *api.CollectionSchema {
 			f("tags", "string[]", facet),
 			f("status", "string", facet),
 			f("sha256", "string"),
+			// Both pages that show a failure read their Doc out of the index,
+			// so leaving these out of the schema rendered the reason for the
+			// failure as an empty cell.
+			f("error", "string", stored),
+			f("failed_stage", "string", stored),
 			f("created_ts", "int64", sortable),
 			f("added_ts", "int64", sortable),
 			f("confidence", "int32", sortable),
@@ -129,6 +152,8 @@ func tsDoc(d *Doc) map[string]any {
 		"tags":          tags,
 		"status":        d.Status,
 		"sha256":        d.SHA256,
+		"error":         d.Error,
+		"failed_stage":  d.FailedStage,
 		"created_ts":    d.CreatedTS,
 		"added_ts":      d.AddedTS,
 		"confidence":    d.Confidence,
@@ -251,14 +276,21 @@ func (q Query) HasDateFilter() bool {
 	return lo > 0 || hi > 0
 }
 
+// HasFilters reports whether anything narrows the archive other than the
+// search term itself. Both the "Clear filters" affordance and the decision to
+// look up the archive-wide count hang on this, so it is answered in one place:
+// a filter dimension added here is added everywhere.
+func (q Query) HasFilters() bool {
+	return len(q.Tags) > 0 || q.Status != "" || q.HasDateFilter()
+}
+
 // Result is everything a results page needs, already shaped for templates.
 type Result struct {
-	Hits    []Hit
-	Found   int
-	Page    int
-	Pages   int
-	PerPage int
-	Facets  map[string][]FacetValue
+	Hits   []Hit
+	Found  int
+	Page   int
+	Pages  int
+	Facets map[string][]FacetValue
 }
 
 // Hit carries per-field highlights. A match can land in the title, the
@@ -291,11 +323,11 @@ func escapeFilterValue(v string) string {
 }
 
 func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
-	res, err := s.query(ctx, q, perPage)
+	res, err := s.query(ctx, q, perPage, false)
 	if err != nil {
 		return nil, err
 	}
-	out := &Result{Page: max(q.Page, 1), PerPage: perPage, Facets: map[string][]FacetValue{}}
+	out := &Result{Page: max(q.Page, 1), Facets: map[string][]FacetValue{}}
 	if res.Found != nil {
 		out.Found = *res.Found
 		out.Pages = (out.Found + perPage - 1) / perPage
@@ -328,8 +360,9 @@ func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 
 // query builds and runs the search. Separated from Query so the bulk download
 // can page through the same filters at its own size without a second, drifting
-// copy of how a filter is spelled.
-func (s *Search) query(ctx context.Context, q Query, perPage int) (*api.SearchResult, error) {
+// copy of how a filter is spelled. idsOnly strips the request down to what
+// that caller actually reads.
+func (s *Search) query(ctx context.Context, q Query, perPage int, idsOnly bool) (*api.SearchResult, error) {
 	if q.Page < 1 {
 		q.Page = 1
 	}
@@ -378,17 +411,29 @@ func (s *Search) query(ctx context.Context, q Query, perPage int) (*api.SearchRe
 	}
 
 	params := &api.SearchCollectionParams{
-		Q:                       pointer.String(text),
-		QueryBy:                 pointer.String("title,summary,content,tags,original_name"),
-		QueryByWeights:          pointer.String("10,6,4,8,2"),
-		FacetBy:                 pointer.String("tags,status"),
-		MaxFacetValues:          pointer.Int(200),
-		HighlightFields:         pointer.String("title,summary,content"),
-		HighlightStartTag:       pointer.String(hlStart),
-		HighlightEndTag:         pointer.String(hlEnd),
-		HighlightAffixNumTokens: pointer.Int(8),
-		PerPage:                 pointer.Int(perPage),
-		Page:                    pointer.Int(q.Page),
+		Q:              pointer.String(text),
+		QueryBy:        pointer.String("title,summary,content,tags,original_name"),
+		QueryByWeights: pointer.String("10,6,4,8,2"),
+		PerPage:        pointer.Int(perPage),
+		Page:           pointer.Int(q.Page),
+	}
+	if idsOnly {
+		// The bulk download reads nothing but the id. Asking for whole
+		// documents and a full facet count to build a []int meant dragging up
+		// to two thousand document bodies across the wire to throw them away.
+		params.IncludeFields = pointer.String("id")
+	} else {
+		// The body is matched against but never rendered from a list: the card
+		// shows the highlighted snippet, which Typesense returns separately. So
+		// every hit was shipping its whole indexed text to be decoded and
+		// dropped, on a page that reloads itself every few seconds.
+		params.ExcludeFields = pointer.String("content")
+		params.FacetBy = pointer.String("tags,status")
+		params.MaxFacetValues = pointer.Int(200)
+		params.HighlightFields = pointer.String("title,summary,content")
+		params.HighlightStartTag = pointer.String(hlStart)
+		params.HighlightEndTag = pointer.String(hlEnd)
+		params.HighlightAffixNumTokens = pointer.Int(8)
 	}
 	if len(filters) > 0 {
 		params.FilterBy = pointer.String(strings.Join(filters, " && "))
@@ -449,7 +494,7 @@ func (s *Search) AllIDs(ctx context.Context, q Query, limit int) ([]int, error) 
 	var out []int
 	for page := 1; ; page++ {
 		q.Page = page
-		res, err := s.query(ctx, q, batch)
+		res, err := s.query(ctx, q, batch, true)
 		if err != nil {
 			return out, err
 		}
@@ -460,10 +505,8 @@ func (s *Search) AllIDs(ctx context.Context, q Query, limit int) ([]int, error) 
 			if h.Document == nil {
 				continue
 			}
-			if raw, ok := (*h.Document)["id"].(string); ok {
-				if id, err := strconv.Atoi(raw); err == nil {
-					out = append(out, id)
-				}
+			if id, ok := hitID(*h.Document); ok {
+				out = append(out, id)
 			}
 			if limit > 0 && len(out) >= limit {
 				return out, nil
@@ -541,6 +584,10 @@ func (s *Search) Get(ctx context.Context, id int) (*Doc, error) {
 // Vocabulary returns the most common values of a faceted field, used to keep
 // the heuristics and the LLM prompt anchored to terms already in use.
 func (s *Search) Vocabulary(ctx context.Context, field string, limit int) ([]string, error) {
+	key := field + "/" + strconv.Itoa(limit)
+	if v, ok := s.cachedVocab(key); ok {
+		return v, nil
+	}
 	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
 		Q:              pointer.String("*"),
 		QueryBy:        pointer.String("title"),
@@ -565,7 +612,42 @@ func (s *Search) Vocabulary(ctx context.Context, field string, limit int) ([]str
 			}
 		}
 	}
+	s.storeVocab(key, out)
 	return out, nil
+}
+
+// cachedVocab hands back a copy: the list goes on to a template and into a
+// prompt, and a cache that shares its slice is one careless append away from
+// rewriting itself.
+func (s *Search) cachedVocab(key string) ([]string, bool) {
+	s.vocabMu.Lock()
+	defer s.vocabMu.Unlock()
+	e, ok := s.vocab[key]
+	if !ok || time.Since(e.at) >= vocabTTL {
+		return nil, false
+	}
+	return slices.Clone(e.values), true
+}
+
+func (s *Search) storeVocab(key string, values []string) {
+	s.vocabMu.Lock()
+	defer s.vocabMu.Unlock()
+	if s.vocab == nil {
+		s.vocab = map[string]vocabEntry{}
+	}
+	s.vocab[key] = vocabEntry{values: slices.Clone(values), at: time.Now()}
+}
+
+// hitID recovers our integer id from a Typesense hit, which stores ids as
+// strings. Written once because getting it wrong fails quietly: the id comes
+// back zero and the document is skipped rather than reported.
+func hitID(m map[string]any) (int, bool) {
+	raw, ok := m["id"].(string)
+	if !ok {
+		return 0, false
+	}
+	id, err := strconv.Atoi(raw)
+	return id, err == nil
 }
 
 // docFromMap rebuilds a Doc from a Typesense hit. Every display field is
@@ -598,6 +680,8 @@ func docFromMap(m map[string]any) *Doc {
 		Title:        str("title"),
 		Summary:      str("summary"),
 		Status:       str("status"),
+		Error:        str("error"),
+		FailedStage:  str("failed_stage"),
 		SHA256:       str("sha256"),
 		CreatedDate:  str("created_date"),
 		OCRSource:    str("ocr_source"),
@@ -615,7 +699,7 @@ func docFromMap(m map[string]any) *Doc {
 		Enriched:     boolean("enriched"),
 		NativeText:   boolean("native_text"),
 	}
-	d.ID, _ = strconv.Atoi(str("id"))
+	d.ID, _ = hitID(m)
 	if tags, ok := m["tags"].([]any); ok {
 		for _, t := range tags {
 			if s, ok := t.(string); ok {
@@ -646,13 +730,6 @@ func (s *Search) FindByHash(ctx context.Context, sha string) (int, bool, error) 
 	if hit.Document == nil {
 		return 0, false, nil
 	}
-	raw, ok := (*hit.Document)["id"].(string)
-	if !ok {
-		return 0, false, nil
-	}
-	id, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, false, nil
-	}
-	return id, true, nil
+	id, ok := hitID(*hit.Document)
+	return id, ok, nil
 }

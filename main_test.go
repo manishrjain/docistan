@@ -1,9 +1,11 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 )
@@ -141,5 +143,121 @@ func TestDispositionEncodesNonASCII(t *testing.T) {
 	plain := disposition("attachment", "Simple.pdf")
 	if plain != `attachment; filename=Simple.pdf` && plain != `attachment; filename="Simple.pdf"` {
 		t.Errorf("unexpected plain form: %q", plain)
+	}
+}
+
+// Every page must parse against the real function map. A template calling a
+// helper that is not registered fails when someone opens the page, not when
+// the binary is built, so this is the cheapest place to catch it.
+func TestTemplatesParse(t *testing.T) {
+	for _, name := range []string{"index.html", "doc.html", "upload.html", "status.html"} {
+		if _, err := parsePage(assets, name); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// The parsed template is now shared by every request instead of being rebuilt
+// per render, so it has to survive concurrent execution — that property is the
+// whole reason caching it is safe. Run under -race to mean anything.
+func TestTemplateCacheConcurrentExecute(t *testing.T) {
+	a := &App{}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				tpl, err := a.templates("index.html")
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				data := page{Query: Query{}, Result: &Result{Facets: map[string][]FacetValue{}}}
+				if err := tpl.ExecuteTemplate(io.Discard, "layout", data); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// LoadMeta exists to avoid reading a document's whole text to work out what to
+// call the file. It must still return the fields a download name is built from.
+func TestLoadMetaSkipsContentButKeepsNames(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &Doc{
+		ID: 7, Title: "Northwind Statement", OriginalName: "scan_007.pdf",
+		OriginalExt: ".pdf", Status: StatusReady, AddedTS: 1785400000,
+		Content: strings.Repeat("x", 5000),
+	}
+	if err := s.Save(want); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.LoadMeta(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != "" {
+		t.Errorf("LoadMeta returned %d bytes of content, want none", len(got.Content))
+	}
+	for _, c := range []struct{ name, got, want string }{
+		{"title", got.Title, want.Title},
+		{"original name", got.OriginalName, want.OriginalName},
+		{"status", got.Status, want.Status},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+	if got.ID != want.ID || got.AddedTS != want.AddedTS {
+		t.Errorf("id/addedTS = %d/%d, want %d/%d", got.ID, got.AddedTS, want.ID, want.AddedTS)
+	}
+	if name := downloadName(got, ".pdf"); name != "Northwind Statement.pdf" {
+		t.Errorf("downloadName from meta = %q", name)
+	}
+}
+
+// One table now answers "do we accept this" and "how is it converted", and it
+// has to keep accepting the casing a scanner or a mail client actually emits.
+func TestExtensionTaxonomy(t *testing.T) {
+	cases := []struct {
+		ext       string
+		supported bool
+		kind      fileKind
+	}{
+		{".pdf", true, kindPDF},
+		{".PDF", true, kindPDF},
+		{".jpeg", true, kindImage},
+		{".TIFF", true, kindImage},
+		{".md", true, kindText},
+		{".txt", true, kindText},
+		{".docx", false, 0},
+		{"", false, 0},
+	}
+	for _, c := range cases {
+		if got := isSupportedExt(c.ext); got != c.supported {
+			t.Errorf("isSupportedExt(%q) = %v, want %v", c.ext, got, c.supported)
+		}
+		if !c.supported {
+			continue
+		}
+		if k, _ := kindOf(c.ext); k != c.kind {
+			t.Errorf("kindOf(%q) = %v, want %v", c.ext, k, c.kind)
+		}
+		if want := c.kind == kindText; isTextExt(c.ext) != want {
+			t.Errorf("isTextExt(%q) = %v, want %v", c.ext, !want, want)
+		}
+	}
+	// The picker offers exactly what the server accepts.
+	if got := acceptedExts(); got != ".jpeg,.jpg,.md,.pdf,.png,.tif,.tiff,.txt,.webp" {
+		t.Errorf("acceptedExts() = %q", got)
 	}
 }

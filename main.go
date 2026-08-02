@@ -1,16 +1,19 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -44,6 +47,11 @@ type App struct {
 	pipeline *Pipeline
 	enricher *OpenAIEnricher
 	enrichq  *EnrichQueue
+
+	// Pages are parsed on first use and kept, so a render costs an execute
+	// rather than a parse. Empty under -dev, which never caches.
+	tplMu sync.Mutex
+	tpl   map[string]*template.Template
 }
 
 func main() {
@@ -51,7 +59,7 @@ func main() {
 	flag.StringVar(&cfg.DataDir, "data", defaultDataDir(), "document archive directory")
 	flag.StringVar(&cfg.Listen, "listen", "127.0.0.1:8080", "listen address")
 	flag.StringVar(&cfg.TypesenseURL, "typesense-url", "http://localhost:8108", "Typesense URL")
-	flag.StringVar(&cfg.TypesenseKey, "typesense-key", envOr("TYPESENSE_API_KEY", "docistan-dev-key"), "Typesense API key")
+	flag.StringVar(&cfg.TypesenseKey, "typesense-key", cmp.Or(os.Getenv("TYPESENSE_API_KEY"), "docistan-dev-key"), "Typesense API key")
 	flag.StringVar(&cfg.Collection, "collection", "documents", "Typesense collection name; give a second instance its own")
 	flag.IntVar(&cfg.Workers, "workers", 2, "ingest workers")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
@@ -142,6 +150,26 @@ func run(cfg Config) error {
 	}
 	app.pipeline.Drain(30 * time.Second)
 	logf("stopped cleanly")
+	return nil
+}
+
+// ErrIndexLagging means the sidecar is written — the document is durable — but
+// the index does not know about it yet. It is separate from a write failure
+// because a caller answering a person has to say which happened: one of them
+// lost the edit and the other did not.
+var ErrIndexLagging = errors.New("saved to disk, but indexing failed")
+
+// persist writes the sidecar and only then updates the index, so the durable
+// copy is never behind what a reader can see. Every write goes through here:
+// the ordering is now a property of the code rather than a rule restated in a
+// comment beside each copy of it, and no path can save without indexing.
+func (a *App) persist(ctx context.Context, doc *Doc) error {
+	if err := a.store.Save(doc); err != nil {
+		return fmt.Errorf("writing sidecar: %w", err)
+	}
+	if err := a.search.Upsert(ctx, doc); err != nil {
+		return fmt.Errorf("%w: %v", ErrIndexLagging, err)
+	}
 	return nil
 }
 
@@ -278,13 +306,6 @@ func warnKeyPerms(path string) {
 	if mode := st.Mode().Perm(); mode&0o077 != 0 {
 		logf("warning: %s is mode %#o, readable beyond your user — chmod 600 %s", path, mode, path)
 	}
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 func logf(format string, args ...any) {

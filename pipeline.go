@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -223,17 +223,19 @@ func (p *Pipeline) worker(ctx context.Context) {
 	}
 }
 
-func (p *Pipeline) setStage(path string, j *Job, stage string) {
+// setStage takes the job rather than a job and its own path: the two were
+// passed separately at every call site and had to agree at all of them.
+func (p *Pipeline) setStage(j *Job, stage string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	j.Stage = stage
-	p.active[path] = j
+	p.active[j.Path] = j
 }
 
-func (p *Pipeline) clearJob(path string) {
+func (p *Pipeline) clearJob(j *Job) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.active, path)
+	delete(p.active, j.Path)
 }
 
 // Drain waits for workers to finish the document they are on. A document
@@ -261,7 +263,7 @@ func (p *Pipeline) ActiveJobs() []Job {
 	for _, j := range p.active {
 		out = append(out, *j)
 	}
-	sort.Slice(out, func(i, k int) bool { return out[i].Started.Before(out[k].Started) })
+	slices.SortFunc(out, func(a, b Job) int { return a.Started.Compare(b.Started) })
 	return out
 }
 
@@ -284,11 +286,11 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	store, search := p.app.store, p.app.search
 	name := filepath.Base(path)
 	job := &Job{Path: path, Name: name, Started: time.Now()}
-	defer p.clearJob(path)
+	defer p.clearJob(job)
 
 	fromConsume := filepath.Dir(path) == store.ConsumeDir()
 
-	p.setStage(path, job, "hash")
+	p.setStage(job, "hash")
 	sum, size, err := hashFile(path)
 	if err != nil {
 		// A file that has gone is not a failure: another pass may have moved
@@ -301,7 +303,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	}
 
 	ext := strings.ToLower(filepath.Ext(path))
-	if !SupportedExts[ext] {
+	if !isSupportedExt(ext) {
 		logf("rejecting %s: unsupported type %q", name, ext)
 		p.rejectUnsupported(ctx, name, ext, sum, size)
 		if fromConsume {
@@ -322,8 +324,9 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	}
 
 	if doc == nil {
-		p.setStage(path, job, "dedup")
-		if !store.ClaimHash(sum) {
+		p.setStage(job, "dedup")
+		release, ok := store.ClaimHash(sum)
+		if !ok {
 			// Identical bytes are mid-ingest in another worker. The document
 			// they will become does not exist yet, so there is nothing for a
 			// duplicate record to point at — and dropping the file here left
@@ -336,7 +339,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 			p.retryLater(ctx, path, name)
 			return
 		}
-		defer store.ReleaseHash(sum)
+		defer release()
 
 		if existing, found, err := search.FindByHash(ctx, sum); err != nil {
 			logf("dedup lookup for %s: %v", name, err)
@@ -347,7 +350,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 			return
 		}
 
-		p.setStage(path, job, "intake")
+		p.setStage(job, "intake")
 		doc, err = p.intake(ctx, path, name, ext, sum, size)
 		if err != nil {
 			logf("intake %s: %v", name, err)
@@ -356,19 +359,19 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	}
 
 	job.ID = doc.ID
-	if err := p.stages(ctx, path, job, doc); err != nil {
+	if err := p.stages(ctx, job, doc); err != nil {
 		doc.Status = StatusFailed
 		doc.Error = err.Error()
 		doc.FailedStage = job.Stage
 		logf("doc %d failed at %s: %v", doc.ID, job.Stage, err)
-		p.persist(ctx, doc)
+		p.save(ctx, doc)
 		return
 	}
 
 	doc.Status = StatusReady
 	doc.Error = ""
 	doc.FailedStage = ""
-	p.persist(ctx, doc)
+	p.save(ctx, doc)
 	logf("doc %d ready: %q (%s)", doc.ID, doc.Title, doc.OCRSource)
 
 	// The document is complete and usable now. Metadata is a separate concern
@@ -395,7 +398,7 @@ func (p *Pipeline) intake(ctx context.Context, path, name, ext, sum string, size
 	if err := copyFile(path, store.OriginalPath(doc.ID, ext)); err != nil {
 		return nil, err
 	}
-	p.persist(ctx, doc)
+	p.save(ctx, doc)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		logf("removing consumed file %s: %v", name, err)
 	}
@@ -404,13 +407,13 @@ func (p *Pipeline) intake(ctx context.Context, path, name, ext, sum string, size
 
 // stages runs the conversion and extraction work. Errors here mark the
 // document failed; the LLM stage is deliberately allowed to fail softly.
-func (p *Pipeline) stages(ctx context.Context, path string, job *Job, doc *Doc) error {
+func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 	store := p.app.store
 	orig := store.OriginalPath(doc.ID, doc.OriginalExt)
 	archive := store.ArchivePath(doc.ID)
 
 	if _, err := os.Stat(archive); err != nil {
-		p.setStage(path, job, "normalize")
+		p.setStage(job, "normalize")
 		normalized := archive + ".norm.pdf"
 		defer os.Remove(normalized)
 		if err := ToPDF(ctx, orig, doc.OriginalExt, normalized); err != nil {
@@ -429,7 +432,7 @@ func (p *Pipeline) stages(ctx context.Context, path string, job *Job, doc *Doc) 
 		}
 		doc.NativeText = hadText
 
-		p.setStage(path, job, "ocr")
+		p.setStage(job, "ocr")
 		doc.Signed = doc.OriginalExt == ".pdf" && IsSignedPDF(orig)
 		source, err := OCR(ctx, normalized, archive, doc.Signed)
 		if err != nil {
@@ -439,20 +442,20 @@ func (p *Pipeline) stages(ctx context.Context, path string, job *Job, doc *Doc) 
 			source = OCRNone
 		}
 		doc.OCRSource = source
-		p.persist(ctx, doc)
+		p.save(ctx, doc)
 	}
 
-	p.setStage(path, job, "inspect")
+	p.setStage(job, "inspect")
 	doc.PageCount = PageCount(ctx, archive)
 
-	p.setStage(path, job, "thumb")
+	p.setStage(job, "thumb")
 	if _, err := os.Stat(store.ThumbPath(doc.ID)); err != nil {
 		if err := Thumbnail(ctx, archive, store.ThumbPath(doc.ID)); err != nil {
 			logf("doc %d thumbnail: %v", doc.ID, err)
 		}
 	}
 
-	p.setStage(path, job, "extract")
+	p.setStage(job, "extract")
 	text, err := ExtractText(ctx, archive)
 	if err != nil {
 		logf("doc %d text extraction: %v", doc.ID, err)
@@ -493,18 +496,15 @@ func (p *Pipeline) rejectUnsupported(ctx context.Context, name, ext, sum string,
 		Title:        name,
 		Tags:         []string{},
 	}
-	p.persist(ctx, doc)
+	p.save(ctx, doc)
 }
 
-// persist writes the sidecar first and only then updates the index, so the
-// durable copy is never behind what a reader can see.
-func (p *Pipeline) persist(ctx context.Context, doc *Doc) {
-	if err := p.app.store.Save(doc); err != nil {
-		logf("doc %d: writing sidecar: %v", doc.ID, err)
-		return
-	}
-	if err := p.app.search.Upsert(ctx, doc); err != nil {
-		logf("doc %d: indexing (will self-heal on restart): %v", doc.ID, err)
+// save persists a document, logging what went wrong. The pipeline has nobody
+// to report to but the log, and neither failure is worth abandoning the
+// document over: the sidecar is authoritative and the next boot reindexes it.
+func (p *Pipeline) save(ctx context.Context, doc *Doc) {
+	if err := p.app.persist(ctx, doc); err != nil {
+		logf("doc %d: %v", doc.ID, err)
 	}
 }
 

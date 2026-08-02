@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,24 +77,26 @@ func (b *budget) observe(h http.Header) {
 	}
 }
 
-// Wait reports how long to hold off before another call is worth making.
-// A negative result means never.
-func (b *budget) Wait() time.Duration {
+// Wait reports how long to hold off before another call is worth making, and
+// why enrichment has stopped outright when it has. The reason comes back with
+// the duration because a sentinel duration meaning "never" forced the caller
+// to take the lock a second time to ask what this call already knew.
+func (b *budget) Wait() (hold time.Duration, stopped string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.stopped != "" {
-		return -1
+		return 0, b.stopped
 	}
 	now := time.Now()
 	if b.blocked.After(now) {
-		return b.blocked.Sub(now)
+		return b.blocked.Sub(now), ""
 	}
 	// Zero remaining is the case worth catching: the next call is guaranteed
 	// to be rejected, so waiting beats spending a request to discover that.
 	if b.remaining == 0 && b.resetAt.After(now) {
-		return b.resetAt.Sub(now)
+		return b.resetAt.Sub(now), ""
 	}
-	return 0
+	return 0, ""
 }
 
 func (b *budget) block(d time.Duration) {
@@ -199,7 +202,7 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 	var meta Meta
 	var used Usage
 
-	if wait := e.budget.Wait(); wait != 0 {
+	if hold, stopped := e.budget.Wait(); hold != 0 || stopped != "" {
 		return meta, used, ErrRateLimited
 	}
 
@@ -341,13 +344,19 @@ func NewEnrichQueue(app *App) *EnrichQueue {
 	return &EnrichQueue{app: app, queued: map[int]bool{}}
 }
 
-func (q *EnrichQueue) Add(id int) {
+func (q *EnrichQueue) Add(id int) { q.add(id, false) }
+
+func (q *EnrichQueue) add(id int, front bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.queued[id] {
 		return
 	}
 	q.queued[id] = true
+	if front {
+		q.pending = append([]int{id}, q.pending...)
+		return
+	}
 	q.pending = append(q.pending, id)
 }
 
@@ -374,15 +383,7 @@ func (q *EnrichQueue) clearActive() {
 
 // requeue puts a document back at the front, for when nothing was wrong with
 // it and the budget simply ran out.
-func (q *EnrichQueue) requeue(id int) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.queued[id] {
-		return
-	}
-	q.queued[id] = true
-	q.pending = append([]int{id}, q.pending...)
-}
+func (q *EnrichQueue) requeue(id int) { q.add(id, true) }
 
 // Has reports whether a document is waiting or currently being enriched, so
 // its page can say "in progress" rather than leaving the user guessing.
@@ -415,13 +416,13 @@ func (q *EnrichQueue) Run(ctx context.Context) {
 			return
 		}
 
-		if wait := q.app.enricher.budget.Wait(); wait != 0 {
-			if wait < 0 {
-				_, _, stopped := q.app.enricher.Budget()
-				logf("enrichment stopped: %s", stopped)
-				return
-			}
-			nap := wait + time.Second
+		hold, stopped := q.app.enricher.budget.Wait()
+		if stopped != "" {
+			logf("enrichment stopped: %s", stopped)
+			return
+		}
+		if hold > 0 {
+			nap := hold + time.Second
 			if nap > maxNap {
 				nap = maxNap
 			}
@@ -463,7 +464,7 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 		Filename: doc.OriginalName, Text: doc.Content, KnownTags: known,
 		// needs-review is ours, not a description of the document; offering it
 		// back would invite the model to keep it forever.
-		CurrentTags: withoutTag(doc.Tags, "needs-review"),
+		CurrentTags: withoutTag(doc.Tags, TagNeedsReview),
 	})
 	// Whatever the outcome, tokens the model actually billed belong to this
 	// document — a failed parse still cost money.
@@ -476,7 +477,7 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	}
 	if err != nil {
 		logf("doc %d: enrichment failed: %v", id, err)
-		doc.Tags = appendTag(doc.Tags, "needs-review")
+		doc.Tags = appendTag(doc.Tags, TagNeedsReview)
 		q.save(ctx, doc)
 		q.mu.Lock()
 		q.failed++
@@ -510,12 +511,8 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 }
 
 func (q *EnrichQueue) save(ctx context.Context, doc *Doc) {
-	if err := q.app.store.Save(doc); err != nil {
-		logf("doc %d: saving after enrichment: %v", doc.ID, err)
-		return
-	}
-	if err := q.app.search.Upsert(ctx, doc); err != nil {
-		logf("doc %d: indexing after enrichment: %v", doc.ID, err)
+	if err := q.app.persist(ctx, doc); err != nil {
+		logf("doc %d: after enrichment: %v", doc.ID, err)
 	}
 }
 
@@ -532,20 +529,12 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // alone — the document's own tags must not change just because we described
 // them to the model.
 func withoutTag(tags []string, drop string) []string {
-	out := make([]string, 0, len(tags))
-	for _, t := range tags {
-		if t != drop {
-			out = append(out, t)
-		}
-	}
-	return out
+	return slices.DeleteFunc(slices.Clone(tags), func(t string) bool { return t == drop })
 }
 
 func appendTag(tags []string, t string) []string {
-	for _, existing := range tags {
-		if existing == t {
-			return tags
-		}
+	if slices.Contains(tags, t) {
+		return tags
 	}
 	return append(tags, t)
 }

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -21,23 +22,58 @@ const (
 	ocrTimeout = 600 * time.Second
 )
 
-// SupportedExts are the extensions we accept. Anything else is rejected at
-// intake with a failed sidecar rather than silently ignored.
-var SupportedExts = map[string]bool{
-	".pdf": true,
-	".jpg": true, ".jpeg": true, ".png": true, ".tif": true, ".tiff": true, ".webp": true,
-	".txt": true, ".md": true,
+// fileKind is how an extension becomes a PDF. The taxonomy lives in one table
+// because it was previously spelled four ways — a set of accepted extensions,
+// two predicates, and a switch — and adding a format meant finding all of them.
+type fileKind int
+
+const (
+	kindPDF fileKind = iota
+	kindImage
+	kindText
+)
+
+// supportedExts is everything we accept. Anything else is rejected at intake
+// with a failed sidecar rather than silently ignored.
+var supportedExts = map[string]fileKind{
+	".pdf":  kindPDF,
+	".jpg":  kindImage,
+	".jpeg": kindImage,
+	".png":  kindImage,
+	".tif":  kindImage,
+	".tiff": kindImage,
+	".webp": kindImage,
+	".txt":  kindText,
+	".md":   kindText,
 }
 
-func isImageExt(ext string) bool {
-	switch ext {
-	case ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp":
-		return true
+// kindOf accepts any casing, since an extension reaching here came off a
+// filename someone else chose.
+func kindOf(ext string) (fileKind, bool) {
+	k, ok := supportedExts[strings.ToLower(ext)]
+	return k, ok
+}
+
+func isSupportedExt(ext string) bool {
+	_, ok := kindOf(ext)
+	return ok
+}
+
+func isTextExt(ext string) bool {
+	k, ok := kindOf(ext)
+	return ok && k == kindText
+}
+
+// acceptedExts is the file picker's accept list, taken from the same table the
+// server validates against so the two cannot disagree about what may be sent.
+func acceptedExts() string {
+	out := make([]string, 0, len(supportedExts))
+	for ext := range supportedExts {
+		out = append(out, ext)
 	}
-	return false
+	slices.Sort(out)
+	return strings.Join(out, ",")
 }
-
-func isTextExt(ext string) bool { return ext == ".txt" || ext == ".md" }
 
 // runCmd executes a command, returning stdout. Stderr is folded into the error so
 // failures are diagnosable from the log without re-running by hand.
@@ -80,16 +116,18 @@ func IsSignedPDF(path string) bool {
 
 // ToPDF normalizes any supported input into a PDF at dst.
 func ToPDF(ctx context.Context, src, ext, dst string) error {
-	switch {
-	case ext == ".pdf":
-		return copyFile(src, dst)
-	case isImageExt(ext):
+	kind, ok := kindOf(ext)
+	if !ok {
+		return fmt.Errorf("unsupported extension %q", ext)
+	}
+	switch kind {
+	case kindImage:
 		_, err := runCmd(ctx, cmdTimeout, "magick", src, "-auto-orient", "-strip", "-quality", "92", dst)
 		return err
-	case isTextExt(ext):
+	case kindText:
 		return textToPDF(src, dst)
 	}
-	return fmt.Errorf("unsupported extension %q", ext)
+	return copyFile(src, dst)
 }
 
 // textToPDF renders plain text so text files get the same viewer, thumbnail
@@ -249,10 +287,13 @@ func NeedsVisionRescue(text string, pages int) bool {
 	return runes < 25 || runes/pages < 20 || garbageRatio(trimmed) > 5
 }
 
+// copyFile streams rather than buffering: an ingested scan can be a hundred
+// megabytes, and every worker was holding one entirely in memory.
 func copyFile(src, dst string) error {
-	b, err := os.ReadFile(src)
+	f, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(dst, b)
+	defer f.Close()
+	return writeFileAtomicFrom(dst, f)
 }
