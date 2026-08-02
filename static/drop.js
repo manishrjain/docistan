@@ -73,7 +73,7 @@ window.addEventListener("drop", async (e) => {
       toast(f.text, {
         kind: f.bad ? "bad" : undefined,
         href: f.doc_id ? `/doc/${f.doc_id}` : undefined,
-        linkText: f.doc_id ? `see #${f.doc_id}` : undefined,
+        linkText: f.doc_id ? `see DOC-${f.doc_id}` : undefined,
       });
       if (!f.bad && !f.doc_id) queued++;
     }

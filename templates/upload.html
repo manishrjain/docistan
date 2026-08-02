@@ -6,7 +6,7 @@
 
   {{range .Flash}}
     <p class="flash{{if .Bad}} bad{{end}}">
-      {{.Text}}{{if .DocID}} — <a href="/doc/{{.DocID}}">see document #{{.DocID}}</a>{{end}}
+      {{.Text}}{{if .DocID}} — <a href="/doc/{{.DocID}}">see {{docCode .DocID}}</a>{{end}}
     </p>
   {{end}}
 

@@ -149,7 +149,7 @@
         </span>
         <div class="row-body">
           <div class="row-top">
-            <span class="code">#{{$d.ID}}</span>
+            <span class="code">{{docCode $d.ID}}</span>
             <span class="row-meta">
               {{if $d.CreatedDate}}<span>{{monthLabel $d.CreatedDate}}</span>{{end}}
               {{if $d.PageCount}}<span>{{$d.PageCount}} page{{if ne $d.PageCount 1}}s{{end}}</span>{{end}}

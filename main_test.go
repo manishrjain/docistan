@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // The key file is hand-written, usually once, often by pasting. These are the
@@ -82,5 +84,62 @@ func TestOpenAIKeyMissingFile(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 	if key, source := openAIKey(filepath.Join(t.TempDir(), "absent")); key != "" || source != "" {
 		t.Errorf("got (%q, %q), want empty", key, source)
+	}
+}
+
+// A title is free text from a model or a person, and it becomes a filename on
+// someone's disk. These are the shapes that break that.
+func TestDownloadName(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  Doc
+		ext  string
+		want string
+	}{
+		{"plain", Doc{ID: 3, Title: "Northwind Electricity Statement"}, ".pdf",
+			"Northwind Electricity Statement.pdf"},
+		{"slashes and colons", Doc{ID: 3, Title: "Invoice 12/2026: Acme \"Ltd\""}, ".pdf",
+			"Invoice 12 2026 Acme Ltd.pdf"},
+		{"collapses whitespace", Doc{ID: 3, Title: "  Spaced   out \n title "}, ".pdf",
+			"Spaced out title.pdf"},
+		{"non-ascii survives", Doc{ID: 3, Title: "Rechnung Müller — März"}, ".pdf",
+			"Rechnung Müller — März.pdf"},
+		{"trailing dot trimmed", Doc{ID: 3, Title: "Report v2."}, ".pdf", "Report v2.pdf"},
+		{"falls back to the original", Doc{ID: 3, Title: "", OriginalName: "scan_001.pdf"}, ".pdf",
+			"scan_001.pdf"},
+		{"falls back to the number", Doc{ID: 3}, ".pdf", "DOC-3.pdf"},
+		{"control chars dropped", Doc{ID: 3, Title: "Bad\x00title\x07"}, ".pdf", "Badtitle.pdf"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := downloadName(&tc.doc, tc.ext); got != tc.want {
+				t.Errorf("downloadName = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A long title must not produce a name the filesystem rejects, and must not be
+// cut through the middle of a character.
+func TestDownloadNameLength(t *testing.T) {
+	doc := Doc{ID: 3, Title: strings.Repeat("ü", 200)}
+	got := downloadName(&doc, ".pdf")
+	if len(got) > 130 {
+		t.Errorf("name is %d bytes, too long: %q", len(got), got)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("name is not valid UTF-8: %q", got)
+	}
+}
+
+// Content-Disposition has to carry a non-ASCII name in a form browsers read.
+func TestDispositionEncodesNonASCII(t *testing.T) {
+	v := disposition("attachment", "Rechnung Müller.pdf")
+	if !strings.Contains(v, "filename*=") {
+		t.Errorf("no RFC 2231 encoded form in %q", v)
+	}
+	plain := disposition("attachment", "Simple.pdf")
+	if plain != `attachment; filename=Simple.pdf` && plain != `attachment; filename="Simple.pdf"` {
+		t.Errorf("unexpected plain form: %q", plain)
 	}
 }

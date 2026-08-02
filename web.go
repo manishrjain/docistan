@@ -11,6 +11,7 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Flash is a one-off message shown after an upload. DocID, when set, links to
@@ -67,6 +69,9 @@ func templateFuncs() template.FuncMap {
 			return t.Format("Jan 2006")
 		},
 		"add": func(a, b int) int { return a + b },
+		// The number as it is written and spoken: on the paper original, in
+		// a filing box, out loud. Rendered in one place so it cannot drift.
+		"docCode": docCode,
 		// Counts in the chrome read as quantities, not identifiers, so they
 		// get separators. Document ids deliberately do not.
 		"commaNum":     commaNum,
@@ -87,6 +92,11 @@ func templateFuncs() template.FuncMap {
 		},
 	}
 }
+
+// docCode renders a document's number for display. The id itself stays a bare
+// integer everywhere it is used as an identifier — in URLs, in filenames, in
+// the sidecar — because that is what makes it easy to type and to sort.
+func docCode(id int) string { return "DOC-" + strconv.Itoa(id) }
 
 // stamp is the timeline's date format: precise to the minute, because the
 // point of "Landed" is when this arrived relative to everything else that day.
@@ -943,13 +953,71 @@ func (a *App) handleDocMeta(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(out)
 }
 
+// downloadName is what a browser should save this document as. The title is
+// what the archive calls the document, so it is what belongs on disk; the
+// original name is kept in the record but is usually a scanner serial or a
+// mail attachment's throwaway name.
+func downloadName(doc *Doc, ext string) string {
+	name := sanitizeFilename(doc.Title)
+	if name == "" {
+		name = sanitizeFilename(strings.TrimSuffix(doc.OriginalName, filepath.Ext(doc.OriginalName)))
+	}
+	if name == "" {
+		name = docCode(doc.ID)
+	}
+	return name + ext
+}
+
+// sanitizeFilename makes free text safe to hand a filesystem. Titles come
+// from a model or from a person and contain slashes, colons and quotes; a
+// long one would also exceed the 255-byte name limit on ext4.
+func sanitizeFilename(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			return -1
+		case strings.ContainsRune(`/\:*?"<>|`, r):
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	// Cut on a rune boundary, not a byte one, or a multi-byte character at
+	// the limit becomes mojibake.
+	const maxBytes = 120
+	if len(s) > maxBytes {
+		s = s[:maxBytes]
+		for len(s) > 0 && !utf8.ValidString(s) {
+			s = s[:len(s)-1]
+		}
+	}
+	// Windows refuses a name ending in a dot or a space.
+	return strings.TrimRight(s, " .")
+}
+
+// disposition builds a Content-Disposition that survives a non-ASCII title:
+// FormatMediaType emits the RFC 2231 encoded form when it needs to, which a
+// hand-rolled %q never would.
+func disposition(kind, name string) string {
+	if v := mime.FormatMediaType(kind, map[string]string{"filename": name}); v != "" {
+		return v
+	}
+	return kind
+}
+
 func (a *App) handleDocPDF(w http.ResponseWriter, r *http.Request) {
 	id, err := docID(r)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Disposition", "inline")
+	// Inline, but named: the viewer's own download button and "save as" both
+	// take the name from here.
+	name := docCode(id) + ".pdf"
+	if doc, err := a.store.Load(id); err == nil {
+		name = downloadName(doc, ".pdf")
+	}
+	w.Header().Set("Content-Disposition", disposition("inline", name))
 	http.ServeFile(w, r, a.store.ArchivePath(id))
 }
 
@@ -965,11 +1033,10 @@ func (a *App) handleDocOriginal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := filepath.Base(path)
-	if doc, err := a.store.Load(id); err == nil && doc.OriginalName != "" {
-		name = doc.OriginalName
+	if doc, err := a.store.Load(id); err == nil {
+		name = downloadName(doc, filepath.Ext(path))
 	}
-	w.Header().Set("Content-Disposition",
-		fmt.Sprintf("attachment; filename=%q", name))
+	w.Header().Set("Content-Disposition", disposition("attachment", name))
 	http.ServeFile(w, r, path)
 }
 

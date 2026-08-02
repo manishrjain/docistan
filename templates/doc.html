@@ -6,7 +6,7 @@
        navigation that matters here. */}}
   <header class="doc-head">
     <a class="btn btn-secondary" href="{{.BackLink}}">← All results</a>
-    <span class="code" data-copy="{{$d.ID}}" title="Click to copy the document number">#{{$d.ID}}</span>
+    <span class="code" data-copy="{{docCode $d.ID}}" title="Click to copy the document number">{{docCode $d.ID}}</span>
     <div class="doc-head-title">
       <h1 class="doc-title" data-edits="title" tabindex="0" title="Click to edit">{{$d.Title}}</h1>
     </div>
@@ -33,7 +33,7 @@
              JavaScript — with the browser's own confirm rather than the
              inline panels below. */}}
         <form method="post" action="/doc/{{$d.ID}}/retry" data-confirms="retry"
-              onsubmit="return confirm('Redo OCR and metadata for #{{$d.ID}}? This re-runs the model.')">
+              onsubmit="return confirm('Redo OCR and metadata for {{docCode $d.ID}}? This re-runs the model.')">
           <button type="submit" class="tool" title="Reprocess — redo OCR, text and metadata">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
           </button>
@@ -44,7 +44,7 @@
           </button>
         </form>
         <form method="post" action="/doc/{{$d.ID}}/delete" data-confirms="delete"
-              onsubmit="return confirm('Delete document #{{$d.ID}}? The original file will be removed.')">
+              onsubmit="return confirm('Delete document {{docCode $d.ID}}? The original file will be removed.')">
           <button type="submit" class="tool danger" title="Delete document">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></svg>
           </button>
@@ -54,7 +54,7 @@
       {{/* Revealed by doc.js in place of the browser's confirm dialog. */}}
       <div class="confirm" data-confirm="delete" hidden>
         <h5>Delete this document?</h5>
-        <p>The original file, the archival copy and the extracted text are all removed. The number #{{$d.ID}} is never reissued.</p>
+        <p>The original file, the archival copy and the extracted text are all removed. The number {{docCode $d.ID}} is never reissued.</p>
         <div class="confirm-actions">
           <button type="button" class="btn btn-primary" data-go>Delete</button>
           <button type="button" class="btn btn-secondary" data-cancel>Cancel</button>

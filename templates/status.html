@@ -54,7 +54,7 @@
         <tbody>
           {{range .Jobs}}
             <tr>
-              <td>{{if .ID}}<a href="/doc/{{.ID}}">#{{.ID}}</a> {{end}}{{.Name}}</td>
+              <td>{{if .ID}}<a href="/doc/{{.ID}}">{{docCode .ID}}</a> {{end}}{{.Name}}</td>
               <td>{{.Stage}}</td>
               <td>{{.Started.Format "15:04:05"}}</td>
             </tr>
@@ -75,7 +75,7 @@
           {{range .Failed}}
             {{$d := .Doc}}
             <tr>
-              <td><a href="/doc/{{$d.ID}}">#{{$d.ID}}</a> {{$d.OriginalName}}</td>
+              <td><a href="/doc/{{$d.ID}}">{{docCode $d.ID}}</a> {{$d.OriginalName}}</td>
               <td>{{$d.FailedStage}}</td>
               <td>{{$d.Error}}</td>
               <td><form method="post" action="/doc/{{$d.ID}}/retry"><button type="submit" class="btn btn-secondary btn-sm">Retry</button></form></td>
@@ -97,7 +97,7 @@
           {{range .Dupes}}
             <tr>
               <td>{{.Name}}</td>
-              <td><a href="/doc/{{.DupOf}}">#{{.DupOf}}</a></td>
+              <td><a href="/doc/{{.DupOf}}">{{docCode .DupOf}}</a></td>
             </tr>
           {{end}}
         </tbody>
