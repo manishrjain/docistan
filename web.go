@@ -579,6 +579,36 @@ func (p page) ClearFilters() string {
 	})
 }
 
+// RangeLabel names the selected date window in words, for the collapsed
+// control on a narrow screen.
+func (p page) RangeLabel() string {
+	switch {
+	case p.RangeOn("month"):
+		return "Last month"
+	case p.RangeOn("quarter"):
+		return "Last quarter"
+	case p.RangeOn("year"):
+		return "Last year"
+	case p.RangeOn("custom"):
+		return "Custom"
+	}
+	return "All time"
+}
+
+// FilterSummary is the whole filter bar in one line. A narrow screen has no
+// room for a row of tag pills beside a five-segment date control, so both fold
+// into this and open as a sheet.
+func (p page) FilterSummary() string {
+	tags := "All tags"
+	switch n := len(p.Query.Tags); {
+	case n == 1:
+		tags = p.Query.Tags[0]
+	case n > 1:
+		tags = fmt.Sprintf("%d tags", n)
+	}
+	return tags + " · " + p.RangeLabel()
+}
+
 // topTagCount is how many tag pills sit in the filter bar before the rest
 // move behind the browser.
 const topTagCount = 6

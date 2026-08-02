@@ -2,7 +2,22 @@
 {{$page := .}}
 {{template "topbar" .}}
 <main>
+  {{/* A checkbox rather than JavaScript: on a narrow screen the filter bar
+       folds into one line that opens as a sheet, and on a wide one the CSS
+       ignores the checkbox entirely and shows the bar as normal. Works with
+       scripting off either way. */}}
+  <input type="checkbox" id="filters-open" class="sheet-toggle">
+  <label class="filter-summary" for="filters-open">
+    <span>{{$page.FilterSummary}}</span>
+    <span class="caret" aria-hidden="true">▾</span>
+  </label>
+  <label class="sheet-scrim" for="filters-open" aria-hidden="true"></label>
+
   <div class="filters">
+    <div class="sheet-head">
+      <span class="sheet-title">Filters</span>
+      <label class="sheet-done" for="filters-open">Done</label>
+    </div>
     <div class="filter-tags">
       <span class="micro">Tags</span>
       {{range $page.TopTags}}

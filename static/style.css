@@ -476,6 +476,13 @@ main {
   color: var(--color-neutral-600);
 }
 
+/* The collapsed filter control and its sheet. On a wide screen none of this
+   shows and the checkbox has no effect; the bar below renders as normal. */
+.sheet-toggle { position: absolute; opacity: 0; pointer-events: none; }
+.filter-summary,
+.sheet-scrim,
+.sheet-head { display: none; }
+
 .filter-date {
   flex: none;
   display: flex;
@@ -1250,16 +1257,103 @@ main {
   .searchbox { order: 3; flex-basis: 100%; }
   .topbar nav { margin-left: auto; }
 
-  .filters {
-    flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
+  /* One line in place of the whole bar: a row of tag pills beside a
+     five-segment date control does not fit, and wrapping them both just
+     pushes the results off the screen. */
+  .filter-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin: var(--space-3) var(--space-4);
+    padding: 10px 12px;
+    border: 1px solid var(--color-divider);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
+  .filter-summary .caret { color: var(--color-accent-700); }
+
+  .filters { display: none; }
+
+  .sheet-toggle:checked ~ .sheet-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 39;
+    background: rgba(32, 30, 29, 0.45);
+  }
+  .sheet-toggle:checked ~ .filters {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    max-height: 74%;
+    overflow: auto;
+    padding: 0 var(--space-4) var(--space-4);
+    background: var(--color-bg);
+    border-top: 2px solid var(--color-text);
+    border-bottom: 0;
+  }
+  .sheet-toggle:checked ~ .filters .sheet-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    /* Sticky so Done stays reachable however long the tag list runs. */
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    margin: 0 calc(var(--space-4) * -1);
+    padding: 14px var(--space-4);
+    background: var(--color-bg);
+    border-bottom: 2px solid var(--color-divider);
+  }
+  .sheet-title {
+    font-family: var(--font-heading);
+    font-weight: var(--font-heading-weight);
+    font-size: 15px;
+  }
+  .sheet-done {
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-accent-700);
+  }
+
   .filter-date { align-items: flex-start; width: 100%; }
+  /* In the sheet each label heads its own section rather than sitting inline
+     with the controls, which is what gives the two groups room to read as
+     separate things. */
+  .filter-tags > .micro,
+  .filter-date-row > .micro {
+    flex-basis: 100%;
+    margin: 0 0 2px;
+  }
+  .filter-date-row { flex-wrap: wrap; }
   .seg { flex-wrap: wrap; }
   .range-custom { flex-wrap: wrap; }
-  .tag-browse-panel { width: 100%; }
-  .tag-browse-list { grid-template-columns: repeat(2, 1fr); }
+  /* Inside a scrolling sheet the popover has nothing to hang off, so the
+     tag list simply becomes part of the flow. */
+  .tag-browse-panel {
+    position: static;
+    width: 100%;
+    box-shadow: none;
+    margin-top: var(--space-2);
+  }
+  .tag-browse-list {
+    grid-template-columns: 1fr;
+    max-height: none;
+  }
+  .tag-browse-list a { padding: 10px; }
 
   .results-head {
     flex-wrap: wrap;
