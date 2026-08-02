@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/url"
 	"os"
@@ -869,5 +870,80 @@ func TestFindByHashWaitReportsCancellationRatherThanAbsence(t *testing.T) {
 	}
 	if id != 0 || found {
 		t.Errorf("findByHashWait returned (%d, %v) alongside its error, want the zero tuple", id, found)
+	}
+}
+
+// removeFromInbox is the only thing standing between the dedup branch and
+// permanent data loss, so it is exercised directly rather than through process:
+// reaching it for real takes a sidecar that breaks between enqueue and the
+// worker running, which is rare enough that no test would catch a regression
+// there. The case that matters is originals/1.pdf — a reprocess whose sidecar
+// will not load falls through to the dedup check, the index truthfully reports
+// the document as a duplicate of itself, and deleting on that report destroys
+// the one copy that cannot be rebuilt, since the archive PDF is made from the
+// original and the original is made from nothing. The other two fence the same
+// rule from either side.
+func TestRemoveFromInboxOnlyEverDeletesFromTheInbox(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{app: &App{store: s}}
+
+	cases := []struct {
+		what     string
+		path     string
+		survives bool
+	}{
+		{"a consume-folder drop, which is what deletion is for", filepath.Join(s.ConsumeDir(), "scan_001.pdf"), false},
+		{"originals/1.pdf, the copy that cannot be regenerated", s.OriginalPath(1, ".pdf"), true},
+		{"a path outside the data directory entirely", filepath.Join(t.TempDir(), "elsewhere.pdf"), true},
+	}
+	for _, c := range cases {
+		if err := os.WriteFile(c.path, []byte("%PDF-1.4\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p.removeFromInbox(c.path, "duplicate")
+		_, err := os.Stat(c.path)
+		switch survived := err == nil; {
+		case survived && !c.survives:
+			t.Errorf("%s was left behind, want it deleted", c.what)
+		case !survived && c.survives:
+			t.Errorf("%s was deleted (%v)", c.what, err)
+		}
+	}
+}
+
+// Refusing has to say so. The file is then sitting somewhere nothing will
+// reconsider it, and the only reader who can act on that — or on the damaged
+// sidecar behind it — is whoever is watching the log, so the line has to name
+// the path. A file that has already gone is the opposite case: that is the
+// ordinary outcome of a retry racing the resolution it was waiting for, and
+// reporting it would put a failure in the log for every contended ingest that
+// ended correctly.
+func TestRemoveFromInboxIsLoudOnlyWhenSomethingIsWrong(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pipeline{app: &App{store: s}}
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	orig := s.OriginalPath(1, ".pdf")
+	if err := os.WriteFile(orig, []byte("%PDF-1.4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p.removeFromInbox(orig, "duplicate")
+	if !strings.Contains(buf.String(), orig) {
+		t.Errorf("the refusal does not name the file it refused to delete:\n%s", buf.String())
+	}
+
+	buf.Reset()
+	p.removeFromInbox(filepath.Join(s.ConsumeDir(), "already-gone.pdf"), "duplicate")
+	if buf.Len() != 0 {
+		t.Errorf("a file that was already gone was reported as a problem:\n%s", buf.String())
 	}
 }

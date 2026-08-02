@@ -307,14 +307,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 		// the journal line is all that says the archive ever saw that name.
 		logf("rejecting %s: unsupported type %q, deleting — the archive keeps only supported documents", name, ext)
 		p.app.journal("rejected", 0, name, fmt.Sprintf("unsupported type %q", ext))
-		// The fromConsume guard is sacred: reprocessing hands this function
-		// paths inside originals/, and the delete must never be able to reach
-		// outside the inbox.
-		if fromConsume {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				logf("deleting unsupported %s: %v", name, err)
-			}
-		}
+		p.removeFromInbox(path, "unsupported")
 		return
 	}
 
@@ -325,6 +318,15 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 		if id, err := idFromOriginalPath(path); err == nil {
 			if d, err := store.Load(id); err == nil {
 				doc = d
+			} else {
+				// The document exists but cannot be read, so this pass has to
+				// carry on as if the file were new — and a file already living
+				// in originals/ then walks into the dedup check below and
+				// matches its own index entry. removeFromInbox is what keeps
+				// that from being fatal; this line is what makes it visible,
+				// because a sidecar that broke between enqueue and here leaves
+				// no other trace.
+				logf("reprocess %s: sidecar for doc %d is unreadable (%v), cannot reuse the document", name, id, err)
 			}
 		}
 	}
@@ -359,14 +361,16 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 			return
 		}
 		if found {
-			// Deleting is safe by construction here: the lookup has just proved
-			// byte-identical content is already sitting in originals/, so the
-			// bytes are not lost. The name→id trace survives in the journal.
+			// Deleting looks safe by construction here: the lookup has just
+			// proved byte-identical content is already sitting in originals/, so
+			// the bytes are not lost, and the name→id trace survives in the
+			// journal. That argument holds for every file that came in through
+			// the inbox — but it collapses for the one that did not, a reprocess
+			// whose sidecar would not load and which matched itself. Hence
+			// removeFromInbox rather than a bare os.Remove.
 			logf("%s duplicates document %d, deleting", name, existing)
 			p.app.journal("duplicate", existing, name, "already in the archive")
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				logf("deleting duplicate %s: %v", name, err)
-			}
+			p.removeFromInbox(path, "duplicate")
 			return
 		}
 
@@ -401,6 +405,32 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	// rather than waited on.
 	if !doc.Enriched && p.app.enrichq != nil {
 		p.app.enrichq.Add(doc.ID)
+	}
+}
+
+// removeFromInbox deletes a file only if it is actually sitting in the inbox.
+// Both delete paths in the pipeline are reached with a path that is usually a
+// consume-folder drop but can, on a reprocess whose sidecar failed to load, be
+// originals/<id>.<ext> — the one copy of a document that cannot be regenerated,
+// because the archive PDF is derived from the original and the original is
+// derived from nothing. The dedup lookup will match such a file against its own
+// index entry and report it as a duplicate, which is a true statement and a
+// fatal instruction.
+//
+// The guard is therefore stated here, once, where the damage would be done,
+// rather than as a boolean at each call site that a later edit can forget. It is
+// sacred: nothing in this file may delete a document's original. Refusing is
+// loud, because getting here means a damaged sidecar or a bug, and it leaves the
+// file exactly where it was either way.
+func (p *Pipeline) removeFromInbox(path, why string) {
+	if filepath.Dir(path) != p.app.store.ConsumeDir() {
+		logf("refusing to delete %s as %s: it is not in the inbox, so it may be a document's only original — this means a damaged sidecar or a bug; the file has been left alone", path, why)
+		return
+	}
+	// A file that has already gone is the ordinary outcome of a retry that
+	// raced with the real resolution, not a failure.
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		logf("deleting %s %s: %v", why, filepath.Base(path), err)
 	}
 }
 
