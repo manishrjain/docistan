@@ -420,16 +420,13 @@ main {
   text-decoration: none;
 }
 
-/* Tag browser. <details> supplies the toggle, so the full vocabulary is
-   reachable with JavaScript off; the filter box inside is the enhancement. */
-.tag-browse { position: static; }
-.tag-browse > summary {
-  list-style: none;
-  display: inline-flex;
-  align-items: center;
-}
-.tag-browse > summary::-webkit-details-marker { display: none; }
-.tag-browse-panel {
+/* Tag browser. The checkbox is the toggle, so the full vocabulary is
+   reachable with JavaScript off; the search box inside is the enhancement. */
+.browse-toggle { position: absolute; opacity: 0; pointer-events: none; }
+.browse-more { cursor: pointer; }
+.tag-browse-panel { display: none; }
+.browse-toggle:checked ~ .tag-browse-panel {
+  display: block;
   position: absolute;
   top: calc(100% + 8px);
   left: 0;
@@ -1303,6 +1300,8 @@ main {
   }
   .sheet-toggle:checked ~ .filters .sheet-head {
     display: flex;
+    /* Ahead of the date section, which orders itself above the tags. */
+    order: -2;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-4);
@@ -1329,10 +1328,11 @@ main {
     color: var(--color-accent-700);
   }
 
-  .filter-date { align-items: flex-start; width: 100%; }
-  /* In the sheet each label heads its own section rather than sitting inline
-     with the controls, which is what gives the two groups room to read as
-     separate things. */
+  /* Date leads in the sheet, as the design has it. */
+  .filter-date { align-items: flex-start; width: 100%; order: -1; }
+  /* Each label heads its own section rather than sitting inline with the
+     controls, which is what gives the two groups room to read as separate
+     things. */
   .filter-tags > .micro,
   .filter-date-row > .micro {
     flex-basis: 100%;
@@ -1341,19 +1341,37 @@ main {
   .filter-date-row { flex-wrap: wrap; }
   .seg { flex-wrap: wrap; }
   .range-custom { flex-wrap: wrap; }
-  /* Inside a scrolling sheet the popover has nothing to hang off, so the
-     tag list simply becomes part of the flow. */
-  .tag-browse-panel {
+
+  /* The sheet shows the whole vocabulary rather than six of it behind a
+     "more" control: there is room here, and scanning a list beats guessing
+     which six a popover chose. The pills and that control both go. */
+  .filter-tags > .pill-tag:not(.browse-more),
+  .browse-more { display: none; }
+
+  /* No popover to position against inside a scrolling sheet, so the panel
+     simply joins the flow — and the checkbox stops mattering. */
+  .browse-toggle ~ .tag-browse-panel,
+  .browse-toggle:checked ~ .tag-browse-panel {
+    display: block;
     position: static;
     width: 100%;
     box-shadow: none;
+    border: 0;
     margin-top: var(--space-2);
+  }
+  .tag-filter {
+    border: 2px solid var(--color-text) !important;
+    padding: 11px;
+    font-size: 14px;
   }
   .tag-browse-list {
     grid-template-columns: 1fr;
     max-height: none;
+    overflow: visible;
+    margin-top: var(--space-2);
   }
-  .tag-browse-list a { padding: 10px; }
+  .tag-browse-list a { padding: 10px; font-size: 14px; }
+  .tag-browse-foot { border-top: 1px solid var(--color-divider); }
 
   .results-head {
     flex-wrap: wrap;

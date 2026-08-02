@@ -4,13 +4,16 @@
 
 document.addEventListener("DOMContentLoaded", () => {
   // --- tag browser -------------------------------------------------------
-  const browse = document.querySelector(".tag-browse");
-  if (browse) {
-    const filter = browse.querySelector(".tag-filter");
-    const links = [...browse.querySelectorAll(".tag-browse-list a")];
+  // The panel opens by itself: a checkbox on wide screens, and unconditionally
+  // inside the narrow filter sheet. This only adds the search box, which is
+  // no use without script and so ships hidden.
+  const tags = document.querySelector(".filter-tags");
+  const toggle = document.getElementById("tags-open");
+  if (tags) {
+    const filter = tags.querySelector(".tag-filter");
+    const links = [...tags.querySelectorAll(".tag-browse-list a")];
 
-    // Only revealed once it can actually do something.
-    if (filter) {
+    if (filter && links.length) {
       filter.hidden = false;
       filter.addEventListener("input", () => {
         const q = filter.value.trim().toLowerCase();
@@ -18,22 +21,26 @@ document.addEventListener("DOMContentLoaded", () => {
           a.hidden = !!q && !(a.dataset.tag || "").toLowerCase().includes(q);
         }
       });
-      browse.addEventListener("toggle", () => {
-        if (browse.open) {
-          filter.value = "";
-          for (const a of links) a.hidden = false;
-          filter.focus();
-        }
+      // Opening the popover starts from the whole list rather than from
+      // whatever was typed last time.
+      toggle?.addEventListener("change", () => {
+        if (!toggle.checked) return;
+        filter.value = "";
+        for (const a of links) a.hidden = false;
+        filter.focus();
       });
     }
 
     // A popover that only closes by clicking its own trigger is a nuisance.
-    document.addEventListener("click", (e) => {
-      if (browse.open && !browse.contains(e.target)) browse.open = false;
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && browse.open) browse.open = false;
-    });
+    // Inside the sheet there is no popover, so there is nothing to close.
+    if (toggle) {
+      document.addEventListener("click", (e) => {
+        if (toggle.checked && !tags.contains(e.target)) toggle.checked = false;
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && toggle.checked) toggle.checked = false;
+      });
+    }
   }
 
   // --- custom date range -------------------------------------------------

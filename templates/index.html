@@ -25,28 +25,31 @@
           >{{.Value}}{{if .Count}}<span class="n">{{.Count}}</span>{{end}}</a>
       {{end}}
 
+      {{/* Another checkbox rather than <details>: on a wide screen the panel
+           is a popover this opens, and in the narrow sheet the CSS shows it
+           unconditionally and never reads the checkbox. One markup, two
+           behaviours, no script needed for either. */}}
+      <input type="checkbox" id="tags-open" class="browse-toggle">
       {{if $page.MoreTags}}
-        {{/* <details> gives the toggle for free, so the whole vocabulary stays
-             reachable with JavaScript off. The filter box inside is the
-             enhancement, not the mechanism. */}}
-        <details class="tag-browse">
-          <summary class="pill-tag pill-dashed">+ {{$page.MoreTags}} more</summary>
-          <div class="tag-browse-panel">
-            <input type="search" class="tag-filter" placeholder="Filter tags…" aria-label="Filter tags" hidden>
-            <div class="tag-browse-list">
-              {{range $page.TagFacets}}
-                <a{{if $page.TagOn .Value}} class="on"{{end}} href="{{$page.ToggleTag .Value}}" data-tag="{{.Value}}"
-                  ><span>{{if $page.TagOn .Value}}✓ {{end}}{{.Value}}</span><span class="n">{{.Count}}</span></a>
-              {{end}}
-            </div>
-            <p class="tag-browse-foot">{{len $page.TagFacets}} tags in these results</p>
-          </div>
-        </details>
+        <label class="pill-tag pill-dashed browse-more" for="tags-open">+ {{$page.MoreTags}} more</label>
       {{end}}
 
       {{if $page.HasFilters}}
         <a class="pill-plain" href="{{$page.ClearFilters}}">Clear</a>
       {{end}}
+
+      {{/* Always rendered, so the sheet has the whole vocabulary to show even
+           when there are too few tags for a "more" control to exist. */}}
+      <div class="tag-browse-panel">
+        <input type="search" class="tag-filter" placeholder="Search tags…" aria-label="Search tags" hidden>
+        <div class="tag-browse-list">
+          {{range $page.TagFacets}}
+            <a{{if $page.TagOn .Value}} class="on"{{end}} href="{{$page.ToggleTag .Value}}" data-tag="{{.Value}}"
+              ><span>{{if $page.TagOn .Value}}✓ {{end}}{{.Value}}</span><span class="n">{{.Count}}</span></a>
+          {{end}}
+        </div>
+        <p class="tag-browse-foot">{{len $page.TagFacets}} tags in these results</p>
+      </div>
     </div>
 
     <div class="filter-date">
