@@ -727,7 +727,53 @@ func docFromMap(m map[string]any) *Doc {
 	return d
 }
 
+// FindByHashWait is FindByHash with the answer required. A lookup that errors
+// is not evidence of absence, and treating it as such is how an outage turned a
+// duplicate into a second document: with Typesense unreachable, dropping the
+// same bytes twice logged two lookup failures and ingested both files, leaving
+// two documents sharing one sha256. So the lookup is retried until the index
+// answers, on the same contract as persist — Typesense is required
+// infrastructure here, and ingestion stalling visibly while it is down is the
+// intended behaviour. Dedup runs once per ingested file, never in a loop, so
+// waiting costs one file rather than a hot path.
+//
+// The only outcome other than an answer is ctx.Err(), which is a canceled
+// upload or shutdown. Callers must branch on the error before reading found:
+// the returned tuple on that path is the zero one, and it means "not asked",
+// not "not present".
+//
+// what names the file in the log rather than the sha, because "dedup lookup for
+// scan-2026-07.pdf: connection refused" is the line that tells whoever is
+// reading it which document is stuck; a hash prefix would need a second lookup
+// to mean anything, and the caller has the name in hand at both sites.
+func (s *Search) FindByHashWait(ctx context.Context, sha, what string) (int, bool, error) {
+	return findByHashWait(ctx, retryInitial, retryMax, fmt.Sprintf("dedup lookup for %s", what),
+		func() (int, bool, error) { return s.FindByHash(ctx, sha) })
+}
+
+// findByHashWait is the decision behind FindByHashWait with the lookup and the
+// backoff passed in: what has to be true is that a failure never becomes "not a
+// duplicate", which is a property of this loop rather than of Typesense, and a
+// test can only pin it here.
+func findByHashWait(ctx context.Context, initial, max time.Duration, what string, lookup func() (int, bool, error)) (int, bool, error) {
+	var (
+		id    int
+		found bool
+	)
+	err := retryUntil(ctx, initial, max, what, func() error {
+		var err error
+		id, found, err = lookup()
+		return err
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	return id, found, nil
+}
+
 // FindByHash returns the id of an existing document with this content hash.
+// Callers deciding whether to ingest want FindByHashWait: this one reports a
+// lookup failure as an error, and an error here is not an absence.
 func (s *Search) FindByHash(ctx context.Context, sha string) (int, bool, error) {
 	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
 		Q:        pointer.String("*"),

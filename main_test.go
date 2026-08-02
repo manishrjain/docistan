@@ -817,3 +817,57 @@ func TestRetryUntilBackoffGrowsUpToTheCap(t *testing.T) {
 		}
 	}
 }
+
+// A failed dedup lookup is not evidence that the document is absent. Reporting
+// one as "no duplicate" is exactly how an outage let byte-identical files become
+// two documents sharing a sha256, so a lookup that stumbles on its way to an
+// answer has to end at the answer the index would have given all along.
+func TestFindByHashWaitOutlastsTransientErrors(t *testing.T) {
+	calls := 0
+	id, found, err := findByHashWait(context.Background(), time.Microsecond, 10*time.Microsecond,
+		"dedup lookup for second.pdf", func() (int, bool, error) {
+			calls++
+			if calls < 3 {
+				return 0, false, errors.New("typesense is down")
+			}
+			return 7, true, nil
+		})
+	if err != nil {
+		t.Fatalf("findByHashWait = %v, want nil once the lookup answered", err)
+	}
+	if !found || id != 7 {
+		t.Errorf("findByHashWait = (%d, %v), want (7, true): two failures on the way must not turn into 'not a duplicate'", id, found)
+	}
+	if calls != 3 {
+		t.Errorf("lookup ran %d times, want 3: two failures and the one that answered", calls)
+	}
+}
+
+// The only outcome other than an answer is the context ending, and it has to be
+// told apart from "no duplicate" — the zero tuple that comes with it means "not
+// asked", not "not present". Both callers therefore read the error first: the
+// pipeline leaves the file in the inbox, the upload refuses it. A caller that
+// looked only at found would be reading a lookup that never happened, which is
+// the bug this whole path exists to prevent.
+func TestFindByHashWaitReportsCancellationRatherThanAbsence(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	calls := 0
+	id, found, err := findByHashWait(ctx, time.Microsecond, 10*time.Microsecond,
+		"dedup lookup for second.pdf", func() (int, bool, error) {
+			calls++
+			// Stand in for the upload being abandoned, or shutdown arriving,
+			// while the index is still unreachable.
+			if calls == 3 {
+				cancel()
+			}
+			return 0, false, errors.New("typesense is down")
+		})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("findByHashWait = %v, want context.Canceled: a lookup that never answered must say so", err)
+	}
+	if id != 0 || found {
+		t.Errorf("findByHashWait returned (%d, %v) alongside its error, want the zero tuple", id, found)
+	}
+}

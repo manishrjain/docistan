@@ -1389,9 +1389,17 @@ func (a *App) acceptUpload(ctx context.Context, fh *multipart.FileHeader) Flash 
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
 
-	if id, found, err := a.search.FindByHash(ctx, sum); err != nil {
-		logf("upload dedup lookup: %v", err)
-	} else if found {
+	// Retried until the index answers, so this blocks while Typesense is down
+	// rather than accepting a file it could not check — an unchecked upload is
+	// how the same bytes became two documents. The error is a canceled request:
+	// the file is dropped and the user is told, because a silent accept would
+	// put it in the inbox as if it had passed.
+	id, found, err := a.search.FindByHashWait(ctx, sum, name)
+	if err != nil {
+		os.Remove(tmpName)
+		return fail("could not check the archive for duplicates (%v), so it was not accepted", err)
+	}
+	if found {
 		os.Remove(tmpName)
 		a.journal("duplicate", id, name, "already in the archive")
 		return Flash{Text: fmt.Sprintf("%s is already in the archive", name), DocID: id}

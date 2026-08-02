@@ -347,10 +347,19 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 		}
 		defer release()
 
-		if existing, found, err := search.FindByHash(ctx, sum); err != nil {
-			logf("dedup lookup for %s: %v", name, err)
-		} else if found {
-			// Deleting is safe by construction here: FindByHash has just proved
+		existing, found, err := search.FindByHashWait(ctx, sum, name)
+		if err != nil {
+			// The lookup is retried until Typesense answers, so the only way out
+			// here is the context ending: shutdown, or a worker being let go.
+			// Leave the file in the inbox rather than ingest one we never checked
+			// — the next start finds it and asks again. Same reasoning as
+			// retryLater's give-up path: an unanswered question is not a licence
+			// to guess, and the bytes are safe where they are.
+			logf("%s: dedup lookup abandoned (%v), leaving it in the inbox (it will be picked up on restart)", name, err)
+			return
+		}
+		if found {
+			// Deleting is safe by construction here: the lookup has just proved
 			// byte-identical content is already sitting in originals/, so the
 			// bytes are not lost. The name→id trace survives in the journal.
 			logf("%s duplicates document %d, deleting", name, existing)
