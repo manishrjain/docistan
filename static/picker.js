@@ -9,12 +9,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const all = form.querySelector(".pick-all");
   const boxes = [...form.querySelectorAll(".pick:not(.pick-all)")];
+  const hit = (b) => b.closest(".pick-hit") || b;
   const actions = form.querySelector(".picker-actions");
   const label = form.querySelector(".picked-count");
   const clear = form.querySelector(".picker-clear");
   if (!boxes.length) {
     actions?.remove();
-    all?.remove();
+    if (all) hit(all).remove();
     return;
   }
 

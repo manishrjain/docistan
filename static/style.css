@@ -602,7 +602,25 @@ main {
   color: var(--color-bg);
 }
 .pick:indeterminate::after { content: "–"; }
-.row > .pick { margin-top: 2px; }
+
+/* An 18px square is a small thing to aim at, and every pixel around it belongs
+   to the row's stretched link — so a near miss opened the document instead of
+   ticking the box. The label is the real target: padded out to 44px square and
+   pulled back by the same amount, so it occupies exactly the space the box
+   did while catching everything within 13px of it. */
+.pick-hit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 13px;
+  margin: -13px;
+  cursor: pointer;
+  /* Above the stretched link, or the label's own clicks would fall through. */
+  position: relative;
+  z-index: 2;
+}
+.row > .pick-hit { margin-top: -11px; }
 
 .picked {
   display: flex;

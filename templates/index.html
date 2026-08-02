@@ -118,7 +118,8 @@
 
   <div class="results-head">
     <div class="picked">
-      <input type="checkbox" class="pick pick-all" aria-label="Select every document on this page">
+      <label class="pick-hit"><input type="checkbox" class="pick pick-all"
+             aria-label="Select every document on this page"></label>
       <p class="count">
         <strong>{{commaNum .Result.Found}}</strong>
         {{if .Query.Q}}
@@ -174,8 +175,9 @@
     {{range .Result.Hits}}
       {{$d := .Doc}}
       <li class="row">
-        <input type="checkbox" class="pick" name="id" value="{{$d.ID}}"
-               aria-label="Select {{docCode $d.ID}}">
+        {{/* The label is the target, not the 18px box: see .pick-hit. */}}
+        <label class="pick-hit"><input type="checkbox" class="pick" name="id" value="{{$d.ID}}"
+               aria-label="Select {{docCode $d.ID}}"></label>
         <span class="thumb">
           <img src="/doc/{{$d.ID}}/thumb" alt="" loading="lazy">
         </span>
