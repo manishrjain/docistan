@@ -37,6 +37,9 @@ type Pipeline struct {
 	active map[string]*Job
 	queued map[string]bool
 	dupes  []DupeEvent
+	// retries counts how often a file has been put back for the same reason,
+	// so contention cannot become a permanent loop.
+	retries map[string]int
 }
 
 type DupeEvent struct {
@@ -47,10 +50,11 @@ type DupeEvent struct {
 
 func NewPipeline(app *App) *Pipeline {
 	return &Pipeline{
-		app:    app,
-		jobs:   make(chan string, 1024),
-		active: map[string]*Job{},
-		queued: map[string]bool{},
+		app:     app,
+		jobs:    make(chan string, 1024),
+		active:  map[string]*Job{},
+		queued:  map[string]bool{},
+		retries: map[string]int{},
 	}
 }
 
@@ -176,6 +180,34 @@ func waitForStableSize(path string) bool {
 	return false
 }
 
+// retryLater re-queues a file after a pause, for the one case that is worth
+// waiting on rather than failing: an identical file already being ingested.
+// Attempts are counted so a pathological loop cannot outlive the process.
+func (p *Pipeline) retryLater(ctx context.Context, path, name string) {
+	const (
+		delay = 5 * time.Second
+		max   = 12
+	)
+	p.mu.Lock()
+	n := p.retries[path] + 1
+	p.retries[path] = n
+	p.mu.Unlock()
+
+	if n > max {
+		logf("%s: still contended after %d attempts, moving aside", name, max)
+		p.moveAside(path, name)
+		return
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		p.Enqueue(path)
+	}()
+}
+
 func (p *Pipeline) worker(ctx context.Context) {
 	defer p.wg.Done()
 	for {
@@ -259,7 +291,12 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	p.setStage(path, job, "hash")
 	sum, size, err := hashFile(path)
 	if err != nil {
-		logf("hash %s: %v", name, err)
+		// A file that has gone is not a failure: another pass may have moved
+		// it aside as a duplicate between the queue and here, which is the
+		// ordinary outcome of a retry that raced with the real resolution.
+		if !os.IsNotExist(err) {
+			logf("hash %s: %v", name, err)
+		}
 		return
 	}
 
@@ -287,7 +324,16 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	if doc == nil {
 		p.setStage(path, job, "dedup")
 		if !store.ClaimHash(sum) {
-			logf("%s is already being ingested, skipping", name)
+			// Identical bytes are mid-ingest in another worker. The document
+			// they will become does not exist yet, so there is nothing for a
+			// duplicate record to point at — and dropping the file here left
+			// it stranded in the inbox, neither ingested nor reported. Come
+			// back once the other one has landed, when the ordinary check can
+			// name it. Terminates either way: if that ingest succeeds the
+			// retry is recorded as a duplicate of it, and if it fails the
+			// hash is released and the retry ingests normally.
+			logf("%s: identical bytes already being ingested, retrying shortly", name)
+			p.retryLater(ctx, path, name)
 			return
 		}
 		defer store.ReleaseHash(sum)
