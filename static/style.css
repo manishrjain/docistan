@@ -213,7 +213,10 @@ main {
   text-decoration: none;
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
-  font-size: 14px;
+  /* The system's base is 14px, to pair with an .input beside it in a form.
+     No button in this app sits in such a pair — they are all chrome, which
+     the design draws a point smaller. */
+  font-size: 13px;
   line-height: 1.2;
   color: var(--color-text);
   background: transparent;
@@ -372,7 +375,17 @@ main {
   flex: 1;
   min-width: 0;
 }
-.filter-tags > .micro { margin-right: 4px; letter-spacing: 0.1em; }
+.filter-tags > .micro { margin-right: 4px; }
+
+/* TAGS, DATE and SORT head their groups: a point smaller than the general
+   micro-label and tracked wider, so they read as labels rather than as one
+   more control in the row. */
+.filter-tags > .micro,
+.filter-date-row > .micro,
+.results-head .sort > .micro {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
 
 /* One pill shape, three states: idle, selected, and the dashed affordances
    that are actions rather than filters. */
@@ -484,7 +497,7 @@ main {
   align-items: center;
   gap: 6px;
 }
-.filter-date-row > .micro { letter-spacing: 0.1em; margin-right: 2px; }
+.filter-date-row > .micro { margin-right: 2px; }
 
 /* Segmented control: one hairline box, dividers between, ink fill for the
    selection. Deliberately distinct from the accent-filled tag pills — a date
