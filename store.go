@@ -94,7 +94,7 @@ type Store struct {
 
 func NewStore(dir string) (*Store, error) {
 	s := &Store{dir: dir, inflight: map[string]bool{}}
-	for _, sub := range []string{"consume", "docs", "originals", "archive", "thumbs", "duplicates"} {
+	for _, sub := range []string{"consume", "docs", "originals", "archive", "thumbs"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
 			return nil, err
 		}
@@ -113,7 +113,6 @@ func (s *Store) DocPath(id int) string     { return s.path("docs", strconv.Itoa(
 func (s *Store) ArchivePath(id int) string { return s.path("archive", strconv.Itoa(id)+".pdf") }
 func (s *Store) ThumbPath(id int) string   { return s.path("thumbs", strconv.Itoa(id)+".jpg") }
 func (s *Store) ConsumeDir() string        { return s.path("consume") }
-func (s *Store) DuplicatesDir() string     { return s.path("duplicates") }
 func (s *Store) DuplicatesLog() string     { return s.path("duplicates.jsonl") }
 func (s *Store) OriginalPath(id int, ext string) string {
 	return s.path("originals", strconv.Itoa(id)+ext)

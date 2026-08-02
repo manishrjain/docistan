@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -491,6 +492,36 @@ func TestSidecarKeepsCost(t *testing.T) {
 	}
 	if !bytes.Contains(b, []byte(`"llm_cents"`)) {
 		t.Errorf("sidecar does not record the cost:\n%s", b)
+	}
+}
+
+// The data directory is the archive's whole shape, and the store creating a
+// subdirectory is what declares that shape. Rejected files are deleted now, so
+// there is no duplicates directory to hold them and creating one would leave an
+// empty folder implying files are being kept somewhere. Reading the entries
+// rather than probing for names means a subdirectory added later fails here
+// too, which is the point: the list is worth a second look every time it grows.
+func TestNewStoreCreatesOnlyTheDirectoriesItUses(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := NewStore(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range entries {
+		if e.IsDir() {
+			got = append(got, e.Name())
+		}
+	}
+	sort.Strings(got)
+
+	want := []string{"archive", "consume", "docs", "originals", "thumbs"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewStore created %v, want exactly %v", got, want)
 	}
 }
 

@@ -194,8 +194,10 @@ func (p *Pipeline) retryLater(ctx context.Context, path, name string) {
 	p.mu.Unlock()
 
 	if n > max {
-		logf("%s: still contended after %d attempts, moving aside", name, max)
-		p.moveAside(path, name)
+		// Give up by leaving the file where it is. Deleting would be a guess:
+		// unlike the dedup hit, this path has never seen the competing ingest
+		// finish, and that ingest may yet fail and leave nothing behind.
+		logf("%s: still contended after %d attempts, leaving it in the inbox (it will be picked up on restart)", name, max)
 		return
 	}
 	go func() {
@@ -215,9 +217,23 @@ func (p *Pipeline) worker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case path := <-p.jobs:
+			p.mu.Lock()
+			before := p.retries[path]
+			p.mu.Unlock()
+
 			p.process(ctx, path)
+
 			p.mu.Lock()
 			delete(p.queued, path)
+			// An unchanged count means process did not put this file back, so
+			// it is resolved and its count has nothing left to guard; dropping
+			// it stops the map growing by one entry per contended file that
+			// later succeeded. A count that did change belongs to a retry still
+			// to come and must survive, or the give-up limit would never be
+			// reached.
+			if p.retries[path] == before {
+				delete(p.retries, path)
+			}
 			p.mu.Unlock()
 		}
 	}
@@ -293,8 +309,8 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	p.setStage(job, "hash")
 	sum, size, err := hashFile(path)
 	if err != nil {
-		// A file that has gone is not a failure: another pass may have moved
-		// it aside as a duplicate between the queue and here, which is the
+		// A file that has gone is not a failure: another pass may have ingested
+		// or deleted it as a duplicate between the queue and here, which is the
 		// ordinary outcome of a retry that raced with the real resolution.
 		if !os.IsNotExist(err) {
 			logf("hash %s: %v", name, err)
@@ -304,10 +320,20 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 
 	ext := strings.ToLower(filepath.Ext(path))
 	if !isSupportedExt(ext) {
-		logf("rejecting %s: unsupported type %q", name, ext)
-		p.rejectUnsupported(ctx, name, ext, sum, size)
+		// An unsupported file never becomes a document: no sidecar, no id. The
+		// upload path (acceptUpload in web.go) already refuses these with a
+		// visible flash before they ever reach the inbox, so this branch only
+		// fires for consume-folder drops and this log line is their only trace.
+		// That is the accepted trade for an archive that holds nothing it
+		// cannot read.
+		logf("rejecting %s: unsupported type %q, deleting — the archive keeps only supported documents", name, ext)
+		// The fromConsume guard is sacred: reprocessing hands this function
+		// paths inside originals/, and the delete must never be able to reach
+		// outside the inbox.
 		if fromConsume {
-			p.moveAside(path, name)
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				logf("deleting unsupported %s: %v", name, err)
+			}
 		}
 		return
 	}
@@ -344,9 +370,15 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 		if existing, found, err := search.FindByHash(ctx, sum); err != nil {
 			logf("dedup lookup for %s: %v", name, err)
 		} else if found {
-			logf("%s duplicates document %d", name, existing)
+			// Deleting is safe by construction here: FindByHash has just proved
+			// byte-identical content is already sitting in originals/, so the
+			// bytes are not lost. The name→id trace survives in
+			// duplicates.jsonl and on the status page.
+			logf("%s duplicates document %d, deleting", name, existing)
 			p.recordDupe(name, existing)
-			p.moveAside(path, name)
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				logf("deleting duplicate %s: %v", name, err)
+			}
 			return
 		}
 
@@ -482,23 +514,6 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 	return nil
 }
 
-func (p *Pipeline) rejectUnsupported(ctx context.Context, name, ext, sum string, size int64) {
-	doc := &Doc{
-		ID:           p.app.store.AllocID(),
-		SHA256:       sum,
-		OriginalName: name,
-		OriginalExt:  ext,
-		Status:       StatusFailed,
-		FailedStage:  "hash",
-		Error:        fmt.Sprintf("unsupported file type %q", ext),
-		AddedTS:      time.Now().Unix(),
-		FileSize:     size,
-		Title:        name,
-		Tags:         []string{},
-	}
-	p.save(ctx, doc)
-}
-
 // save persists a document, logging what went wrong. The pipeline has nobody
 // to report to but the log, and neither failure is worth abandoning the
 // document over: the sidecar is authoritative and the next boot reindexes it.
@@ -508,6 +523,9 @@ func (p *Pipeline) save(ctx context.Context, doc *Doc) {
 	}
 }
 
+// recordDupe is the whole record of a rejected duplicate: the file itself is
+// deleted, so this line in duplicates.jsonl and the matching entry on the
+// status page are what say the archive ever saw that name.
 func (p *Pipeline) recordDupe(name string, dupOf int) {
 	ev := DupeEvent{TS: time.Now().Unix(), Name: name, DupOf: dupOf}
 	p.mu.Lock()
@@ -521,16 +539,6 @@ func (p *Pipeline) recordDupe(name string, dupOf int) {
 	defer f.Close()
 	if b, err := json.Marshal(ev); err == nil {
 		f.Write(append(b, '\n'))
-	}
-}
-
-// moveAside preserves rejected files instead of deleting them; a scanner may
-// hold the only copy.
-func (p *Pipeline) moveAside(path, name string) {
-	dst := filepath.Join(p.app.store.DuplicatesDir(),
-		fmt.Sprintf("%d-%s", time.Now().Unix(), name))
-	if err := os.Rename(path, dst); err != nil {
-		logf("moving %s aside: %v", name, err)
 	}
 }
 
