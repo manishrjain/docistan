@@ -1279,6 +1279,9 @@ main {
   }
   .filter-summary .caret { color: var(--color-accent-700); }
 
+  /* The anchor the panel hangs from; on a wide screen this is an inert
+     wrapper and the bar inside it lays out as normal. */
+  .filterbar { position: relative; }
   .filters { display: none; }
 
   .sheet-toggle:checked ~ .sheet-scrim {
@@ -1288,21 +1291,23 @@ main {
     z-index: 39;
     background: rgba(32, 30, 29, 0.45);
   }
+  /* Hangs off the control that opened it, which is what the caret promises,
+     rather than rising from an edge of the screen the eye has to travel to. */
   .sheet-toggle:checked ~ .filters {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    position: absolute;
+    top: 100%;
+    left: var(--space-4);
+    right: var(--space-4);
     z-index: 40;
-    max-height: 74%;
+    max-height: 70vh;
     overflow: auto;
     padding: 0 var(--space-4) var(--space-4);
     background: var(--color-bg);
-    border-top: 2px solid var(--color-text);
-    border-bottom: 0;
+    border: 2px solid var(--color-text);
+    box-shadow: var(--shadow-lg);
   }
   .sheet-toggle:checked ~ .filters .sheet-head {
     display: flex;
@@ -1316,6 +1321,7 @@ main {
     top: 0;
     z-index: 1;
     margin: 0 calc(var(--space-4) * -1);
+    /* The panel's own border already separates it from the page. */
     padding: 14px var(--space-4);
     background: var(--color-bg);
     border-bottom: 2px solid var(--color-divider);

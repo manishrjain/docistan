@@ -6,6 +6,7 @@
        folds into one line that opens as a sheet, and on a wide one the CSS
        ignores the checkbox entirely and shows the bar as normal. Works with
        scripting off either way. */}}
+  <div class="filterbar">
   <input type="checkbox" id="filters-open" class="sheet-toggle">
   <label class="filter-summary" for="filters-open">
     <span>{{$page.FilterSummary}}</span>
@@ -94,6 +95,7 @@
         </form>
       {{end}}
     </div>
+  </div>
   </div>
 
   <div class="results-head">
