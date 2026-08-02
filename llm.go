@@ -493,7 +493,6 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	}
 	if meta.CreatedDate != "" {
 		doc.CreatedDate = meta.CreatedDate
-		doc.CreatedTS = parseDateTS(meta.CreatedDate)
 	}
 	if len(meta.Tags) > 0 {
 		doc.Tags = meta.Tags

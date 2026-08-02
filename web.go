@@ -886,7 +886,6 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.PostForm.Has("created_date") {
 		doc.CreatedDate = normalizeMonth(r.PostFormValue("created_date"))
-		doc.CreatedTS = parseDateTS(doc.CreatedDate)
 	}
 	if r.PostForm.Has("tags") {
 		doc.Tags = splitTags(r.PostFormValue("tags"))

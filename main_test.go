@@ -326,3 +326,48 @@ func TestIndexFormsCarrySortDirection(t *testing.T) {
 		t.Errorf("dir hidden input appears %d time(s), want 2 (custom-range form and picker)", n)
 	}
 }
+
+// The sidecar is the source of truth, so it must not carry a second copy of
+// the date in timestamp form. Every write site used to maintain that copy by
+// hand, and any one of them forgetting would leave the file disagreeing with
+// itself. Reading the raw bytes is the only check that a field is really gone:
+// a struct-level assertion would pass just as well if the field were merely
+// renamed or tagged omitempty and still written whenever the date was set.
+func TestSidecarStoresDateNotTimestamp(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(&Doc{ID: 3, Status: StatusReady, CreatedDate: "2026-03"}); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(s.DocPath(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte(`"created_ts"`)) {
+		t.Errorf("sidecar still writes created_ts:\n%s", b)
+	}
+	if !bytes.Contains(b, []byte(`"created_date": "2026-03"`)) {
+		t.Errorf("sidecar lost the date it was given:\n%s", b)
+	}
+}
+
+// Dropping the field from the document only works if the index still receives
+// the number it sorts and filters on, so this pins the derivation at the one
+// place that now performs it.
+func TestIndexDerivesCreatedTimestamp(t *testing.T) {
+	want := parseDateTS("2026-03")
+	if want <= 0 {
+		t.Fatalf("parseDateTS(%q) = %d, want a real timestamp", "2026-03", want)
+	}
+	if got := tsDoc(&Doc{CreatedDate: "2026-03"})["created_ts"]; got != want {
+		t.Errorf("created_ts = %v, want %d", got, want)
+	}
+	// An undated document sorts and filters as zero, which is what the range
+	// filters are written to exclude.
+	if got := tsDoc(&Doc{})["created_ts"]; got != int64(0) {
+		t.Errorf("created_ts for an undated document = %v, want 0", got)
+	}
+}

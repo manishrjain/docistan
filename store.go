@@ -55,7 +55,6 @@ type Doc struct {
 	Summary      string   `json:"summary"`
 	Tags         []string `json:"tags"`
 	CreatedDate  string   `json:"created_date"`
-	CreatedTS    int64    `json:"created_ts"`
 	DeletedTS    int64    `json:"deleted_ts,omitempty"`
 	OCRSource    string   `json:"ocr_source"`
 	// NativeText records that the source PDF had its own text layer. That text
