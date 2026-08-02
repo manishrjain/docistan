@@ -27,11 +27,6 @@ type Config struct {
 	Workers      int
 	LLMModel     string
 	LLMEnabled   bool
-	// Per-million-token prices, so the cost shown next to a document stays
-	// true when the model changes. Wrong prices are worse than none: the
-	// number still looks authoritative.
-	PriceIn  float64
-	PriceOut float64
 	// KeyFile is read when OPENAI_API_KEY is unset. A file keeps the key out
 	// of shell history, out of the process listing, and out of any unit file
 	// or script that might get committed.
@@ -64,8 +59,6 @@ func main() {
 	flag.IntVar(&cfg.Workers, "workers", 2, "ingest workers")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
-	flag.Float64Var(&cfg.PriceIn, "llm-price-in", 0.20, "USD per million input tokens")
-	flag.Float64Var(&cfg.PriceOut, "llm-price-out", 1.20, "USD per million output tokens")
 	flag.StringVar(&cfg.KeyFile, "openai-key-file", defaultKeyFile(),
 		"file holding the OpenAI API key, read when OPENAI_API_KEY is unset")
 	flag.BoolVar(&cfg.Dev, "dev", false, "reload templates from disk on each request")
@@ -87,6 +80,12 @@ func run(cfg Config) error {
 		if key, source := openAIKey(cfg.KeyFile); key != "" {
 			app.enricher = NewOpenAIEnricher(cfg.LLMModel, key)
 			logf("metadata enrichment on, model %s (key from %s)", cfg.LLMModel, source)
+			// Prices live in a table in code, so a model it has never heard of
+			// still gets tagged but cannot have its spend named. Say so once
+			// here rather than leave a status page quietly reading zero.
+			if !modelPriced(cfg.LLMModel) {
+				logf("no price known for model %s: documents will still be tagged, but costs will not be shown", cfg.LLMModel)
+			}
 		} else {
 			logf("no OpenAI key in OPENAI_API_KEY or %s: documents will keep filename-derived titles and no tags", cfg.KeyFile)
 		}
@@ -227,12 +226,6 @@ func waitForSearch(ctx context.Context, s *Search, limit time.Duration) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return err
-}
-
-// LLMCost is the only place tokens become money, so the per-document figure
-// and the archive total can never disagree.
-func (c Config) LLMCost(in, out int64) float64 {
-	return float64(in)*c.PriceIn/1e6 + float64(out)*c.PriceOut/1e6
 }
 
 // defaultDataDir keeps the archive out of the source tree. Defaulting to

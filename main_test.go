@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -353,6 +354,149 @@ func TestSidecarStoresDateNotTimestamp(t *testing.T) {
 		t.Errorf("sidecar lost the date it was given:\n%s", b)
 	}
 }
+
+// The two figures on a document mean different things and this is the only
+// place that keeps them apart: the tokens describe the run whose title and tags
+// are currently on display, so a re-tag replaces them, while the cents are the
+// bill, so a re-tag adds to them — the money really was spent twice. A call
+// that never reached the model reports nothing and must leave both alone,
+// otherwise a network blip would blank the tokens of a document that was
+// tagged perfectly well an hour ago.
+func TestApplyUsage(t *testing.T) {
+	const model = "gpt-5.6-luna"
+	doc := &Doc{}
+
+	applyUsage(doc, model, Usage{In: 1000, Out: 200})
+	first := doc.LLMCents
+	if doc.LLMIn != 1000 || doc.LLMOut != 200 {
+		t.Fatalf("first run recorded %d/%d tokens, want 1000/200", doc.LLMIn, doc.LLMOut)
+	}
+	if first <= 0 {
+		t.Fatalf("first run recorded %v cents, want a real cost", first)
+	}
+
+	// A second, cheaper run: the tokens are now the second run's alone, but the
+	// bill covers both.
+	applyUsage(doc, model, Usage{In: 500, Out: 100})
+	if doc.LLMIn != 500 || doc.LLMOut != 100 {
+		t.Errorf("second run left %d/%d tokens, want the latest 500/100", doc.LLMIn, doc.LLMOut)
+	}
+	if want := first + llmCents(model, Usage{In: 500, Out: 100}); !closeEnough(doc.LLMCents, want) {
+		t.Errorf("cents = %v, want both runs summed (%v)", doc.LLMCents, want)
+	}
+
+	// A rate limit or a dropped connection bills nothing and must erase nothing.
+	before := *doc
+	applyUsage(doc, model, Usage{})
+	if doc.LLMIn != before.LLMIn || doc.LLMOut != before.LLMOut || doc.LLMCents != before.LLMCents {
+		t.Errorf("a call that never reached the model changed the document: %+v, was %+v",
+			*doc, before)
+	}
+
+	// An unpriced model still tagged the document, so the tokens are real; only
+	// the money is unknown, and unknown is zero rather than a guess.
+	unknown := &Doc{LLMIn: 10, LLMOut: 20, LLMCents: 5}
+	applyUsage(unknown, "gpt-9-imaginary", Usage{In: 700, Out: 300})
+	if unknown.LLMIn != 700 || unknown.LLMOut != 300 {
+		t.Errorf("unpriced model left %d/%d tokens, want 700/300", unknown.LLMIn, unknown.LLMOut)
+	}
+	if unknown.LLMCents != 5 {
+		t.Errorf("unpriced model changed the recorded cents to %v, want the earlier 5", unknown.LLMCents)
+	}
+}
+
+// The price table is the only place tokens become money now, so the arithmetic
+// is pinned to a concrete case rather than restated in the test.
+func TestLLMCents(t *testing.T) {
+	// gpt-5.6-luna is $0.20 and $1.20 per million tokens, so this document
+	// costs 9058*0.20/1e6 + 1386*1.20/1e6 dollars, in cents.
+	got := llmCents("gpt-5.6-luna", Usage{In: 9058, Out: 1386})
+	if want := 0.34748; !closeEnough(got, want) {
+		t.Errorf("llmCents = %v, want %v", got, want)
+	}
+	if got := centsStr(got); got != "0.35¢" {
+		t.Errorf("that cost renders as %q, want %q", got, "0.35¢")
+	}
+	// A model the table has never heard of costs nothing we can name. Wrong
+	// prices are worse than none, so this must stay zero rather than fall back
+	// to some other model's rate.
+	if got := llmCents("gpt-9-imaginary", Usage{In: 9058, Out: 1386}); got != 0 {
+		t.Errorf("unpriced model = %v cents, want 0", got)
+	}
+	if modelPriced("gpt-9-imaginary") {
+		t.Error("modelPriced says an unlisted model is priced")
+	}
+	if !modelPriced("gpt-5.6-luna") {
+		t.Error("modelPriced does not recognise a model in its own table")
+	}
+}
+
+// One document costs a fraction of a cent and a backfill costs a few hundred,
+// and the same line has to stay readable across that whole range — without
+// rounding a real cost away to nothing, and without printing a cost at all when
+// there is none to print.
+func TestCentsStr(t *testing.T) {
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		// Nothing at all, so an unpriced model shows tokens and no money
+		// rather than claiming the call was free.
+		{0, ""},
+		{0.005, "0.005¢"},
+		{0.00049, "0.000¢"}, // still not "", so the line does not vanish
+		{0.35, "0.35¢"},
+		{9.999, "10.00¢"},
+		{99.994, "99.99¢"},
+		{100, "100¢"},
+		{150, "150¢"},
+	}
+	for _, c := range cases {
+		if got := centsStr(c.in); got != c.want {
+			t.Errorf("centsStr(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// The cost is now recorded rather than derived at display time, which only
+// works if it survives the trip to disk and back. Checking the raw bytes as
+// well pins the field name: the index reads and sums that key, so a rename here
+// would silently zero the archive total.
+func TestSidecarKeepsCost(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &Doc{ID: 5, Status: StatusReady, Enriched: true,
+		LLMIn: 9058, LLMOut: 1386, LLMCents: 0.34748}
+	if err := s.Save(want); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Load(5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LLMCents != want.LLMCents {
+		t.Errorf("cents came back as %v, want %v", got.LLMCents, want.LLMCents)
+	}
+	if got.LLMIn != want.LLMIn || got.LLMOut != want.LLMOut {
+		t.Errorf("tokens came back as %d/%d, want %d/%d",
+			got.LLMIn, got.LLMOut, want.LLMIn, want.LLMOut)
+	}
+
+	b, err := os.ReadFile(s.DocPath(5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"llm_cents"`)) {
+		t.Errorf("sidecar does not record the cost:\n%s", b)
+	}
+}
+
+// closeEnough compares money that has been through a division, where the last
+// bit is not worth failing a test over.
+func closeEnough(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
 // Dropping the field from the document only works if the index still receives
 // the number it sorts and filters on, so this pins the derivation at the one

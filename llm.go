@@ -47,6 +47,51 @@ const (
 	maxTags = 5
 )
 
+// modelPrices is USD per million tokens, from OpenAI's published price page
+// (August 2026). OpenAI does not expose prices over the API and does not
+// reprice existing models — new prices arrive as new model names — so a table
+// in code, updated when the model is switched, is the honest source.
+var modelPrices = map[string]struct{ In, Out float64 }{
+	"gpt-5.6-sol":   {5.00, 30.00},
+	"gpt-5.6-terra": {2.00, 12.00},
+	"gpt-5.6-luna":  {0.20, 1.20},
+	"gpt-5.4":       {2.50, 15.00},
+	"gpt-5.4-mini":  {0.75, 4.50},
+	"gpt-5.4-nano":  {0.20, 1.25},
+}
+
+// llmCents turns one call's tokens into US cents. A model the table has never
+// heard of costs zero rather than a guess: wrong prices are worse than none,
+// because the number still looks authoritative. Callers pair this with
+// modelPriced so they can say nothing instead of saying zero.
+func llmCents(model string, u Usage) float64 {
+	p, ok := modelPrices[model]
+	if !ok {
+		return 0
+	}
+	usd := (float64(u.In)*p.In + float64(u.Out)*p.Out) / 1e6
+	return usd * 100
+}
+
+// modelPriced reports whether costs for this model can be named at all.
+func modelPriced(model string) bool {
+	_, ok := modelPrices[model]
+	return ok
+}
+
+// applyUsage records what a call cost on the document that caused it. Tokens
+// are replaced because they describe the run that just happened; cents are
+// added because the money really was spent each time. A call that never
+// reached the model reports no tokens and must leave the previous run's
+// figures alone rather than blanking them.
+func applyUsage(doc *Doc, model string, used Usage) {
+	if used.In == 0 && used.Out == 0 {
+		return
+	}
+	doc.LLMIn, doc.LLMOut = used.In, used.Out
+	doc.LLMCents += llmCents(model, used)
+}
+
 // ErrRateLimited means the request budget is spent. Nothing is wrong with the
 // document; it should simply be tried again after the reset.
 var ErrRateLimited = errors.New("rate limited")
@@ -468,8 +513,7 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	})
 	// Whatever the outcome, tokens the model actually billed belong to this
 	// document — a failed parse still cost money.
-	doc.LLMIn += used.In
-	doc.LLMOut += used.Out
+	applyUsage(doc, q.app.cfg.LLMModel, used)
 
 	if errors.Is(err, ErrRateLimited) {
 		q.requeue(id)
@@ -504,9 +548,14 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	q.mu.Lock()
 	q.done++
 	q.mu.Unlock()
-	logf("doc %d tagged: %q %v %s (%d in / %d out tokens, $%.5f)",
-		doc.ID, doc.Title, doc.Tags, doc.CreatedDate, used.In, used.Out,
-		q.app.cfg.LLMCost(used.In, used.Out))
+	// The cost is appended only when the table knows this model, so an unpriced
+	// run says nothing rather than claiming it was free.
+	var cost string
+	if c := centsStr(llmCents(q.app.cfg.LLMModel, used)); c != "" {
+		cost = ", " + c
+	}
+	logf("doc %d tagged: %q %v %s (%d in / %d out tokens%s)",
+		doc.ID, doc.Title, doc.Tags, doc.CreatedDate, used.In, used.Out, cost)
 }
 
 func (q *EnrichQueue) save(ctx context.Context, doc *Doc) {

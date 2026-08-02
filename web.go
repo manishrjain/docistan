@@ -216,6 +216,22 @@ func usd(v float64) string {
 	return fmt.Sprintf("$%.2f", v)
 }
 
+// centsStr formats a per-document cost. Cents rather than dollars because one
+// document is a fraction of a cent, and "$0.00035" is a number nobody can read
+// at a glance. Zero renders as nothing at all: a cost we cannot name — an
+// unpriced model — must not be shown as free.
+func centsStr(v float64) string {
+	switch {
+	case v == 0:
+		return ""
+	case v < 0.01:
+		return fmt.Sprintf("%.3f¢", v)
+	case v < 100:
+		return fmt.Sprintf("%.2f¢", v)
+	}
+	return fmt.Sprintf("%.0f¢", v)
+}
+
 func humanSize(n int64) string {
 	switch {
 	case n >= 1<<20:
@@ -308,11 +324,7 @@ func when(ts int64, by string) string {
 	return t + " · " + by
 }
 
-// readStage covers getting text out of the document. The design labels this
-// "OCR — 11 pages, 99.2% confidence"; we do not score OCR, so the second
-// figure is the amount of text recovered, and the line beneath says which
-// tool produced it — which is the question the confidence number stands in
-// for: how far to trust this text.
+// readStage covers getting text out of the document.
 func readStage(doc *Doc) Stage {
 	s := Stage{Key: "text", Name: "OCR"}
 	chars := len(strings.TrimSpace(doc.Content))
@@ -362,10 +374,13 @@ func (a *App) taggingStage(doc *Doc) Stage {
 	case doc.Enriched:
 		s.State = "done"
 		s.Name += " — " + a.cfg.LLMModel
+		// Tokens from the last run, cost from every run — that is what the
+		// document records, and the line says both without explaining itself.
 		if doc.LLMIn > 0 {
-			s.Cost = fmt.Sprintf("%s in · %s out · %s",
-				commaNum(doc.LLMIn), commaNum(doc.LLMOut),
-				usd(a.cfg.LLMCost(doc.LLMIn, doc.LLMOut)))
+			s.Cost = fmt.Sprintf("%s in · %s out", commaNum(doc.LLMIn), commaNum(doc.LLMOut))
+			if c := centsStr(a.docCents(doc)); c != "" {
+				s.Cost += " · " + c
+			}
 		}
 		s.Detail = stamp(doc.EnrichedTS)
 	case doc.Status == StatusProcessing:
@@ -393,6 +408,19 @@ func (a *App) taggingStage(doc *Doc) Stage {
 		s.Detail = "not run"
 	}
 	return s
+}
+
+// docCents is the cost to show beside a document. Sidecars written before the
+// cost was recorded carry tokens but no cents, and a timeline that suddenly
+// went silent about money on every older document would look like a bug; for
+// those the current price table is the best answer available. Display only —
+// it is never written back, because a price table read today is a guess at
+// what a run months ago actually paid, and a guess must not become a record.
+func (a *App) docCents(doc *Doc) float64 {
+	if doc.LLMCents == 0 && doc.LLMIn > 0 {
+		return llmCents(a.cfg.LLMModel, Usage{In: doc.LLMIn, Out: doc.LLMOut})
+	}
+	return doc.LLMCents
 }
 
 // budgetReason says why the model is not working right now, or "" when nothing
@@ -448,9 +476,13 @@ type page struct {
 // the indexed documents, so they cover every run and are what a backfill
 // should be judged on.
 type SpendSummary struct {
-	Calls  int64
-	In     int64
-	Out    int64
+	Calls int64
+	In    int64
+	Out   int64
+	// Priced is false when the configured model is missing from the price
+	// table. The session tokens are still real and still worth showing; the
+	// dollars would be a fiction, so the page shows the counts without them.
+	Priced bool
 	USD    float64
 	PerDoc float64
 
@@ -1366,17 +1398,26 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	var spend *SpendSummary
 	if a.enricher != nil {
 		calls, in, out := a.enricher.Spend()
-		spend = &SpendSummary{Calls: calls, In: in, Out: out, USD: a.cfg.LLMCost(in, out)}
+		// The session figures are process counters, so they have to be priced
+		// here from the model in use; the page stays in dollars because a whole
+		// session's spend is a dollar-sized number.
+		spend = &SpendSummary{
+			Calls: calls, In: in, Out: out,
+			Priced: modelPriced(a.cfg.LLMModel),
+			USD:    llmCents(a.cfg.LLMModel, Usage{In: in, Out: out}) / 100,
+		}
 		if calls > 0 {
 			spend.PerDoc = spend.USD / float64(calls)
 		}
 		// Summed from the documents themselves, so this covers every run the
-		// archive has ever seen rather than only this one.
-		if allIn, allOut, docs, err := a.search.TokenTotals(r.Context()); err != nil {
+		// archive has ever seen rather than only this one — and because each
+		// document banked its own cost when it was tagged, this is recorded
+		// spend rather than today's prices reapplied to old tokens.
+		if allIn, allOut, allCents, docs, err := a.search.TokenTotals(r.Context()); err != nil {
 			logf("token totals: %v", err)
 		} else {
 			spend.AllIn, spend.AllOut, spend.AllDocs = allIn, allOut, docs
-			spend.AllCost = a.cfg.LLMCost(allIn, allOut)
+			spend.AllCost = allCents / 100
 			if docs > 0 {
 				spend.AllPer = spend.AllCost / float64(docs)
 			}

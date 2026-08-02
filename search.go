@@ -98,11 +98,11 @@ func (s *Search) schema() *api.CollectionSchema {
 			f("failed_stage", "string", stored),
 			f("created_ts", "int64", sortable),
 			f("added_ts", "int64", sortable),
-			f("confidence", "int32", sortable),
 			// Faceted purely for the stats Typesense returns with a facet, which
 			// is what lets the archive total outlive the process.
 			f("llm_in", "int64", facet),
 			f("llm_out", "int64", facet),
+			f("llm_cents", "float", facet),
 			f("created_date", "string", stored),
 			f("page_count", "int32", stored),
 			f("file_size", "int64", stored),
@@ -159,7 +159,6 @@ func tsDoc(d *Doc) map[string]any {
 		// index sorts and filters on cannot drift away from it.
 		"created_ts":   parseDateTS(d.CreatedDate),
 		"added_ts":     d.AddedTS,
-		"confidence":   d.Confidence,
 		"created_date": d.CreatedDate,
 		"page_count":   d.PageCount,
 		"file_size":    d.FileSize,
@@ -169,6 +168,7 @@ func tsDoc(d *Doc) map[string]any {
 		"native_text":  d.NativeText,
 		"llm_in":       d.LLMIn,
 		"llm_out":      d.LLMOut,
+		"llm_cents":    d.LLMCents,
 		"text_ts":      d.TextTS,
 		"enriched_ts":  d.EnrichedTS,
 	}
@@ -543,23 +543,27 @@ func (s *Search) Count(ctx context.Context) (int, error) {
 // returns sum/avg alongside a numeric facet, so this is one cheap query rather
 // than a scan — and because it reads the documents rather than a counter in
 // memory, the figure survives a restart and counts work done by earlier runs.
-func (s *Search) TokenTotals(ctx context.Context) (in, out int64, docs int, err error) {
+//
+// The cents are what each document recorded at the time it was tagged, so the
+// total is spend that actually happened rather than today's prices applied to
+// yesterday's tokens: it stays correct even after the price table changes.
+func (s *Search) TokenTotals(ctx context.Context) (in, out int64, cents float64, docs int, err error) {
 	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
 		Q:              pointer.String("*"),
 		QueryBy:        pointer.String("title"),
 		FilterBy:       pointer.String("llm_in:>0"),
-		FacetBy:        pointer.String("llm_in,llm_out"),
+		FacetBy:        pointer.String("llm_in,llm_out,llm_cents"),
 		MaxFacetValues: pointer.Int(1),
 		PerPage:        pointer.Int(0),
 	})
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	if res.Found != nil {
 		docs = *res.Found
 	}
 	if res.FacetCounts == nil {
-		return 0, 0, docs, nil
+		return 0, 0, 0, docs, nil
 	}
 	for _, fc := range *res.FacetCounts {
 		if fc.FieldName == nil || fc.Stats == nil || fc.Stats.Sum == nil {
@@ -570,9 +574,11 @@ func (s *Search) TokenTotals(ctx context.Context) (in, out int64, docs int, err 
 			in = int64(*fc.Stats.Sum)
 		case "llm_out":
 			out = int64(*fc.Stats.Sum)
+		case "llm_cents":
+			cents = *fc.Stats.Sum
 		}
 	}
-	return in, out, docs, nil
+	return in, out, cents, docs, nil
 }
 
 // Get fetches one document by id. This is a direct lookup, not a search.
@@ -673,6 +679,12 @@ func docFromMap(m map[string]any) *Doc {
 		}
 		return 0
 	}
+	// Separate from num because that one truncates to int64, which would round
+	// every sub-cent document down to nothing.
+	flt := func(k string) float64 {
+		v, _ := m[k].(float64)
+		return v
+	}
 	boolean := func(k string) bool {
 		v, _ := m[k].(bool)
 		return v
@@ -692,11 +704,11 @@ func docFromMap(m map[string]any) *Doc {
 		AddedTS:      num("added_ts"),
 		LLMIn:        num("llm_in"),
 		LLMOut:       num("llm_out"),
+		LLMCents:     flt("llm_cents"),
 		TextTS:       num("text_ts"),
 		EnrichedTS:   num("enriched_ts"),
 		FileSize:     num("file_size"),
 		PageCount:    int(num("page_count")),
-		Confidence:   int(num("confidence")),
 		Signed:       boolean("signed"),
 		Enriched:     boolean("enriched"),
 		NativeText:   boolean("native_text"),

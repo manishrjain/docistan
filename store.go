@@ -64,14 +64,16 @@ type Doc struct {
 	// making it a candidate for the model to re-read.
 	NeedsRescue bool   `json:"needs_rescue,omitempty"`
 	Signed      bool   `json:"signed"`
-	Confidence  int    `json:"confidence"`
 	Enriched    bool   `json:"enriched"`
 	Content     string `json:"content"`
-	// What the model cost for this one document, accumulated across every
-	// call made for it — a re-tag adds to the bill rather than replacing it,
-	// because the money really was spent twice.
-	LLMIn  int64 `json:"llm_in,omitempty"`
-	LLMOut int64 `json:"llm_out,omitempty"`
+	// What the model cost for this one document. The tokens are the most
+	// recent call's, so they describe the run whose title and tags are on
+	// display; the cents are cumulative across every call ever made for this
+	// document, because a re-tag really did spend the money a second time.
+	// Tokens describe the last run; cents remember every run.
+	LLMIn    int64   `json:"llm_in,omitempty"`
+	LLMOut   int64   `json:"llm_out,omitempty"`
+	LLMCents float64 `json:"llm_cents,omitempty"`
 	// When each visible step finished, so the document page can say when it
 	// was read and when the model described it rather than only when it
 	// arrived. Zero on documents ingested before these were recorded; the
