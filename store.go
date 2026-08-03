@@ -40,6 +40,74 @@ const failReasonLimit = 160
 // reads it to explain itself.
 const TagNeedsReview = "needs-review"
 
+// The reserved tags. They filter, facet and toggle exactly like the tags a
+// person writes, which is the whole point — one query dimension, not two — but
+// nobody outside this file may allocate them: they are derived from the
+// document's own state at index-write time, so they cannot drift from the
+// status and the purge deadline the way a stored copy would.
+const (
+	TagLocked = "locked"
+	TagFailed = "failed"
+	TagTrash  = "trash"
+)
+
+// stageDecrypt is the pipeline stage whose failure means "nobody here has the
+// password" rather than "something went wrong". Named because that distinction
+// is what separates TagLocked from TagFailed, and the two files that have to
+// agree about it are this one and the pipeline that sets the stage.
+const stageDecrypt = "decrypt"
+
+// Locked reports whether the document is waiting for a password rather than
+// broken. The unlock form exists only for these, and the failure box changes
+// what it says for them, so the question is answered once.
+func (d *Doc) Locked() bool {
+	return d.Status == StatusFailed && d.FailedStage == stageDecrypt
+}
+
+// reservedTags is what a document's own state says about it, in tag form. The
+// index carries these alongside the real tags; the sidecar never does.
+//
+// Locked and failed partition the failures rather than nesting: a
+// password-protected document carries locked and not failed, because the two
+// pills lead to two different piles of work — one is a password away from
+// being readable, the other wants somebody to look at it. Trash is orthogonal
+// and rides along with either, which costs nothing: the default query excludes
+// trashed documents, so the locked and failed counts never include them unless
+// the reader is looking in the trash.
+func reservedTags(d *Doc) []string {
+	var out []string
+	if d.Trashed() {
+		out = append(out, TagTrash)
+	}
+	switch {
+	case d.Locked():
+		out = append(out, TagLocked)
+	case d.Status == StatusFailed:
+		out = append(out, TagFailed)
+	}
+	return out
+}
+
+func isReserved(tag string) bool {
+	return tag == TagLocked || tag == TagFailed || tag == TagTrash
+}
+
+// withoutReserved strips the names a user or the model may not self-allocate.
+// Every tag list arriving from outside goes through it — what the model
+// returns, what the tag box posts, and what a sidecar written before these
+// existed happens to hold — so the only way one of these names reaches the
+// index is by being derived there.
+func withoutReserved(tags []string) []string {
+	return slices.DeleteFunc(slices.Clone(tags), isReserved)
+}
+
+// withoutTags copies the list minus the named entries, leaving the caller's
+// slice alone — a document's own tags must not change just because we described
+// them to the model.
+func withoutTags(tags []string, drop ...string) []string {
+	return slices.DeleteFunc(slices.Clone(tags), func(t string) bool { return slices.Contains(drop, t) })
+}
+
 // OCR source values, recorded so the UI can explain where text came from.
 const (
 	OCRNone          = "none"           // the PDF already had a text layer
@@ -197,6 +265,7 @@ func (s *Store) DocPath(id int) string     { return s.path("docs", strconv.Itoa(
 func (s *Store) ArchivePath(id int) string { return s.path("archive", strconv.Itoa(id)+".pdf") }
 func (s *Store) ThumbPath(id int) string   { return s.path("thumbs", strconv.Itoa(id)+".jpg") }
 func (s *Store) ConsumeDir() string        { return s.path("consume") }
+func (s *Store) ArchiveDir() string        { return s.path("archive") }
 func (s *Store) JournalPath() string       { return s.path("journal.jsonl") }
 
 // PasswordsPath is where the PDF passwords live by default. In the data

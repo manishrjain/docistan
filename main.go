@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -52,6 +53,12 @@ type App struct {
 	// once at startup. Re-reading the file per document would put a secret
 	// through the disk on every ingest to answer a question that is almost
 	// always "this one is not encrypted".
+	//
+	// The list is no longer only read: the unlock form appends to it from a
+	// request handler while pipeline workers are decrypting, so it is behind a
+	// lock and reached through passwords() rather than touched directly. The one
+	// exception is the assignment at startup, before anything else is running.
+	pwMu         sync.Mutex
 	pdfPasswords []string
 
 	// Pages are parsed on first use and kept, so a render costs an execute
@@ -482,16 +489,7 @@ func resolvePasswordFile(flagValue string, store *Store) string {
 	return store.PasswordsPath()
 }
 
-// pdfPasswords reads the candidates for encrypted documents, one per line.
-// Blank lines and # comments are skipped so the file can say which password
-// belongs to which bank, and nothing else is interpreted: unlike the API key,
-// which has a known shape, a password may contain quotes, spaces or an equals
-// sign, and unwrapping any of those would corrupt it.
-//
-// Both ends are trimmed all the same. No institution issues a password that
-// begins or ends in a space, and an invisible character that makes a correct
-// password fail is a bug nobody can see — the file would look right and the
-// document would stay locked.
+// pdfPasswords reads the candidates for encrypted documents.
 //
 // A missing file is not an error. It is the ordinary state of a machine that
 // has never met an encrypted document, and every PDF that only carries
@@ -510,7 +508,29 @@ func pdfPasswords(path string) ([]string, error) {
 		}
 		return nil, err
 	}
+	out := parsePasswords(b)
+	if len(out) > 0 {
+		warnKeyPerms(path)
+	}
+	return out, nil
+}
 
+// parsePasswords is the file's format, one password per line. Blank lines and
+// # comments are skipped so the file can say which password belongs to which
+// bank, and nothing else is interpreted: unlike the API key, which has a known
+// shape, a password may contain quotes, spaces or an equals sign, and
+// unwrapping any of those would corrupt it.
+//
+// Both ends are trimmed all the same. No institution issues a password that
+// begins or ends in a space, and an invisible character that makes a correct
+// password fail is a bug nobody can see — the file would look right and the
+// document would stay locked.
+//
+// Separate from the read because the unlock form has the bytes in hand and asks
+// the same question of them — whether this password is already in the file —
+// and two spellings of "what counts as a line" is how it would come to append a
+// duplicate that only differs by a space.
+func parsePasswords(b []byte) []string {
 	var out []string
 	for _, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
@@ -519,10 +539,77 @@ func pdfPasswords(path string) ([]string, error) {
 		}
 		out = append(out, line)
 	}
-	if len(out) > 0 {
+	return out
+}
+
+// passwords is the candidate list as the pipeline should see it right now.
+// Copied out under the lock: a worker holding the slice while the unlock form
+// appends to it is a race, and the cost of the copy is nothing beside the qpdf
+// runs it is about to feed.
+func (a *App) passwords() []string {
+	a.pwMu.Lock()
+	defer a.pwMu.Unlock()
+	return slices.Clone(a.pdfPasswords)
+}
+
+// rememberPassword files a password that has just been proved against a real
+// document: on disk so the next start still has it, and in memory so the
+// document about to be requeued opens without waiting for one.
+//
+// Appended rather than rewritten. The file is not only ours — someone maintains
+// it by hand, with comments saying which password belongs to which bank — and a
+// rewrite that went wrong would take out passwords for documents nobody is even
+// looking at today.
+//
+// The lock covers the file as well as the list, because they are two halves of
+// one thing: two readers unlocking two documents with the same password at the
+// same moment would otherwise each read a file without it and each append it.
+func (a *App) rememberPassword(pw string) error {
+	path := a.cfg.PasswordFile
+	if path == "" {
+		return errors.New("no password file is configured")
+	}
+
+	a.pwMu.Lock()
+	defer a.pwMu.Unlock()
+
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// Compared after the reader's own parsing, so "already in the file" means
+	// the same thing here as "already tried" at startup — a password that
+	// differs only by surrounding space is not a second password.
+	if !slices.Contains(parsePasswords(b), pw) {
+		line := pw + "\n"
+		if len(b) > 0 && b[len(b)-1] != '\n' {
+			// The file ends mid-line. Appending straight onto it would splice the
+			// two into one password that opens nothing, taking the existing one
+			// out of service as well.
+			line = "\n" + line
+		}
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		if _, err := f.WriteString(line); err != nil {
+			f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		// 0600 above only applies to a file this created. One that was already
+		// there keeps whatever mode it had, which is the case worth a warning.
 		warnKeyPerms(path)
 	}
-	return out, nil
+
+	if !slices.Contains(a.pdfPasswords, pw) {
+		// A fresh slice rather than an append in place, so a worker that is
+		// already holding the old one is holding something nobody writes to.
+		a.pdfPasswords = append(slices.Clone(a.pdfPasswords), pw)
+	}
+	return nil
 }
 
 // openAIKey finds the key, preferring the environment so a one-off run can

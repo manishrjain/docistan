@@ -581,6 +581,23 @@ document.addEventListener("DOMContentLoaded", () => {
   // anything.
   if (timeline?.querySelector("li.pending, li.working")) watch();
 
+  // --- unlock -------------------------------------------------------------
+  // The form posts and navigates like any other action here; qpdf takes a
+  // moment on a large document, so the button says what is happening rather
+  // than sitting there looking unpressed. Nothing about whether the unlock
+  // works depends on this running.
+  const unlock = document.querySelector("form.unlock");
+  unlock?.addEventListener("submit", () => {
+    const button = unlock.querySelector('button[type="submit"]');
+    if (!button) return;
+    button.textContent = "Unlocking…";
+    button.classList.replace("btn-primary", "btn-secondary");
+    // Not disabled: a disabled submit button is not submitted, and this one
+    // carries no value — but the form is already on its way, and re-pressing
+    // it would only send the same password twice.
+    button.style.pointerEvents = "none";
+  });
+
   // --- document number ---------------------------------------------------
   // The number is what gets written on the paper original, so copying it
   // should not mean selecting six pixels of monospace by hand.

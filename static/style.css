@@ -430,6 +430,12 @@ main {
   padding: 7px 4px;
   text-decoration: none;
 }
+/* The reserved three wear the tag pill because they are tags — they filter the
+   same way, so they should look the way filtering looks. The flag is in the
+   markup and the border is a shade firmer, which is the whole of what says the
+   archive allocated this one rather than a person. The selected state is left
+   to .pill-tag.on, which outranks this by a class. */
+.pill-reserved { border-color: var(--color-neutral-400); }
 
 /* Tag browser. The checkbox is the toggle, so the full vocabulary is
    reachable with JavaScript off; the search box inside is the enhancement. */
@@ -506,8 +512,8 @@ main {
 .filter-date-row > .micro { margin-right: 2px; }
 
 /* Segmented control: one hairline box, dividers between, ink fill for the
-   selection. Ink is the resting selection — a sort order, a view, all time —
-   because those say how you are looking rather than narrowing what you see.
+   selection. Ink is the resting selection — a sort order, all time — because
+   those say how you are looking rather than narrowing what you see.
    A segment that is genuinely excluding documents takes the accent instead,
    so an applied date range reads as the filter it is, next to the tag pills
    that are already accent-filled. */
@@ -528,15 +534,6 @@ main {
 /* Only the segments that hold documents back. "All time" is selected but
    excludes nothing, so it stays ink. */
 .seg a.on.filtering { background: var(--color-accent); color: var(--color-bg); }
-/* Each view names itself and then says how big it is. The count is quieter
-   than the name because it is the second thing you read, and it fades with the
-   ink rather than to a fixed grey so it works on the selected segment too. */
-.seg .n { margin-left: 6px; opacity: 0.6; }
-
-/* The views sit at the head of the filter row, ahead of the tags, and keep
-   their own line when the row wraps: which slice of the archive is on screen
-   is not one of the filters applied to it. */
-.filters > .views { flex: none; }
 .sort-dir .dir-arrow { display: none; }
 
 .range-custom {
@@ -804,7 +801,13 @@ button.pill-plain {
   color: var(--color-neutral-800);
   text-wrap: pretty;
 }
-.row .fail-reason { color: var(--color-accent-700); }
+/* A point smaller than the summary it stands in for, and in the accent: it is
+   an explanation of the badge above it rather than a description of the
+   document, and should not read as the thing the row is about. */
+.row .fail-reason {
+  color: var(--color-accent-700);
+  font-size: 13px;
+}
 
 .row-tags {
   position: relative;
@@ -1179,15 +1182,41 @@ button.pill-plain {
   margin-bottom: var(--space-4);
   font-size: 13px;
 }
-.banner small {
-  display: block;
-  margin-top: 4px;
-  color: var(--color-neutral-700);
-  overflow-wrap: anywhere;
-}
 .banner.info {
   border-color: var(--color-divider);
   background: var(--color-surface);
+}
+
+/* A failure is the one thing on this page asking for something to be done, so
+   it gets a box at the head of the timeline rather than a line among the
+   banners — and, when the thing it wants is a password, the field to type it
+   into. Unfilled, unlike a banner: the border carries it, and a tinted panel
+   with a form in it reads as a dialog that has lost its way. */
+.fail-box {
+  border: 2px solid var(--color-accent);
+  padding: 14px;
+  margin-bottom: 20px;
+}
+.fail-box h5 { font-size: 14px; }
+.fail-box p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-neutral-800);
+  /* A wrapped tool error carries an absolute path, which has nowhere to break. */
+  overflow-wrap: anywhere;
+}
+
+.unlock { margin-top: var(--space-3); }
+.unlock-bad {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-accent-700);
+}
+.unlock-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .extracted { margin-top: var(--space-4); }
@@ -1214,12 +1243,6 @@ button.pill-plain {
   overflow-wrap: anywhere;
 }
 .extracted[data-empty="1"] summary { color: var(--color-neutral-500); }
-
-.searching {
-  font-size: 12px;
-  color: var(--color-neutral-700);
-  margin-bottom: var(--space-3);
-}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Tables and stats — status page
@@ -1477,7 +1500,9 @@ button.pill-plain {
 
   /* The sheet shows the whole vocabulary rather than six of it behind a
      "more" control: there is room here, and scanning a list beats guessing
-     which six a popover chose. The pills and that control both go. */
+     which six a popover chose. The pills and that control both go — but not
+     the reserved three, which the vocabulary below deliberately does not
+     list, and which hiding here would put out of reach entirely. */
   .tag-pills > .pill-tag:not(.browse-more),
   .browse-more { display: none; }
 

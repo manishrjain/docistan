@@ -498,7 +498,7 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 		// derived is made from what it returns.
 		src := orig
 		if doc.OriginalExt == ".pdf" {
-			p.setStage(job, "decrypt")
+			p.setStage(job, stageDecrypt)
 			decrypted := archive + ".dec.pdf"
 			defer os.Remove(decrypted)
 			src, err = p.decrypt(ctx, doc, orig, decrypted)
@@ -620,7 +620,7 @@ func (p *Pipeline) decrypt(ctx context.Context, doc *Doc, orig, dst string) (str
 		return orig, nil
 	}
 
-	which, err := DecryptPDF(ctx, orig, dst, p.app.pdfPasswords)
+	which, err := DecryptPDF(ctx, orig, dst, p.app.passwords())
 	switch {
 	case errors.Is(err, errNoPassword):
 		// An instruction, not a diagnosis. This is the sentence the Failed row

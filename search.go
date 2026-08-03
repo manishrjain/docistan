@@ -141,7 +141,13 @@ func (s *Search) EnsureFreshCollection(ctx context.Context) error {
 // strings, so the integer id is rendered in base 10.
 func tsDoc(d *Doc) map[string]any {
 	content := truncateBytes(d.Content, contentIndexLimit)
-	tags := d.Tags
+	// Reserved tags are derived here, at index-write time, for the same reason
+	// created_ts below is: the sidecar keeps only what it was told, and the
+	// thing the index filters on cannot then drift away from it. Filtering the
+	// document's own tags first is what keeps a sidecar written before these
+	// existed — one that happens to carry a literal "failed" — from indexing it
+	// twice.
+	tags := append(withoutReserved(d.Tags), reservedTags(d)...)
 	if tags == nil {
 		tags = []string{}
 	}
@@ -231,26 +237,15 @@ func (s *Search) Import(ctx context.Context, docs []*Doc) error {
 	return nil
 }
 
-// The three views the archive offers. They partition it: everything is in
-// exactly one of "not trashed" and "trashed", and Failed is the slice of the
-// first that did not process. Failed documents therefore appear under All as
-// well — All means the whole archive, not the part of it that worked.
-const (
-	ViewAll    = ""
-	ViewFailed = "failed"
-	ViewTrash  = "trash"
-)
-
 // Query is a parsed search request from the URL.
 type Query struct {
-	Q      string
-	Tags   []string // every tag must match, so picking more narrows
+	Q string
+	// Tags is every tag that must match, so picking more narrows. The reserved
+	// names arrive here like any other: there is no separate view dimension,
+	// which is what makes "filtering works just like tags" true rather than
+	// merely claimed.
+	Tags   []string
 	Status string
-	// View selects which of the three slices is being looked at. It is a mode
-	// rather than a filter — it decides what the archive is, and the filters
-	// then narrow that — which is why it is not part of HasFilters and is not
-	// cleared by "Clear filters".
-	View string
 	// Sort names the field: "" for relevance, "added" for when the document
 	// arrived, "created" for the date on the document itself. Direction is
 	// separate, because which field to order by and which end to start from
@@ -411,17 +406,16 @@ func (s *Search) query(ctx context.Context, q Query, perPage int, idsOnly bool) 
 			filters = append(filters, fmt.Sprintf(`%s:="%s"`, field, escapeFilterValue(value)))
 		}
 	}
-	// The view goes on first, and every query gets one whether it asked or not.
-	// That is what makes the trash actually hidden: the index, the status page's
-	// failed table and the bulk download all build their requests through Query,
-	// so none of them can forget to exclude a document that is on its way out.
-	if q.View == ViewTrash {
+	// The one rule that makes trash more than a tag, and the reason the trash
+	// filter goes on first and goes on every query whether it was asked for or
+	// not: the index, the status page's failed table and the bulk download all
+	// build their requests through Query, so none of them can forget to exclude
+	// a document that is on its way out. Selecting the tag is how you ask to see
+	// them; nothing else can.
+	if slices.Contains(q.Tags, TagTrash) {
 		filters = append(filters, "delete_after_ts:>0")
 	} else {
 		filters = append(filters, "delete_after_ts:=0")
-		if q.View == ViewFailed {
-			filters = append(filters, "status:="+StatusFailed)
-		}
 	}
 
 	// Chained rather than combined into one list filter, because chaining is
@@ -614,18 +608,33 @@ func (s *Search) AllIDs(ctx context.Context, q Query, limit int) ([]int, error) 
 	}
 }
 
-// ViewCounts is how many documents each of the three views holds. Archive-wide
-// rather than narrowed by whatever is currently searched or filtered: the
-// control says how big each view is, so that a search finding nothing in Failed
-// still shows there is nothing there rather than reporting the search.
+// ReservedCounts is how big each reserved slice of the archive is.
+type ReservedCounts struct {
+	Locked, Failed, Trash int
+	// Archive is not a pill: it is how many documents there are to search, which
+	// is what the search box says in its placeholder and the tab says in its
+	// title. It lives here because it is the same count-only lookup with the
+	// same "not trashed" filter the other two carry, and it used to be the All
+	// view's figure — the pill went, the number is still worth knowing.
+	Archive int
+}
+
+// ReservedCounts counts the archive rather than the results. That is the whole
+// value of a number on these pills: it says how big that pile of work is, so
+// that a search finding no locked documents still shows there are nine to deal
+// with rather than reporting the search. They could not come from the result
+// facets in any case, since the default query excludes the trash and its facet
+// would read zero forever.
 //
-// Three metadata lookups, each asking for zero results so Typesense counts
-// rather than fetches, which is cheap enough to pay on every index render. The
-// All figure doubles as the size of the searchable archive, which is what the
-// search placeholder used to make a fourth lookup for. A multi_search could
-// fold the three into one round trip later; it is not worth the extra shape
-// yet.
-func (s *Search) ViewCounts(ctx context.Context) (all, failed, trash int, err error) {
+// Four metadata lookups, each asking for zero results so Typesense counts
+// rather than fetches, which is cheap enough to pay on every index render. A
+// multi_search could fold them into one round trip later; it is not worth the
+// extra shape yet.
+//
+// Locked and failed are asked as tag filters rather than as status filters, so
+// the count and the pill's own link are the same question — a pill that leads
+// somewhere other than to the documents it counted is worse than no count.
+func (s *Search) ReservedCounts(ctx context.Context) (ReservedCounts, error) {
 	count := func(filter string) (int, error) {
 		res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
 			Q:        pointer.String("*"),
@@ -641,16 +650,22 @@ func (s *Search) ViewCounts(ctx context.Context) (all, failed, trash int, err er
 		}
 		return *res.Found, nil
 	}
-	if all, err = count("delete_after_ts:=0"); err != nil {
-		return 0, 0, 0, err
+
+	var out ReservedCounts
+	var err error
+	if out.Archive, err = count("delete_after_ts:=0"); err != nil {
+		return ReservedCounts{}, err
 	}
-	if failed, err = count("delete_after_ts:=0 && status:=" + StatusFailed); err != nil {
-		return 0, 0, 0, err
+	if out.Locked, err = count("delete_after_ts:=0 && tags:=" + TagLocked); err != nil {
+		return ReservedCounts{}, err
 	}
-	if trash, err = count("delete_after_ts:>0"); err != nil {
-		return 0, 0, 0, err
+	if out.Failed, err = count("delete_after_ts:=0 && tags:=" + TagFailed); err != nil {
+		return ReservedCounts{}, err
 	}
-	return all, failed, trash, nil
+	if out.Trash, err = count("delete_after_ts:>0"); err != nil {
+		return ReservedCounts{}, err
+	}
+	return out, nil
 }
 
 // ExpiredTrashIDs lists documents whose purge deadline has passed, for the
@@ -867,9 +882,15 @@ func docFromMap(m map[string]any) *Doc {
 		NativeText:    boolean("native_text"),
 	}
 	d.ID, _ = hitID(m)
+	// The reserved names are dropped on the way back out, so a Doc rebuilt from
+	// the index carries exactly the tags its sidecar does. Everything that reads
+	// one — the chips on a result row, the tag box on the document page — then
+	// shows what a person chose, and the derived three are said by the badge and
+	// the pills instead. Nothing is lost: Status and DeleteAfterTS come back too,
+	// so the derivation can be run again on this very value.
 	if tags, ok := m["tags"].([]any); ok {
 		for _, t := range tags {
-			if s, ok := t.(string); ok {
+			if s, ok := t.(string); ok && !isReserved(s) {
 				d.Tags = append(d.Tags, s)
 			}
 		}

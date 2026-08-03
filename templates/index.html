@@ -20,21 +20,19 @@
       <label class="sheet-done" for="filters-open">Done</label>
     </div>
 
-    {{/* Which slice of the archive is on screen. A mode rather than a filter —
-         the same distinction the date range makes — so it takes the segmented
-         control rather than a pill, and it survives every other control being
-         changed. All includes failed documents; only the trash is held back. */}}
-    <nav class="seg views" aria-label="View">
-      <a href="{{$page.WithParam "view" ""}}"{{if $page.ViewOn ""}} class="on"{{end}}
-        >All <span class="n">{{commaNum $page.Views.All}}</span></a>
-      <a href="{{$page.WithParam "view" "failed"}}"{{if $page.ViewOn "failed"}} class="on"{{end}}
-        >Failed <span class="n">{{commaNum $page.Views.Failed}}</span></a>
-      <a href="{{$page.WithParam "view" "trash"}}"{{if $page.ViewOn "trash"}} class="on"{{end}}
-        >Trash <span class="n">{{commaNum $page.Views.Trash}}</span></a>
-    </nav>
-
     <div class="filter-tags">
       <span class="micro">Tags</span>
+
+      {{/* The reserved tags lead the row, and deliberately sit outside the
+           swapped region below: their counts are of the whole archive rather
+           than of the results, so /results does not look them up and a swap
+           that carried these away would put them back reading zero. Each is a
+           tag pill and toggles like one — the flag is all that says the archive
+           allocated it rather than a person. */}}
+      {{range $page.ReservedPills}}
+        <a class="pill-tag pill-reserved{{if .On}} on{{end}}" href="{{$page.ToggleTag .Tag}}"
+          >⚑ {{.Label}}{{if .Count}}<span class="n">{{commaNum .Count}}</span>{{end}}</a>
+      {{end}}
 
       {{/* The pills come before the checkbox and stay out of the panel, which
            is what lets search-as-you-type swap them: #tags-open holds whether
@@ -187,8 +185,8 @@
 
      Deliberately not in here: the rest of the filter bar. The two checkboxes
      hold whether the tag popover and the mobile filter sheet are open, and the
-     view counts and the date options do not move with the search text at all.
-     Only the tags do, and they are blocks of their own further down. */}}
+     reserved pills and the date options do not move with the search text at
+     all. Only the tags do, and they are blocks of their own further down. */}}
 {{define "results"}}
   {{$page := .}}
     {{/* The dates too: "download everything matching" has to mean the filter
@@ -254,10 +252,12 @@
   {{if not .Result.Hits}}
     <div class="empty">
       <h4>Nothing here.</h4>
-      {{if $page.ViewOn "trash"}}
+      {{if $page.InTrash}}
         <p>The trash is empty. Documents moved here are kept for 30 days.</p>
-      {{else if $page.ViewOn "failed"}}
-        <p>Nothing has failed. <a href="{{$page.WithParam "view" ""}}">Back to all documents</a>.</p>
+      {{else if $page.TagOn "locked"}}
+        <p>Nothing is waiting for a password. <a href="{{$page.ToggleTag "locked"}}">Back to all documents</a>.</p>
+      {{else if $page.TagOn "failed"}}
+        <p>Nothing has failed. <a href="{{$page.ToggleTag "failed"}}">Back to all documents</a>.</p>
       {{else if $page.HasFilters}}
         <p>No document matches these filters. <a href="{{$page.ClearFilters}}">Clear them</a> and try again.</p>
       {{else if .Query.Q}}
@@ -284,8 +284,14 @@
             <span class="row-meta">
               {{if $d.CreatedDate}}<span>{{monthLabel $d.CreatedDate}}</span>{{end}}
               {{if $d.PageCount}}<span>{{$d.PageCount}} page{{if ne $d.PageCount 1}}s{{end}}</span>{{end}}
-              {{if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>{{end}}
-              {{if $d.Trashed}}<span class="status trashed">In trash</span>{{end}}
+              {{/* A locked document says so rather than saying "failed": it is
+                   one password away from being readable, which is a different
+                   thing to do about it. Both wear the same badge — the word is
+                   what changes, not how loud it is. */}}
+              {{if $d.Locked}}<span class="status failed">Locked</span>
+              {{else if eq $d.Status "failed"}}<span class="status failed">Failed</span>
+              {{else if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>{{end}}
+              {{if $d.Trashed}}<span class="status trashed">Trash</span>{{end}}
             </span>
           </div>
 
@@ -294,7 +300,7 @@
                  box is clickable without nesting anchors, which is invalid.
                  The query rides along so the document opens with the match
                  already found in the PDF rather than only in the snippet. */}}
-            <h3><a href="/doc/{{$d.ID}}{{if $page.Query.Q}}?q={{$page.Query.Q}}{{end}}">{{.Title}}</a></h3>
+            <h3><a href="{{$page.DocLink $d.ID}}">{{.Title}}</a></h3>
             <a class="open-link" href="/doc/{{$d.ID}}/pdf" target="_blank" rel="noopener" title="Open the PDF in a new tab">Open ↗</a>
           </div>
 

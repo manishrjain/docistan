@@ -257,6 +257,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /doc/{id}/restore", a.handleDocRestore)
 	mux.HandleFunc("POST /docs/action", a.handleDocsAction)
 	mux.HandleFunc("POST /doc/{id}/retry", a.handleDocRetry)
+	mux.HandleFunc("POST /doc/{id}/unlock", a.handleDocUnlock)
 	mux.HandleFunc("POST /doc/{id}/enrich", a.handleDocEnrich)
 	mux.HandleFunc("GET /doc/{id}/meta", a.handleDocMeta)
 	mux.HandleFunc("GET /doc/{id}/pdf", a.handleDocPDF)
@@ -484,11 +485,11 @@ type page struct {
 	Doc       *Doc
 	Stages    []Stage
 	KnownTags []string
-	// Views is the size of each of the three slices of the archive, for the
-	// segmented control. A value rather than a pointer: a lookup that failed
-	// leaves zeros, which is a control that renders rather than a page that
-	// does not.
-	Views ViewCounts
+	// Reserved is how big each reserved slice of the archive is, for the counts
+	// on the three pills that lead the tag row. A value rather than a pointer: a
+	// lookup that failed leaves zeros, which is a row of tags that renders
+	// rather than a page that does not.
+	Reserved ReservedCounts
 	// Search carries the term that led here, so the PDF viewer can jump
 	// straight to it instead of making the reader find it twice.
 	Search  string
@@ -634,24 +635,94 @@ func (p page) ToggleTag(tag string) string {
 
 func (p page) TagOn(tag string) bool { return slices.Contains(p.Query.Tags, tag) }
 
-// ViewCounts is how many documents each view holds, in the order the control
-// shows them.
-type ViewCounts struct{ All, Failed, Trash int }
-
-func (p page) ViewOn(v string) bool { return p.Query.View == v }
-
 // InTrash decides which bulk actions the selection offers and how an empty
 // listing explains itself. Asked of the page rather than of the query, because
 // every template that needs it has the page in hand.
-func (p page) InTrash() bool { return p.Query.View == ViewTrash }
+func (p page) InTrash() bool { return p.TagOn(TagTrash) }
 
-// BackLink returns to the search that led here, so "All results" means the
+// ReservedPill is one of the three system tags as the tag row draws it: the
+// same pill a tag gets, with a count that is of the archive rather than of the
+// results and a flag to say it was not written by a person.
+type ReservedPill struct {
+	Tag   string
+	Label string
+	Count int
+	On    bool
+}
+
+// ReservedPills is what leads the tag row. A pill appears when it has documents
+// behind it, or when it is the filter currently on — otherwise fixing the last
+// locked document would take the pill away under the reader while they are
+// still looking at it, and leave them no way back.
+func (p page) ReservedPills() []ReservedPill {
+	out := make([]ReservedPill, 0, 3)
+	for _, r := range []ReservedPill{
+		{Tag: TagLocked, Label: "Locked", Count: p.Reserved.Locked},
+		{Tag: TagFailed, Label: "Failed", Count: p.Reserved.Failed},
+		{Tag: TagTrash, Label: "Trash", Count: p.Reserved.Trash},
+	} {
+		r.On = p.TagOn(r.Tag)
+		if r.Count == 0 && !r.On {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// UnlockFailed reports whether the reader has just been told the wrong
+// password. It travels in the URL because the answer is a redirect — the
+// password was posted, and a page rendered straight from that POST is a page
+// whose reload offers to send it again.
+//
+// A flag and not the guess itself: nothing that was typed into that field ever
+// comes back to the browser.
+func (p page) UnlockFailed() bool {
+	return p.URL != nil && p.URL.Query().Get("unlock") == "bad"
+}
+
+// BackLink returns to the listing that led here, so "All results" means the
 // results you actually came from rather than an unfiltered list.
+//
+// Built from FilterFields, the same list the forms post and the same one
+// indexURL uses, because the way back and the way in have to agree. Carrying
+// only q — which is what this did — was not a smaller version of that: it
+// dropped the tags, the date range and the sort, so following a tag into a
+// document and pressing back landed on the whole archive.
+//
+// The page number is added here and is deliberately not in FilterFields: a form
+// that changes a filter should return to the first page of the new results,
+// while this should return to the page you were actually reading.
 func (p page) BackLink() string {
-	if p.Search == "" {
+	v := url.Values{}
+	for _, f := range p.FilterFields(true) {
+		v.Add(f.Name, f.Value)
+	}
+	if p.Query.Page > 1 {
+		v.Set("page", strconv.Itoa(p.Query.Page))
+	}
+	if len(v) == 0 {
 		return "/"
 	}
-	return "/?" + url.Values{"q": {p.Search}}.Encode()
+	return "/?" + v.Encode()
+}
+
+// DocLink is the way in: a result row carrying the listing it was on, so the
+// document page can offer the way back. Same list again — a row that carried
+// less than BackLink reads would make the return trip lossy no matter how
+// carefully BackLink was written.
+func (p page) DocLink(id int) string {
+	v := url.Values{}
+	for _, f := range p.FilterFields(true) {
+		v.Add(f.Name, f.Value)
+	}
+	if p.Query.Page > 1 {
+		v.Set("page", strconv.Itoa(p.Query.Page))
+	}
+	if len(v) == 0 {
+		return "/doc/" + strconv.Itoa(id)
+	}
+	return "/doc/" + strconv.Itoa(id) + "?" + v.Encode()
 }
 
 func (p page) WithRange(r string) string { return p.WithParam("range", r) }
@@ -763,11 +834,19 @@ const topTagCount = 6
 // TagFacets is the full tag vocabulary of the current result set, ordered by
 // how many documents carry each. Filtering narrows it, which is deliberate:
 // every tag offered leads somewhere.
+//
+// The reserved names come back in this facet like any other tag and are taken
+// out here, at the one place the browser, the pills and the "+ N more" count
+// all read from — they have their own pills at the head of the row, with
+// archive-wide counts, and offering them twice would be offering two different
+// numbers for the same thing. Cloned because DeleteFunc writes through to the
+// slice it is given, and this is called several times per render.
 func (p page) TagFacets() []FacetValue {
 	if p.Result == nil {
 		return nil
 	}
-	return p.Result.Facets["tags"]
+	return slices.DeleteFunc(slices.Clone(p.Result.Facets["tags"]),
+		func(f FacetValue) bool { return isReserved(f.Value) })
 }
 
 // TopTags is what the filter bar shows without opening the browser: the most
@@ -780,6 +859,10 @@ func (p page) TopTags() []FacetValue {
 	}
 	out := slices.Clone(top)
 	for _, t := range p.Query.Tags {
+		if isReserved(t) {
+			// Selected, but its pill is already at the head of the row.
+			continue
+		}
 		if !slices.ContainsFunc(out, func(f FacetValue) bool { return f.Value == t }) {
 			out = append(out, FacetValue{Value: t})
 		}
@@ -816,14 +899,13 @@ func (p page) FilterFields(withDates bool) []Field {
 		}
 	}
 	add("q", q.Q)
+	// The reserved tags are in here with the rest, which is what keeps a change
+	// of sort order from quietly moving you out of the trash: they are carried
+	// because they are tags, not because anything remembered to carry them.
 	for _, t := range q.Tags {
 		add("tag", t)
 	}
 	add("status", q.Status)
-	// The view rides along with the filters even though it is not one: both
-	// forms post back to the index, and a submit that dropped it would answer a
-	// change of sort order by moving you out of the trash.
-	add("view", q.View)
 	// The raw values, not SortField(): resolving "" to "added" here would turn
 	// a relevance-ordered search into an arrival-ordered one on submit.
 	add("sort", q.Sort)
@@ -861,7 +943,6 @@ func parseQuery(v url.Values) Query {
 		Q:      v.Get("q"),
 		Tags:   v["tag"],
 		Status: v.Get("status"),
-		View:   v.Get("view"),
 		Sort:   v.Get("sort"),
 		Dir:    v.Get("dir"),
 		Range:  v.Get("range"),
@@ -869,13 +950,6 @@ func parseQuery(v url.Values) Query {
 		To:     joinYM(v.Get("to_y"), v.Get("to_m")),
 	}
 	q.Page, _ = strconv.Atoi(v.Get("page"))
-
-	// A view we do not have is All rather than an empty listing. Normalising
-	// here rather than at the point of use means the value carried through the
-	// forms and shown as the selected segment is one of exactly three things.
-	if q.View != ViewFailed && q.View != ViewTrash {
-		q.View = ViewAll
-	}
 
 	// Sorting used to be one list where "oldest" meant oldest-by-arrival.
 	// Keep old links meaning what they meant.
@@ -908,29 +982,25 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// The counts are the archive's, not this page's, so they are asked for
 	// separately. A failure here leaves zeros rather than a broken page: the
 	// results themselves are already rendered by the time it matters.
-	var views ViewCounts
-	if all, failed, trash, err := a.search.ViewCounts(r.Context()); err != nil {
-		logf("view counts: %v", err)
-	} else {
-		views = ViewCounts{All: all, Failed: failed, Trash: trash}
+	reserved, err := a.search.ReservedCounts(r.Context())
+	if err != nil {
+		logf("reserved tag counts: %v", err)
 	}
 	// The placeholder says how many documents are searchable, which is only the
-	// same as the result count when nothing is filtered — and which is exactly
-	// what the All view counts, so it comes from there rather than from a
-	// second archive-wide lookup that would now have to learn about the trash
-	// to stay honest. res.Found is the fallback if that lookup failed.
+	// same as the result count when nothing is filtered. res.Found is the
+	// fallback if that lookup failed.
 	total := res.Found
-	if views.All > 0 {
-		total = views.All
+	if reserved.Archive > 0 {
+		total = reserved.Archive
 	}
 
 	a.render(w, "index.html", page{
-		Query:  q,
-		Result: res,
-		Total:  total,
-		Views:  views,
-		Flash:  actionNotice(r.URL.Query()),
-		URL:    r.URL,
+		Query:    q,
+		Result:   res,
+		Total:    total,
+		Reserved: reserved,
+		Flash:    actionNotice(r.URL.Query()),
+		URL:      r.URL,
 	})
 }
 
@@ -964,10 +1034,11 @@ func (a *App) handleResults(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "template: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// No ViewCounts: those three counts are of the whole archive and do not
-	// move with the search text, so asking for them on every keystroke would be
-	// three round trips spent to render the same numbers the segmented control
-	// is already showing — and that control is not one of the regions below.
+	// No ReservedCounts: those counts are of the whole archive and do not move
+	// with the search text, so asking for them on every keystroke would be four
+	// round trips spent to render the numbers already on the pills — and those
+	// pills deliberately sit outside the regions below, which is what lets this
+	// leave them alone.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tpl.ExecuteTemplate(w, "regions", page{
 		Query:  q,
@@ -1031,13 +1102,21 @@ func (a *App) handleDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	// The tag vocabulary drives autocomplete, so adding a tag that already
 	// exists is a pick rather than a retype — which is what keeps the
-	// vocabulary from filling with near-duplicates.
+	// vocabulary from filling with near-duplicates. It is a facet count of the
+	// index, so the reserved names are in it and have to come out: the box below
+	// would offer them, and the save would then silently drop what it suggested.
 	known, err := a.search.Vocabulary(r.Context(), "tags", 200)
 	if err != nil {
 		logf("doc %d: reading tag vocabulary: %v", id, err)
 	}
+	known = withoutReserved(known)
+	// The listing this document was opened from, parsed back out of the URL the
+	// row carried. Only BackLink reads it — the document itself is the same
+	// document however you arrived at it — but without it "All results" has
+	// nothing to return to but the whole archive.
 	a.render(w, "doc.html", page{
 		Title: doc.Title, Doc: doc, Stages: a.stagesFor(doc),
+		Query:     parseQuery(r.URL.Query()),
 		KnownTags: known, Search: r.URL.Query().Get("q"), URL: r.URL,
 	})
 }
@@ -1076,7 +1155,10 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 		doc.CreatedDate = normalizeMonth(r.PostFormValue("created_date"))
 	}
 	if r.PostForm.Has("tags") {
-		doc.Tags = splitTags(r.PostFormValue("tags"))
+		// Typing "trash" into the tag box must not fake a reserved tag. The
+		// index derives those from the document's own state, so a sidecar
+		// carrying one would either be ignored or, worse, be believed.
+		doc.Tags = withoutReserved(splitTags(r.PostFormValue("tags")))
 	}
 
 	// A 200 has to mean durable and queryable, and persist now delivers exactly
@@ -1372,18 +1454,8 @@ func (a *App) handleDocRetry(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := a.store.ClearDerived(doc.ID); err != nil {
-		http.Error(w, "clearing derived files: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	doc.Status = StatusProcessing
-	doc.Enriched = false
-	// Indexed as well as saved, in that order: the document page reads its copy
-	// out of the index, so writing only the sidecar left it reporting the state
-	// it was in before the reprocess was asked for. An error here means this
-	// request's context ended, nothing else.
-	if err := a.persist(r.Context(), doc); err != nil {
-		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
+	if err := a.reprocess(r.Context(), doc); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := a.pipeline.EnqueueDoc(doc.ID); err != nil {
@@ -1398,6 +1470,135 @@ func (a *App) handleDocRetry(w http.ResponseWriter, r *http.Request) {
 	// Without JavaScript, back to the document: the timeline there already
 	// reports the work, and the status page is about the queue as a whole.
 	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)
+}
+
+// reprocess throws away everything derived and puts the document back into the
+// processing state, which is what makes a re-run actually run: stages skip work
+// that is already done, so without this the queue would look at the archive PDF
+// sitting on disk and decide there was nothing to do.
+//
+// The queueing itself is the caller's, because the two callers reach it for
+// different reasons — the reader thinks the result is wrong, or the machine has
+// just been handed the password it was missing — and answer a queue that will
+// not take the work differently.
+func (a *App) reprocess(ctx context.Context, doc *Doc) error {
+	if err := a.store.ClearDerived(doc.ID); err != nil {
+		return fmt.Errorf("clearing derived files: %w", err)
+	}
+	doc.Status = StatusProcessing
+	doc.Enriched = false
+	// Indexed as well as saved, in that order: the document page reads its copy
+	// out of the index, so writing only the sidecar left it reporting the state
+	// it was in before the reprocess was asked for. An error here means the
+	// request's context ended, nothing else.
+	if err := a.persist(ctx, doc); err != nil {
+		return fmt.Errorf("saving document: %w", err)
+	}
+	return nil
+}
+
+// handleDocUnlock takes the password for a document nobody could open, tries it
+// against that document's own original, and on success keeps it and reprocesses.
+//
+// The password must not survive this request anywhere it can be read again. It
+// is not logged, not journalled, not written to a sidecar, not put into an error
+// message and not echoed back into the form — the redirect after a wrong guess
+// carries a flag rather than the guess. The one place it is written is the
+// password file, which exists for exactly that.
+func (a *App) handleDocUnlock(w http.ResponseWriter, r *http.Request) {
+	doc, ok := a.loadDoc(w, r)
+	if !ok {
+		return
+	}
+	// The form is only ever drawn on a locked document, so arriving here any
+	// other way is a stale tab or a hand-made request. There is nothing to
+	// unlock and therefore nothing sensible to do with a password.
+	if !doc.Locked() {
+		http.Error(w, "this document is not waiting for a password", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Trimmed the way the password file is read, so that a password which works
+	// typed in here is the same string that works pasted in there.
+	pw := strings.TrimSpace(r.PostFormValue("password"))
+
+	// A wrong password changes nothing at all: no file is written, no event is
+	// recorded, and the form comes back empty with a line above it.
+	wrong := func() { http.Redirect(w, r, docPath(doc.ID)+"?unlock=bad", http.StatusSeeOther) }
+
+	// Nothing typed. Not worth a qpdf run: the empty password is the one
+	// DecryptPDF always tries first, and this document is locked precisely
+	// because that already failed.
+	if pw == "" {
+		wrong()
+		return
+	}
+
+	orig, err := a.store.OriginalGlob(doc.ID)
+	if err != nil {
+		http.Error(w, "reading the original: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	which, err := a.tryPassword(r.Context(), orig, pw)
+	switch {
+	case errors.Is(err, errNoPassword):
+		wrong()
+		return
+	case err != nil:
+		// Not a wrong guess: qpdf missing, an unreadable original, a timeout.
+		// Those are the machine's problem and say so as themselves.
+		http.Error(w, "trying the password: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Position 0 is the empty password having opened the file, which means what
+	// the reader typed was never actually tested and must not be filed against
+	// this document. That cannot happen to a document that is locked — failing
+	// the empty password is how it became locked — but it is qpdf's answer that
+	// is believed here rather than the reasoning about it.
+	if which > 0 {
+		if err := a.rememberPassword(pw); err != nil {
+			http.Error(w, "saving the password: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := a.reprocess(r.Context(), doc); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.pipeline.EnqueueDoc(doc.ID); err != nil {
+		http.Error(w, "cannot reprocess: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// That it was unlocked, and nothing about what with. The document page and
+	// the journal both stop there.
+	a.record("unlocked", doc.ID, "", "")
+	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)
+}
+
+// tryPassword answers whether pw opens this document and nothing else. It runs
+// the very decryption the pipeline runs, against the same file, rather than
+// asking qpdf its own question in its own way: two ways of asking is two ways of
+// being wrong, and being wrong here files a password against a document it does
+// not open.
+//
+// The decrypted copy goes to a temp file beside the archive and is removed
+// immediately. What is wanted is the answer, not the file — the pipeline makes
+// that copy properly a moment later, from the original, with the password now in
+// hand.
+func (a *App) tryPassword(ctx context.Context, orig, pw string) (int, error) {
+	f, err := os.CreateTemp(a.store.ArchiveDir(), ".unlock-*.pdf")
+	if err != nil {
+		return -1, err
+	}
+	tmp := f.Name()
+	f.Close()
+	defer os.Remove(tmp)
+	return DecryptPDF(ctx, orig, tmp, []string{pw})
 }
 
 // handleDocEnrich re-runs just the metadata call, leaving OCR alone. Useful

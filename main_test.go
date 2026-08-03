@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -281,8 +282,10 @@ func TestExtensionTaxonomy(t *testing.T) {
 // other.
 func TestFilterFieldsRoundTrip(t *testing.T) {
 	want := Query{
-		Q: "oceanside", Tags: []string{"alta", "escrow"}, Status: StatusReady,
-		View: ViewTrash,
+		// The reserved tag is in the list rather than in a field of its own,
+		// which is the point: it survives the round trip because it is a tag,
+		// and nothing had to remember to carry it.
+		Q: "oceanside", Tags: []string{"alta", "escrow", TagTrash}, Status: StatusReady,
 		Sort: "created", Dir: "asc", Range: "custom", From: "2025-03", To: "2026-01",
 	}
 	p := page{Query: want}
@@ -300,7 +303,7 @@ func TestFilterFieldsRoundTrip(t *testing.T) {
 	for _, f := range p.FilterFields(false) {
 		names[f.Name] = true
 	}
-	for _, n := range []string{"q", "tag", "status", "view", "sort", "dir"} {
+	for _, n := range []string{"q", "tag", "status", "sort", "dir"} {
 		if !names[n] {
 			t.Errorf("FilterFields(false) dropped %q", n)
 		}
@@ -338,13 +341,13 @@ func TestIndexFormsCarrySortDirection(t *testing.T) {
 	}
 }
 
-// The view has to travel with the filters for the same reason the sort
+// The trash tag has to travel with the filters for the same reason the sort
 // direction does, but the consequence is worse: a form that dropped it would
-// answer "sort by document date" by moving you out of the trash and back to
-// All, which reads as the documents having been restored. parseQuery keeps it —
+// answer "sort by document date" by taking you out of the trash, which reads as
+// the documents having been restored. parseQuery keeps it —
 // TestFilterFieldsRoundTrip covers that — so what is left to check is that the
 // forms actually put it on the page.
-func TestIndexFormsCarryTheView(t *testing.T) {
+func TestIndexFormsCarryTheTrashTag(t *testing.T) {
 	a := &App{}
 	tpl, err := a.templates("index.html")
 	if err != nil {
@@ -352,7 +355,7 @@ func TestIndexFormsCarryTheView(t *testing.T) {
 	}
 	data := page{
 		Query: Query{
-			View: ViewTrash, Range: "custom", From: "2025-03", To: "2026-01",
+			Tags: []string{TagTrash}, Range: "custom", From: "2025-03", To: "2026-01",
 		},
 		Result: &Result{Facets: map[string][]FacetValue{}},
 	}
@@ -360,8 +363,13 @@ func TestIndexFormsCarryTheView(t *testing.T) {
 	if err := tpl.ExecuteTemplate(&buf, "layout", data); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(buf.String(), `name="view" value="trash"`); n != 3 {
-		t.Errorf("view hidden input appears %d time(s), want 3 (custom-range form, picker and search box)", n)
+	if n := strings.Count(buf.String(), `name="tag" value="trash"`); n != 3 {
+		t.Errorf("trash hidden input appears %d time(s), want 3 (custom-range form, picker and search box)", n)
+	}
+	// And it is not offered a second time among the ordinary tag pills, where
+	// its count would be of these results rather than of the archive.
+	if n := strings.Count(buf.String(), `class="pill-tag`); n != 1 {
+		t.Errorf("%d tag pills for one selected reserved tag, want just the reserved one", n)
 	}
 	// And the trash offers the two ways out of itself rather than the way in.
 	for _, want := range []string{`value="restore"`, `value="purge"`} {
@@ -437,7 +445,7 @@ func TestResultsBlockExecutesStandalone(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	data := page{
-		Query:  Query{Q: "oceanside", View: ViewTrash},
+		Query:  Query{Q: "oceanside", Tags: []string{TagTrash}},
 		Result: &Result{Found: 0, Facets: map[string][]FacetValue{}},
 	}
 	if err := tpl.ExecuteTemplate(&buf, "results", data); err != nil {
@@ -1075,6 +1083,174 @@ func TestIndexDerivesCreatedTimestamp(t *testing.T) {
 	}
 }
 
+// The reserved tags are derived rather than stored, so this is where they can
+// be wrong: a document whose state says one thing and whose index entry says
+// another. Locked and failed have to partition the failures — a document that
+// carried both would be counted twice and would sit in both piles of work —
+// and trash has to ride along with either, since a failed document can be
+// thrown away like any other.
+func TestReservedTagsDerivedFromState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		doc  Doc
+		want []string
+	}{
+		{"a ready document has none", Doc{Status: StatusReady}, nil},
+		{"a failure", Doc{Status: StatusFailed, FailedStage: "normalize"}, []string{TagFailed}},
+		{"a failure with no stage is still a failure", Doc{Status: StatusFailed}, []string{TagFailed}},
+		{"waiting for a password is locked and not failed",
+			Doc{Status: StatusFailed, FailedStage: stageDecrypt}, []string{TagLocked}},
+		{"trashed", Doc{Status: StatusReady, DeleteAfterTS: 1}, []string{TagTrash}},
+		{"trashed and failed carries both",
+			Doc{Status: StatusFailed, FailedStage: "ocr", DeleteAfterTS: 1}, []string{TagTrash, TagFailed}},
+		{"still processing is neither", Doc{Status: StatusProcessing}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := reservedTags(&tc.doc); !slices.Equal(got, tc.want) {
+				t.Errorf("reservedTags = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The index carries the derived tags and the sidecar never does, which is what
+// makes "filtering works just like tags" free. The stripping matters as much as
+// the appending: a sidecar written before any of this existed can hold a
+// literal "failed", and a document listing it twice would be one document
+// counted twice on the pill.
+func TestIndexCarriesReservedTagsAndOnlyOnce(t *testing.T) {
+	doc := &Doc{
+		Status: StatusFailed, FailedStage: stageDecrypt,
+		Tags: []string{"statement", TagFailed, TagTrash},
+	}
+	got, _ := tsDoc(doc)["tags"].([]string)
+	want := []string{"statement", TagLocked}
+	if !slices.Equal(got, want) {
+		t.Errorf("indexed tags = %q, want %q", got, want)
+	}
+	// And the document itself is untouched: this is a rendering of it, not an
+	// edit to it, and the sidecar is written from the same value.
+	if len(doc.Tags) != 3 {
+		t.Errorf("tsDoc rewrote the document's own tags to %q", doc.Tags)
+	}
+	// A Doc read back out of the index has to mean what its sidecar means, or
+	// the tag box on the document page would offer to save what it was shown.
+	back := docFromMap(map[string]any{"id": "1", "tags": []any{"statement", TagLocked}})
+	if !slices.Equal(back.Tags, []string{"statement"}) {
+		t.Errorf("tags read back from the index = %q, want the sidecar's own", back.Tags)
+	}
+}
+
+// Trash is the one reserved tag that is more than a tag: it is excluded unless
+// it is asked for, and that rule lives in the filter every caller's request is
+// built through rather than in the callers.
+func TestTrashIsHiddenUnlessItsTagIsSelected(t *testing.T) {
+	var asked []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Query().Get("filter_by"))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"found":0,"page":1,"hits":[]}`)
+	}))
+	defer ts.Close()
+
+	s := NewSearch(ts.URL, "test-key", "documents")
+	for _, q := range []Query{{}, {Tags: []string{"alta"}}, {Tags: []string{TagTrash}}, {Status: StatusFailed}} {
+		if _, err := s.Query(context.Background(), q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{
+		`delete_after_ts:=0`,
+		`delete_after_ts:=0 && tags:="alta"`,
+		`delete_after_ts:>0 && tags:="trash"`,
+		`delete_after_ts:=0 && status:="failed"`,
+	}
+	if !slices.Equal(asked, want) {
+		t.Errorf("filters sent:\n got %q\nwant %q", asked, want)
+	}
+}
+
+// Nobody outside the derivation may allocate one of these names, so every list
+// arriving from outside is stripped. The model's is the interesting one: it is
+// shown the tags already in use, that list is a facet count of the index, and
+// the index is now full of reserved names.
+func TestReservedTagsCannotBeSelfAllocated(t *testing.T) {
+	if got := withoutReserved([]string{"trash", "statement", "locked", "failed", "needs-review"}); !slices.Equal(got, []string{"statement", "needs-review"}) {
+		t.Errorf("withoutReserved kept %q", got)
+	}
+	// The caller's slice is left alone: these lists belong to documents.
+	in := []string{"trash", "statement"}
+	withoutReserved(in)
+	if !slices.Equal(in, []string{"trash", "statement"}) {
+		t.Errorf("withoutReserved edited the list it was given: %q", in)
+	}
+}
+
+// The pills lead the tag row with counts of the archive, and the ordinary pills
+// and the browse panel must not offer the same names a second time with counts
+// of the results.
+func TestReservedPillsAreSeparateFromTheTagPills(t *testing.T) {
+	p := page{
+		Query:    Query{Tags: []string{TagTrash, "alta"}},
+		Reserved: ReservedCounts{Locked: 2, Trash: 9},
+		Result: &Result{Facets: map[string][]FacetValue{
+			"tags": {{Value: "alta", Count: 4}, {Value: TagTrash, Count: 9}, {Value: TagFailed, Count: 1}},
+		}},
+	}
+
+	var got []string
+	for _, r := range p.ReservedPills() {
+		got = append(got, fmt.Sprintf("%s/%d/%t", r.Tag, r.Count, r.On))
+	}
+	// Failed has no documents and is not selected, so it is not offered; trash
+	// is selected and locked has documents, so both are.
+	if want := []string{"locked/2/false", "trash/9/true"}; !slices.Equal(got, want) {
+		t.Errorf("pills = %q, want %q", got, want)
+	}
+
+	for _, f := range p.TagFacets() {
+		if isReserved(f.Value) {
+			t.Errorf("the tag browser offers %q, which has its own pill", f.Value)
+		}
+	}
+	for _, f := range p.TopTags() {
+		if isReserved(f.Value) {
+			t.Errorf("the tag pills offer %q, which has its own pill", f.Value)
+		}
+	}
+	// Called twice on purpose: the facets are filtered by a delete that writes
+	// through to the slice it is given, so a second render must see the same
+	// list rather than the wreckage of the first.
+	if a, b := len(p.TagFacets()), len(p.TagFacets()); a != b || a != 1 {
+		t.Errorf("TagFacets gave %d values then %d, want 1 both times", a, b)
+	}
+}
+
+// Clear takes away the tags it stands among — reserved ones included, since
+// they are tags — and leaves the date window alone. That last part was a
+// deliberate fix: reaching for the tags you had and losing the months you had
+// chosen with them is a worse surprise than an extra click.
+func TestClearTagsDropsReservedTagsButNotTheDate(t *testing.T) {
+	u, err := url.Parse("/?q=oceanside&tag=trash&tag=alta&range=custom&from_y=2025&from_m=03&to_y=2026&to_m=01&page=3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parseQuery(mustParseQuery(t, (page{URL: u}).ClearTags()))
+	want := Query{Q: "oceanside", Range: "custom", From: "2025-03", To: "2026-01"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("after Clear:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+func mustParseQuery(t *testing.T, rawurl string) url.Values {
+	t.Helper()
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		t.Fatalf("parsing %q: %v", rawurl, err)
+	}
+	return u.Query()
+}
+
 // The payload caps are measured in bytes on purpose, but a byte cut through a
 // multi-byte character produces a string that is not valid UTF-8, and everything
 // downstream of these caps quietly rewrites the broken bytes to U+FFFD rather
@@ -1678,7 +1854,7 @@ func TestSearchBoxCarriesTheFilters(t *testing.T) {
 	}
 	data := page{
 		Query: Query{
-			Q: "oceanside", Tags: []string{"alta"}, Status: StatusReady, View: ViewTrash,
+			Q: "oceanside", Tags: []string{"alta", TagTrash}, Status: StatusReady,
 			Sort: "created", Dir: "asc", Range: "custom", From: "2025-03", To: "2026-01",
 		},
 		Result: &Result{Facets: map[string][]FacetValue{}},
@@ -1704,7 +1880,7 @@ func TestSearchBoxCarriesTheFilters(t *testing.T) {
 	for _, want := range []string{
 		`name="tag" value="alta"`,
 		`name="status" value="` + StatusReady + `"`,
-		`name="view" value="` + ViewTrash + `"`,
+		`name="tag" value="` + TagTrash + `"`,
 		`name="sort" value="created"`,
 		`name="dir" value="asc"`,
 		`name="range" value="custom"`,
@@ -1729,8 +1905,7 @@ func TestSearchBoxCarriesTheFilters(t *testing.T) {
 // read them back.
 func TestSearchBoxFieldsRoundTrip(t *testing.T) {
 	want := Query{
-		Q: "oceanside", Tags: []string{"alta", "escrow"}, Status: StatusReady,
-		View: ViewTrash,
+		Q: "oceanside", Tags: []string{"alta", "escrow", TagTrash}, Status: StatusReady,
 		Sort: "created", Dir: "asc", Range: "custom", From: "2025-03", To: "2026-01",
 	}
 
@@ -1801,8 +1976,10 @@ func TestResultsCarriesTheTagRegions(t *testing.T) {
 		"<html", "<head", "<body", "topbar", "searchbox", "filterbar", "<form",
 		// The two things the reader sets by hand, which a swap must not touch.
 		`id="tags-open"`, "tag-filter",
-		// The archive-wide counts, which do not move with the search text.
-		"seg views",
+		// The reserved pills, whose counts are of the archive and do not move
+		// with the search text — a swap that carried them would put them back
+		// with no counts at all.
+		"pill-reserved",
 	} {
 		if strings.Contains(body, unwanted) {
 			t.Errorf("the fragment contains %q, which belongs to the page around it:\n%s", unwanted, body)
@@ -2437,5 +2614,146 @@ func TestPasswordFileDefaultsIntoTheArchive(t *testing.T) {
 	elsewhere := filepath.Join(t.TempDir(), ".docovia-passwords")
 	if got := resolvePasswordFile(elsewhere, s); got != elsewhere {
 		t.Errorf("with -pdf-passwords %q the file is %q, want the flag to win", elsewhere, got)
+	}
+}
+
+// A password proved against a real document is written into the file that
+// exists to hold it, and the file is not ours alone: someone maintains it by
+// hand, with comments saying which password belongs to which bank. So it is
+// appended to and never rewritten, a password already in it is not filed a
+// second time, and a file left ending mid-line does not have the new password
+// spliced onto the end of the old one — which would take both out of service
+// and be all but invisible in a file nobody wants to open and read.
+func TestRememberPasswordAppendsWithoutDisturbingTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passwords")
+	a := &App{cfg: Config{PasswordFile: path}}
+
+	// A file that does not exist yet is the ordinary case on a machine that has
+	// only just met an encrypted document.
+	if err := a.rememberPassword("first-one"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := st.Mode().Perm(); mode&0o077 != 0 {
+		t.Errorf("the password file was created mode %#o, readable beyond this user", mode)
+	}
+
+	// Hand-edited afterwards, comment and all, and left without a final
+	// newline the way an editor that does not add one leaves it.
+	if err := os.WriteFile(path, []byte("first-one\n# the second bank\nsecond-one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Already there: nothing to do, and in particular nothing to write.
+	if err := a.rememberPassword("second-one"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "first-one\n# the second bank\nsecond-one" {
+		t.Errorf("a password already in the file changed it to %q", got)
+	}
+	if err := a.rememberPassword("third-one"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "first-one\n# the second bank\nsecond-one\nthird-one\n"; string(got) != want {
+		t.Errorf("password file is\n%q\nwant\n%q", got, want)
+	}
+	// The comment is still there: this is somebody's file.
+	if !strings.Contains(string(got), "# the second bank") {
+		t.Error("the append rewrote the file and lost what was written in it by hand")
+	}
+
+	// And the pipeline can see all of it without a restart, which is the point
+	// of writing it to memory as well.
+	if want := []string{"first-one", "second-one", "third-one"}; !slices.Equal(a.passwords(), want) {
+		t.Errorf("in memory: %q, want %q", a.passwords(), want)
+	}
+	// The copy handed out is the caller's own: appending to it must not reach
+	// back into the list a pipeline worker is about to read.
+	a.passwords()[0] = "not-a-password"
+	if want := []string{"first-one", "second-one", "third-one"}; !slices.Equal(a.passwords(), want) {
+		t.Errorf("a caller writing to what passwords() returned changed the list itself: %q", a.passwords())
+	}
+}
+
+// The unlock form's two refusals, which are the whole of what it does when it
+// does not work. Neither reaches Typesense: a request that is not going to
+// change anything must not need the index to say so.
+//
+// The wrong password is the one to get right. Nothing is written — not the
+// password file, not the sidecar — and the answer carries no trace of what was
+// typed, because the reader's next act is to try again and the one before it
+// may have been to paste the right password into the wrong document.
+func TestUnlockRefusesWhatItCannotUse(t *testing.T) {
+	const pw = "MRJN0412-open"
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := encryptPDF(t, testPDF(t, dir, "plain", "Interest certificate"),
+		s.OriginalPath(1, ".pdf"), pw, "owner-only")
+
+	a := &App{cfg: Config{PasswordFile: s.PasswordsPath()}, store: s}
+	mux := http.NewServeMux()
+	a.routes(mux)
+
+	post := func(id int, password string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", fmt.Sprintf("/doc/%d/unlock", id),
+			strings.NewReader(url.Values{"password": {password}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// A document that is not waiting for a password has no use for one, so the
+	// form has no meaning on it — a stale tab, or a hand-made request.
+	if err := s.Save(&Doc{ID: 1, Status: StatusFailed, FailedStage: "ocr", OriginalExt: ".pdf"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := post(1, pw).Code; got != http.StatusBadRequest {
+		t.Errorf("unlocking a document that failed at ocr = %d, want %d", got, http.StatusBadRequest)
+	}
+
+	if err := s.Save(&Doc{ID: 1, Status: StatusFailed, FailedStage: stageDecrypt, OriginalExt: ".pdf"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, guess := range []string{"", "not-the-one"} {
+		rec := post(1, guess)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("a wrong password answered %d, want a redirect back to the form:\n%s", rec.Code, rec.Body)
+		}
+		if got, want := rec.Header().Get("Location"), "/doc/1?unlock=bad"; got != want {
+			t.Errorf("redirected to %q, want %q", got, want)
+		}
+		if guess != "" && strings.Contains(rec.Header().Get("Location")+rec.Body.String(), guess) {
+			t.Error("the answer to a wrong password contains the password")
+		}
+		if _, err := os.Stat(s.PasswordsPath()); !os.IsNotExist(err) {
+			t.Fatalf("a wrong password wrote to the password file")
+		}
+		if doc, err := s.Load(1); err != nil || doc.Status != StatusFailed {
+			t.Errorf("a wrong password changed the document to %+v", doc)
+		}
+	}
+
+	// Nothing left behind in the archive directory either: the copy qpdf writes
+	// while the password is being tried is the answer, not a file.
+	entries, err := os.ReadDir(s.ArchiveDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("trying passwords left %d file(s) in the archive directory", len(entries))
+	}
+	// And the original is untouched, which is what makes trying again free.
+	if PDFEncryption(context.Background(), locked) != pdfLocked {
+		t.Error("trying a password rewrote the original")
 	}
 }

@@ -525,11 +525,15 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	}
 
 	known, _ := q.app.search.Vocabulary(ctx, "tags", 50)
+	// The vocabulary is a facet count of the index, which now carries the
+	// reserved names as well — so the list of tags already in use has to be
+	// filtered before it becomes the list of tags on offer. A model shown
+	// "trash" as an existing tag will eventually use it.
 	meta, used, err := q.app.enricher.Enrich(ctx, EnrichInput{
-		Filename: doc.OriginalName, Text: doc.Content, KnownTags: known,
+		Filename: doc.OriginalName, Text: doc.Content, KnownTags: withoutReserved(known),
 		// needs-review is ours, not a description of the document; offering it
 		// back would invite the model to keep it forever.
-		CurrentTags: withoutTag(doc.Tags, TagNeedsReview),
+		CurrentTags: withoutTags(doc.Tags, TagNeedsReview),
 	})
 	// Whatever the outcome, tokens the model actually billed belong to this
 	// document — a failed parse still cost money.
@@ -561,8 +565,11 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	if meta.CreatedDate != "" {
 		doc.CreatedDate = meta.CreatedDate
 	}
-	if len(meta.Tags) > 0 {
-		doc.Tags = meta.Tags
+	// The model is never shown a reserved name, but what it returns is not a
+	// promise. Filtered before the length is tested, so a reply made entirely of
+	// names it may not use leaves the tags it had rather than emptying them.
+	if tags := withoutReserved(meta.Tags); len(tags) > 0 {
+		doc.Tags = tags
 	}
 	doc.Enriched = true
 	doc.EnrichedTS = time.Now().Unix()
@@ -616,13 +623,6 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-time.After(d):
 		return true
 	}
-}
-
-// withoutTag copies the list minus one entry, leaving the caller's slice
-// alone — the document's own tags must not change just because we described
-// them to the model.
-func withoutTag(tags []string, drop string) []string {
-	return slices.DeleteFunc(slices.Clone(tags), func(t string) bool { return t == drop })
 }
 
 func appendTag(tags []string, t string) []string {

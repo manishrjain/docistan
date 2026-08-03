@@ -94,11 +94,12 @@
         </div>
       </div>
 
-      {{if ne $d.Status "ready"}}
-        <p class="banner {{$d.Status}}">
-          {{$d.Status}}{{if $d.FailedStage}} at {{$d.FailedStage}}{{end}}
-          {{if $d.Error}}<small>{{$d.Error}}</small>{{end}}
-        </p>
+      {{/* A failure is not a banner among banners: it is the state of the
+           document and it usually wants something done about it, so it has a
+           box of its own at the head of the timeline below. What is left here
+           is the document that is merely still working. */}}
+      {{if and (ne $d.Status "ready") (ne $d.Status "failed")}}
+        <p class="banner {{$d.Status}}">{{$d.Status}}</p>
       {{end}}
       {{if $d.Trashed}}
         {{/* The date rather than "in the trash": what someone needs to know
@@ -118,9 +119,6 @@
         {{else}}
           <p class="banner info">Password-protected when it arrived — the password has been taken off, so both the original and the archive copy now open without one. The recorded checksum still describes the encrypted file that was sent.</p>
         {{end}}
-      {{end}}
-      {{if .Search}}
-        <p class="searching">Jumped to <strong>{{.Search}}</strong> in the document · <a href="/doc/{{$d.ID}}">clear</a></p>
       {{end}}
 
       <form class="doc-form" method="post" action="/doc/{{$d.ID}}">
@@ -162,6 +160,35 @@
 
       <hr class="hr">
       <h6>Naturalization</h6>
+
+      {{/* Why the timeline stops where it does, said before the timeline
+           rather than after it. The whole message, not the clipped one the
+           result row carries: this is the page someone opens *because* the row
+           did not tell them enough. */}}
+      {{if eq $d.Status "failed"}}
+        <div class="fail-box">
+          <h5>{{if $d.Locked}}Password required{{else}}Processing failed{{end}}</h5>
+          <p>{{if $d.Error}}{{$d.Error}}{{else}}{{$d.FailReason}}{{end}}</p>
+
+          {{if $d.Locked}}
+            {{/* A plain POST form, like every other action on this page, so it
+                 works with scripting off; doc.js only swaps the button's label
+                 while the request is out. The field is never given a value —
+                 not even on the way back from a wrong guess. */}}
+            <form class="unlock" method="post" action="/doc/{{$d.ID}}/unlock">
+              <input type="password" name="password" class="input" placeholder="Document password"
+                     aria-label="Document password" autocomplete="off">
+              {{if .UnlockFailed}}
+                <div class="unlock-bad">That password didn't work. Try again.</div>
+              {{end}}
+              <div class="unlock-actions">
+                <button type="submit" class="btn btn-primary">Unlock and process</button>
+              </div>
+            </form>
+          {{end}}
+        </div>
+      {{end}}
+
       <ul class="timeline">
         {{range .Stages}}
           <li class="{{.State}}" data-stage="{{.Key}}">
