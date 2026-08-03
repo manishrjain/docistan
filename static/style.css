@@ -387,6 +387,12 @@ main {
   letter-spacing: 0.1em;
 }
 
+/* The pills are replaced as a group when the results change, so they need an
+   element around them — and display:contents leaves them flex items of the row
+   they were laid out in before that element existed, wrapping with the label
+   and against the same edge. */
+.tag-pills { display: contents; }
+
 /* One pill shape, three states: idle, selected, and the dashed affordances
    that are actions rather than filters. */
 .pill-tag {
@@ -1461,7 +1467,7 @@ button.pill-plain {
   /* The sheet shows the whole vocabulary rather than six of it behind a
      "more" control: there is room here, and scanning a list beats guessing
      which six a popover chose. The pills and that control both go. */
-  .filter-tags > .pill-tag:not(.browse-more),
+  .tag-pills > .pill-tag:not(.browse-more),
   .browse-more { display: none; }
 
   /* No popover to position against inside a scrolling sheet, so the panel

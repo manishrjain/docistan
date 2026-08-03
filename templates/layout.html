@@ -26,6 +26,17 @@
 <header class="topbar">
   <a class="brand" href="/">Docistan</a>
   <form class="searchbox" action="/" method="get" role="search">
+    {{/* Everything the box does not itself edit, so searching from a filtered
+         page searches that filter rather than the whole archive. Without these
+         a submit posted the term alone, and the tag, the status, the dates, the
+         sort and the view all fell off — and since search.js builds its request
+         from this form's FormData, typing lost them the same way. q is not in
+         the list: the input below carries it, and a second one would post the
+         name twice.
+
+         The layout is shared with the document, status and upload pages, where
+         there is no query to carry and this renders nothing. */}}
+    {{range .SearchBoxFields}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">{{end}}
     <span class="glyph" aria-hidden="true">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
     </span>

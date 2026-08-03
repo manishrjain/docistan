@@ -35,35 +35,29 @@
 
     <div class="filter-tags">
       <span class="micro">Tags</span>
-      {{range $page.TopTags}}
-        <a class="pill-tag{{if $page.TagOn .Value}} on{{end}}" href="{{$page.ToggleTag .Value}}"
-          >{{.Value}}{{if .Count}}<span class="n">{{.Count}}</span>{{end}}</a>
-      {{end}}
+
+      {{/* The pills come before the checkbox and stay out of the panel, which
+           is what lets search-as-you-type swap them: #tags-open holds whether
+           the popover is open and the CSS finds the panel as its later
+           sibling, so a swap that took either with it would shut the panel
+           under the reader's hands. The checkbox is offscreen and weightless,
+           so having markup on both sides of it costs no layout. */}}
+      {{template "tagpills" $page}}
 
       {{/* Another checkbox rather than <details>: on a wide screen the panel
            is a popover this opens, and in the narrow sheet the CSS shows it
            unconditionally and never reads the checkbox. One markup, two
-           behaviours, no script needed for either. */}}
+           behaviours, no script needed for either. The "+ N more" label above
+           opens it by id, so it does not have to sit next to it. */}}
       <input type="checkbox" id="tags-open" class="browse-toggle">
-      {{if $page.MoreTags}}
-        <label class="pill-tag pill-dashed browse-more" for="tags-open">+ {{$page.MoreTags}} more</label>
-      {{end}}
-
-      {{if $page.HasFilters}}
-        <a class="pill-plain" href="{{$page.ClearFilters}}">Clear</a>
-      {{end}}
 
       {{/* Always rendered, so the sheet has the whole vocabulary to show even
            when there are too few tags for a "more" control to exist. */}}
       <div class="tag-browse-panel">
+        {{/* Outside the swapped region on purpose: this is what the reader has
+             typed, and replacing it would empty it mid-word. */}}
         <input type="search" class="tag-filter" placeholder="Search tags…" aria-label="Search tags" hidden>
-        <div class="tag-browse-list">
-          {{range $page.TagFacets}}
-            <a{{if $page.TagOn .Value}} class="on"{{end}} href="{{$page.ToggleTag .Value}}" data-tag="{{.Value}}"
-              ><span>{{if $page.TagOn .Value}}✓ {{end}}{{.Value}}</span><span class="n">{{.Count}}</span></a>
-          {{end}}
-        </div>
-        <p class="tag-browse-foot">{{len $page.TagFacets}} tags in these results</p>
+        {{template "tagbrowse" $page}}
       </div>
     </div>
 
@@ -126,20 +120,72 @@
        own for search-as-you-type; the form element stays out here so the node
        search.js swaps into survives every swap. aria-live announces the new
        count; there is no spinner. */}}
-  <form class="picker" method="post" action="/download" aria-live="polite">
+  <form class="picker" id="results" method="post" action="/download" aria-live="polite">
     {{template "results" .}}
   </form>
 </main>
 {{end}}
 
+{{/* The regions that move with the search text, which is what GET /results
+     returns and what search.js swaps in. Each is rendered here from the same
+     block the page uses, so the two renderings cannot drift; the ids are how
+     the browser pairs an incoming region with the one already on screen.
+
+     Contents are swapped, not nodes. The rows live inside a <form> the page
+     owns and Download submits, and the tag regions sit either side of the
+     checkbox holding the popover open — replacing any of those elements
+     themselves is exactly what this arrangement exists to avoid. */}}
+{{define "regions"}}
+<div id="results">{{template "results" .}}</div>
+{{template "tagpills" .}}
+{{template "tagbrowse" .}}
+{{end}}
+
+{{/* The pills and their counts. They narrow with the result set, so they are
+     swapped as one group: which six tags lead, what each is up to, whether
+     there is still a "+ N more" behind them and whether anything is left to
+     clear are all answers to the same query. */}}
+{{define "tagpills"}}
+<div class="tag-pills" id="tag-pills">{{$page := .}}
+  {{range $page.TopTags}}
+    <a class="pill-tag{{if $page.TagOn .Value}} on{{end}}" href="{{$page.ToggleTag .Value}}"
+      >{{.Value}}{{if .Count}}<span class="n">{{.Count}}</span>{{end}}</a>
+  {{end}}
+
+  {{if $page.MoreTags}}
+    <label class="pill-tag pill-dashed browse-more" for="tags-open">+ {{$page.MoreTags}} more</label>
+  {{end}}
+
+  {{if $page.HasFilters}}
+    <a class="pill-plain" href="{{$page.ClearFilters}}">Clear</a>
+  {{end}}
+</div>
+{{end}}
+
+{{/* The whole vocabulary of the current results, and the count under it. Also
+     swapped — a browser offering tags that lead nowhere is the same staleness
+     as a pill with the wrong number on it. filters.js re-reads these links
+     afterwards, since the ones it was holding are no longer on the page. */}}
+{{define "tagbrowse"}}
+<div id="tag-browse">{{$page := .}}
+  <div class="tag-browse-list">
+    {{range $page.TagFacets}}
+      <a{{if $page.TagOn .Value}} class="on"{{end}} href="{{$page.ToggleTag .Value}}" data-tag="{{.Value}}"
+        ><span>{{if $page.TagOn .Value}}✓ {{end}}{{.Value}}</span><span class="n">{{.Count}}</span></a>
+    {{end}}
+  </div>
+  <p class="tag-browse-foot">{{len $page.TagFacets}} tags in these results</p>
+</div>
+{{end}}
+
 {{/* Everything the results are: the filters carried through a submit, the
      count and the bulk actions, the rows, and the pager. Rendered inside the
-     page by the block above and on its own by GET /results.
+     page by the block above and alongside the tag regions by GET /results.
 
-     Deliberately not in here: the filter bar. Its tag facets do narrow with
-     the query, but swapping it mid-typing would shut an open tag-browse panel
-     or the mobile filter sheet under the reader's hands. The facets settle on
-     a real navigation — a tag click, or Enter. */}}
+     Deliberately not in here: the rest of the filter bar. The two checkboxes
+     hold whether the tag popover and the mobile filter sheet are open, and the
+     view counts and the date options do not move with the search text at all.
+     Only the tags do, and they are blocks of their own further down. */}}
 {{define "results"}}
   {{$page := .}}
     {{/* The dates too: "download everything matching" has to mean the filter

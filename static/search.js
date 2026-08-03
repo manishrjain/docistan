@@ -3,22 +3,27 @@
 // already; all that stood between the reader and it was pressing Enter and
 // waiting for a page.
 //
-// The server renders the results region and this swaps it in. Nothing here
-// builds a row: the snippets are marked up by the server, which escapes the
-// document text before it turns the markers into <mark>, and a second copy of
-// that in JavaScript is the one place this feature could become an XSS hole.
+// The server renders the regions that move with the search text and this swaps
+// them in. Nothing here builds a row: the snippets are marked up by the server,
+// which escapes the document text before it turns the markers into <mark>, and
+// a second copy of that in JavaScript is the one place this feature could
+// become an XSS hole.
 //
 // Enter still submits the form and navigates for real, so the box works with
-// scripting off — and so the filter bar, which this never swaps, gets its
-// facets recounted.
+// scripting off.
 
 document.addEventListener("DOMContentLoaded", () => {
   const form = document.querySelector("form.searchbox");
   const input = form?.querySelector('input[name="q"]');
-  // The results region is the picker form's contents; the form node itself is
-  // rendered by the page around the swapped block, so it survives every swap
-  // and stays the thing Download submits.
-  const region = document.querySelector("form.picker");
+  // What /results answers with, by the id each region carries in the page as
+  // well. Contents are replaced, never the elements: #results is the picker
+  // <form> the page renders around the rows and Download submits, and the two
+  // tag regions sit either side of #tags-open, the checkbox that holds the
+  // popover open — replacing any of those nodes is the whole thing this is
+  // arranged to avoid. The date controls and the view counts are not here:
+  // neither moves with what is typed.
+  const regions = ["results", "tag-pills", "tag-browse"];
+  const region = document.getElementById("results");
   // The search box is in the shared topbar and so appears on pages with no
   // results to swap. There, Enter and a full navigation are all there is.
   if (!form || !input || !region) return;
@@ -52,10 +57,23 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!res.ok || ctl.signal.aborted) return;
       const html = await res.text();
       if (ctl.signal.aborted) return;
-      region.innerHTML = html;
+      // Parsed rather than assigned: the response is several regions, and each
+      // one has to reach the element it belongs to. A document built here is
+      // inert — its scripts do not run and nothing in it loads — so this costs
+      // one parse and no requests.
+      const next = new DOMParser().parseFromString(html, "text/html");
+      for (const id of regions) {
+        const src = next.getElementById(id);
+        const dst = document.getElementById(id);
+        if (src && dst) dst.innerHTML = src.innerHTML;
+      }
       // The checkboxes on screen are new nodes, so the running count and the
       // select-all have to be worked out again from them.
       document.dispatchEvent(new CustomEvent("picker:refresh"));
+      // And the tag links filters.js was holding are gone, so what the reader
+      // typed into the tag search has to be applied to the ones that replaced
+      // them.
+      document.dispatchEvent(new CustomEvent("tags:refresh"));
     } catch {
       // An abort, or a request that failed. Either way the results already on
       // screen stay: being one keystroke behind beats an empty page.

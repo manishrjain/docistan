@@ -807,6 +807,21 @@ func (p page) FilterFields(withDates bool) []Field {
 	return out
 }
 
+// SearchBoxFields is the same list for the search box, which owns q: the
+// visible input carries the term, so a hidden input for it as well would post
+// the name twice and leave the word being typed arguing with the word that was
+// already there. Everything else rides along, dates included — the box edits
+// none of it — and search.js builds its request out of this form's own
+// FormData, so typing and pressing Enter cannot come to mean different
+// searches.
+//
+// A method of its own rather than a second boolean on FilterFields: three forms
+// on the index post the filters now, and FilterFields(true, false) at a call
+// site says nothing about which of them is which.
+func (p page) SearchBoxFields() []Field {
+	return slices.DeleteFunc(p.FilterFields(true), func(f Field) bool { return f.Name == "q" })
+}
+
 // parseQuery reads a search out of URL or form values. The download posts the
 // same names the index reads, so one parser serves both and a filter cannot
 // mean one thing on screen and another in the zip.
@@ -888,12 +903,18 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleResults renders the results region and nothing else, for search as you
-// type. The rows carry marked-up snippets, tag pills that are filter links and
-// selection state; rebuilding those in JavaScript would mean a second copy of
-// the rendering and — worse — a second copy of the highlight escaping, which is
-// what keeps document text out of the page's markup. So the server renders the
-// same block it renders inside the page, and the browser swaps it in.
+// handleResults renders the regions that move with the search text and nothing
+// else, for search as you type. The rows carry marked-up snippets, tag pills
+// that are filter links and selection state; rebuilding those in JavaScript
+// would mean a second copy of the rendering and — worse — a second copy of the
+// highlight escaping, which is what keeps document text out of the page's
+// markup. So the server renders the same blocks it renders inside the page, and
+// the browser swaps them in.
+//
+// The tag facets are among those regions. They narrow with the result set and
+// arrive on this very response — Typesense counts them alongside the hits — so
+// leaving them out was leaving counts on screen for a result set that had been
+// replaced, at the cost of nothing saved.
 //
 // Everything about the query is read by parseQuery and built into a page
 // exactly as handleIndex does it, so the two cannot come to disagree about what
@@ -914,15 +935,15 @@ func (a *App) handleResults(w http.ResponseWriter, r *http.Request) {
 	}
 	// No ViewCounts: those three counts are of the whole archive and do not
 	// move with the search text, so asking for them on every keystroke would be
-	// three round trips spent to render the same numbers the filter bar is
-	// already showing — and this response does not contain that bar.
+	// three round trips spent to render the same numbers the segmented control
+	// is already showing — and that control is not one of the regions below.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := tpl.ExecuteTemplate(w, "results", page{
+	if err := tpl.ExecuteTemplate(w, "regions", page{
 		Query:  q,
 		Result: res,
 		URL:    r.URL,
 	}); err != nil {
-		logf("render results: %v", err)
+		logf("render regions: %v", err)
 	}
 }
 

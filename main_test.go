@@ -313,7 +313,7 @@ func TestFilterFieldsRoundTrip(t *testing.T) {
 }
 
 // The omission was in the template rather than in any helper, so this renders
-// the real page and looks for the input on both forms.
+// the real page and looks for the input on every form that posts the filters.
 func TestIndexFormsCarrySortDirection(t *testing.T) {
 	a := &App{}
 	tpl, err := a.templates("index.html")
@@ -331,9 +331,10 @@ func TestIndexFormsCarrySortDirection(t *testing.T) {
 	if err := tpl.ExecuteTemplate(&buf, "layout", data); err != nil {
 		t.Fatal(err)
 	}
-	// Once in the custom-range form, once in the download picker.
-	if n := strings.Count(buf.String(), `name="dir" value="asc"`); n != 2 {
-		t.Errorf("dir hidden input appears %d time(s), want 2 (custom-range form and picker)", n)
+	// Once in the custom-range form, once in the download picker, once in the
+	// search box.
+	if n := strings.Count(buf.String(), `name="dir" value="asc"`); n != 3 {
+		t.Errorf("dir hidden input appears %d time(s), want 3 (custom-range form, picker and search box)", n)
 	}
 }
 
@@ -341,7 +342,7 @@ func TestIndexFormsCarrySortDirection(t *testing.T) {
 // direction does, but the consequence is worse: a form that dropped it would
 // answer "sort by document date" by moving you out of the trash and back to
 // All, which reads as the documents having been restored. parseQuery keeps it —
-// TestFilterFieldsRoundTrip covers that — so what is left to check is that both
+// TestFilterFieldsRoundTrip covers that — so what is left to check is that the
 // forms actually put it on the page.
 func TestIndexFormsCarryTheView(t *testing.T) {
 	a := &App{}
@@ -359,8 +360,8 @@ func TestIndexFormsCarryTheView(t *testing.T) {
 	if err := tpl.ExecuteTemplate(&buf, "layout", data); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(buf.String(), `name="view" value="trash"`); n != 2 {
-		t.Errorf("view hidden input appears %d time(s), want 2 (custom-range form and picker)", n)
+	if n := strings.Count(buf.String(), `name="view" value="trash"`); n != 3 {
+		t.Errorf("view hidden input appears %d time(s), want 3 (custom-range form, picker and search box)", n)
 	}
 	// And the trash offers the two ways out of itself rather than the way in.
 	for _, want := range []string{`value="restore"`, `value="purge"`} {
@@ -1653,5 +1654,158 @@ func TestDeleteLeavesATombstoneThatKeepsTheIdentity(t *testing.T) {
 	}
 	if !bytes.Contains(b, []byte(`"status": "`+StatusDeleted+`"`)) {
 		t.Errorf("the sidecar on disk does not record the deletion:\n%s", b)
+	}
+}
+
+// The search box posts a form, and a form posts what is inside it — which was
+// the term and nothing else. So searching from a filtered page searched the
+// whole archive instead: /?tag=statement narrowed to three documents, and
+// typing a word into the box turned that into every document in the archive
+// containing it. The fix is hidden inputs, and it fixes search-as-you-type at
+// the same time, since search.js builds its request out of this form's own
+// FormData rather than out of a list of its own.
+//
+// q is the trap. The visible input carries it — it is the one field this form
+// exists to edit — so a hidden input for it as well would post the name twice
+// and send the word being typed alongside the word that was already there,
+// where parseQuery reads the first of the two and the reader's keystrokes go
+// nowhere.
+func TestSearchBoxCarriesTheFilters(t *testing.T) {
+	a := &App{}
+	tpl, err := a.templates("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := page{
+		Query: Query{
+			Q: "oceanside", Tags: []string{"alta"}, Status: StatusReady, View: ViewTrash,
+			Sort: "created", Dir: "asc", Range: "custom", From: "2025-03", To: "2026-01",
+		},
+		Result: &Result{Facets: map[string][]FacetValue{}},
+	}
+	var buf bytes.Buffer
+	if err := tpl.ExecuteTemplate(&buf, "layout", data); err != nil {
+		t.Fatal(err)
+	}
+	// The search form alone. The picker and the custom-range form post these
+	// same names, so a match found anywhere on the page would say nothing about
+	// the form under test.
+	body := buf.String()
+	i := strings.Index(body, `<form class="searchbox"`)
+	if i < 0 {
+		t.Fatal("there is no search form on the index")
+	}
+	j := strings.Index(body[i:], "</form>")
+	if j < 0 {
+		t.Fatal("the search form is never closed")
+	}
+	box := body[i : i+j]
+
+	for _, want := range []string{
+		`name="tag" value="alta"`,
+		`name="status" value="` + StatusReady + `"`,
+		`name="view" value="` + ViewTrash + `"`,
+		`name="sort" value="created"`,
+		`name="dir" value="asc"`,
+		`name="range" value="custom"`,
+		`name="from_y" value="2025"`,
+		`name="from_m" value="03"`,
+		`name="to_y" value="2026"`,
+		`name="to_m" value="01"`,
+	} {
+		if !strings.Contains(box, want) {
+			t.Errorf("the search box drops %s, so a search from a filtered page is a search of the archive:\n%s", want, box)
+		}
+	}
+	if n := strings.Count(box, `name="q"`); n != 1 {
+		t.Errorf("the search box has %d inputs named q, want exactly the visible one:\n%s", n, box)
+	}
+}
+
+// The round trip TestFilterFieldsRoundTrip makes for the other two forms, made
+// for this one: what the box posts, plus the word typed into it, has to parse
+// back into the search that was on screen. Rendering proves the inputs are on
+// the page; only this proves they still mean the same thing once the server has
+// read them back.
+func TestSearchBoxFieldsRoundTrip(t *testing.T) {
+	want := Query{
+		Q: "oceanside", Tags: []string{"alta", "escrow"}, Status: StatusReady,
+		View: ViewTrash,
+		Sort: "created", Dir: "asc", Range: "custom", From: "2025-03", To: "2026-01",
+	}
+
+	v := url.Values{}
+	for _, f := range (page{Query: want}).SearchBoxFields() {
+		v.Add(f.Name, f.Value)
+	}
+	// What the browser adds from the visible input, which is the one field the
+	// hidden ones have to leave alone.
+	v.Add("q", want.Q)
+
+	if got := v["q"]; len(got) != 1 {
+		t.Fatalf("the box would post q %d times (%q); the hidden fields must not repeat it", len(got), got)
+	}
+	if got := parseQuery(v); !reflect.DeepEqual(got, want) {
+		t.Errorf("the search box does not post the search it is sitting in:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// The tag facets narrow with the result set and arrive on the same search
+// response the rows do, so leaving them out of /results left counts on screen
+// describing results that had already been replaced — a pill reading 12 beside
+// three rows. They come back with the fragment now.
+//
+// What must not come back with it is anything holding state the reader set:
+// #tags-open is whether the tag popover is open and .tag-filter is what they
+// typed into it, and both sit between the two swapped regions rather than
+// inside either. Finding one of them here would mean the swap resets it, which
+// on screen is the popover shutting under the reader's hands.
+//
+// Typesense is stubbed the way TestResultsRendersTheFragmentAndNotThePage
+// stubs it, with facet counts added — the counts are the point here.
+func TestResultsCarriesTheTagRegions(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"found":1,"page":1,`+
+			`"hits":[{"document":{"id":"7","title":"Settlement","status":"ready","tags":["alta"],"created_date":"2025-03"}}],`+
+			`"facet_counts":[{"field_name":"tags","counts":[{"value":"alta","count":3},{"value":"escrow","count":1}]}]}`)
+	}))
+	defer ts.Close()
+
+	a := &App{search: NewSearch(ts.URL, "test-key", "documents")}
+	mux := http.NewServeMux()
+	a.routes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/results?q=set&tag=alta", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /results: %d\n%s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`id="results"`,     // the rows, as before
+		`<li class="row">`, //
+		`id="tag-pills"`,   // the pills, their counts and the state of each
+		`class="pill-tag on"`,
+		`>escrow<`,
+		`id="tag-browse"`, // the vocabulary, and the foot that counts it
+		`data-tag="escrow"`,
+		"2 tags in these results",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the fragment is missing %q:\n%s", want, body)
+		}
+	}
+	for _, unwanted := range []string{
+		"<html", "<head", "<body", "topbar", "searchbox", "filterbar", "<form",
+		// The two things the reader sets by hand, which a swap must not touch.
+		`id="tags-open"`, "tag-filter",
+		// The archive-wide counts, which do not move with the search text.
+		"seg views",
+	} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("the fragment contains %q, which belongs to the page around it:\n%s", unwanted, body)
+		}
 	}
 }

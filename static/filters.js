@@ -11,22 +11,40 @@ document.addEventListener("DOMContentLoaded", () => {
   const toggle = document.getElementById("tags-open");
   if (tags) {
     const filter = tags.querySelector(".tag-filter");
-    const links = [...tags.querySelectorAll(".tag-browse-list a")];
 
-    if (filter && links.length) {
-      filter.hidden = false;
-      filter.addEventListener("input", () => {
+    if (filter) {
+      // Re-read rather than held from load. The vocabulary narrows with the
+      // result set, so search.js swaps this list in as the reader types and the
+      // links captured once are nodes that left the page moments later — a
+      // stale list is a tag filter that silently stops applying to what is on
+      // screen. The box itself is outside the swap, so its text survives and is
+      // what gets re-applied.
+      let links = [];
+
+      const apply = () => {
         const q = filter.value.trim().toLowerCase();
         for (const a of links) {
           a.hidden = !!q && !(a.dataset.tag || "").toLowerCase().includes(q);
         }
-      });
+      };
+
+      const reread = () => {
+        links = [...tags.querySelectorAll(".tag-browse-list a")];
+        // No use without script, and none with nothing to search either.
+        filter.hidden = links.length === 0;
+        apply();
+      };
+
+      reread();
+      filter.addEventListener("input", apply);
+      // Fired by whoever swapped the list in.
+      document.addEventListener("tags:refresh", reread);
       // Opening the popover starts from the whole list rather than from
       // whatever was typed last time.
       toggle?.addEventListener("change", () => {
         if (!toggle.checked) return;
         filter.value = "";
-        for (const a of links) a.hidden = false;
+        apply();
         filter.focus();
       });
     }
