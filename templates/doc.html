@@ -108,6 +108,9 @@
       {{if $d.Signed}}
         <p class="banner info">Digitally signed — the signature was preserved, so this document was not OCR'd.</p>
       {{end}}
+      {{if $d.Encrypted}}
+        <p class="banner info">Password-protected — the original is kept exactly as it arrived, still encrypted; the copy in the archive was decrypted so it can be read and searched.</p>
+      {{end}}
       {{if .Search}}
         <p class="searching">Jumped to <strong>{{.Search}}</strong> in the document · <a href="/doc/{{$d.ID}}">clear</a></p>
       {{end}}

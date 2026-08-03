@@ -31,7 +31,12 @@ type Config struct {
 	// of shell history, out of the process listing, and out of any unit file
 	// or script that might get committed.
 	KeyFile string
-	Dev     bool
+	// PasswordFile holds the passwords for encrypted PDFs, one per line. Same
+	// reasoning as KeyFile and more of it: these are bank passwords, so a flag
+	// or an environment variable would put them in the process listing for
+	// everyone on the machine to read.
+	PasswordFile string
+	Dev          bool
 }
 
 // App holds everything the handlers and the pipeline need.
@@ -42,6 +47,12 @@ type App struct {
 	pipeline *Pipeline
 	enricher *OpenAIEnricher
 	enrichq  *EnrichQueue
+
+	// pdfPasswords are the candidates tried against an encrypted document, read
+	// once at startup. Re-reading the file per document would put a secret
+	// through the disk on every ingest to answer a question that is almost
+	// always "this one is not encrypted".
+	pdfPasswords []string
 
 	// Pages are parsed on first use and kept, so a render costs an execute
 	// rather than a parse. Empty under -dev, which never caches.
@@ -66,6 +77,8 @@ func main() {
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
 	flag.StringVar(&cfg.KeyFile, "openai-key-file", defaultKeyFile(),
 		"file holding the OpenAI API key, read when OPENAI_API_KEY is unset")
+	flag.StringVar(&cfg.PasswordFile, "pdf-passwords", defaultPasswordFile(),
+		"file holding passwords for encrypted PDFs, one per line")
 	flag.BoolVar(&cfg.Dev, "dev", false, "reload templates from disk on each request")
 	flag.Parse()
 
@@ -81,6 +94,21 @@ func run(cfg Config) error {
 	}
 	search := NewSearch(cfg.TypesenseURL, cfg.TypesenseKey, cfg.Collection)
 	app := &App{cfg: cfg, store: store, search: search}
+
+	passwords, err := pdfPasswords(cfg.PasswordFile)
+	if err != nil {
+		// Not fatal. Everything unencrypted still ingests, and a document that
+		// does need a password says so on its own row in the Failed view rather
+		// than taking the whole archive down with it.
+		logf("reading %s: %v — encrypted PDFs will fail until it can be read", cfg.PasswordFile, err)
+	}
+	app.pdfPasswords = passwords
+	if len(passwords) > 0 {
+		// The count, and never anything else. This is the one line in the
+		// program tempted to print what it just read.
+		logf("%d PDF password(s) loaded from %s", len(passwords), cfg.PasswordFile)
+	}
+
 	if cfg.LLMEnabled {
 		if key, source := openAIKey(cfg.KeyFile); key != "" {
 			app.enricher = NewOpenAIEnricher(cfg.LLMModel, key)
@@ -428,6 +456,57 @@ func defaultKeyFile() string {
 		return ""
 	}
 	return filepath.Join(home, ".openai.secret")
+}
+
+func defaultPasswordFile() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".docovia-passwords")
+}
+
+// pdfPasswords reads the candidates for encrypted documents, one per line.
+// Blank lines and # comments are skipped so the file can say which password
+// belongs to which bank, and nothing else is interpreted: unlike the API key,
+// which has a known shape, a password may contain quotes, spaces or an equals
+// sign, and unwrapping any of those would corrupt it.
+//
+// Both ends are trimmed all the same. No institution issues a password that
+// begins or ends in a space, and an invisible character that makes a correct
+// password fail is a bug nobody can see — the file would look right and the
+// document would stay locked.
+//
+// A missing file is not an error. It is the ordinary state of a machine that
+// has never met an encrypted document, and every PDF that only carries
+// restrictions still opens with the empty password DecryptPDF always tries.
+//
+// No error returned here can carry a password: the only thing that can fail is
+// the read, which fails before there is anything read to put in it.
+func pdfPasswords(path string) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	if len(out) > 0 {
+		warnKeyPerms(path)
+	}
+	return out, nil
 }
 
 // openAIKey finds the key, preferring the environment so a one-off run can

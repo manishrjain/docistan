@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -114,6 +115,103 @@ func IsSignedPDF(path string) bool {
 		(bytes.Contains(b, []byte("/Type/Sig")) || bytes.Contains(b, []byte("/Type /Sig")))
 }
 
+// pdfCrypt is what qpdf knows about a PDF's encryption. The three values are
+// the three answers `qpdf --requires-password` gives, kept apart because they
+// call for three different things: nothing, the empty password, and a password
+// somebody has to tell us.
+type pdfCrypt int
+
+const (
+	pdfPlain      pdfCrypt = iota // not encrypted at all
+	pdfRestricted                 // encrypted, but the empty password opens it
+	pdfLocked                     // needs a password we have not supplied
+)
+
+// PDFEncryption asks qpdf which of the three a file is.
+//
+// --requires-password is the right question. --is-encrypted answers yes for a
+// file carrying only an owner password — one that forbids printing or copying
+// but opens and reads perfectly well — so it cannot tell a bank statement
+// nobody can open from a tax form that merely dislikes being printed.
+//
+// Anything qpdf cannot answer at all — a missing file, a truncated one — is
+// reported as pdfPlain rather than guessed at. Whatever is wrong with such a
+// file, a password will not fix it, and the stages that follow fail on it with
+// a better message than this function could invent.
+func PDFEncryption(ctx context.Context, path string) pdfCrypt {
+	_, err := runCmd(ctx, 30*time.Second, "qpdf", "--requires-password", path)
+	if err == nil {
+		// Exit 0: a password other than the one supplied — and none was — is
+		// required, so the file cannot be opened as it stands.
+		return pdfLocked
+	}
+	if exitCode(err) == 3 {
+		// Exit 3: encrypted, and the empty password qpdf tried is the correct
+		// one. Exit 2 is "not encrypted"; anything else is qpdf failing.
+		return pdfRestricted
+	}
+	return pdfPlain
+}
+
+// PDFNeedsPassword reports whether the file cannot be opened without one. It is
+// the narrow question: a merely restricted PDF answers false, because every
+// tool here already reads it.
+func PDFNeedsPassword(ctx context.Context, path string) bool {
+	return PDFEncryption(ctx, path) == pdfLocked
+}
+
+// errNoPassword is DecryptPDF's answer when it ran out of candidates. It is a
+// sentinel because the caller has to tell it apart from qpdf being broken: one
+// means "ask the owner for the password", the other means "fix the machine",
+// and those are not the same document status.
+var errNoPassword = errors.New("no candidate password opened the file")
+
+// DecryptPDF writes a decrypted copy of src at dst, trying the empty password
+// first and then each candidate in turn. It returns the position of the one
+// that worked — 0 for the empty password, otherwise the 1-based index into
+// passwords — so a caller can say which line of the password file was the right
+// one without ever handling what is on it.
+//
+// No password ever reaches the returned error. runCmd folds a command's stderr
+// into its error but never its arguments, and qpdf's own message for a wrong
+// guess is "invalid password" with the filename, so what comes back names the
+// file and the failure and nothing else.
+func DecryptPDF(ctx context.Context, src, dst string, passwords []string) (int, error) {
+	// The empty password is always tried, and always first. A PDF carrying only
+	// an owner password decrypts with it, which turns a file the rest of the
+	// pipeline would refuse into an ordinary readable one for the cost of a
+	// single qpdf run — before any real password is put at risk of being wrong.
+	for i, pw := range append([]string{""}, passwords...) {
+		_, err := runCmd(ctx, cmdTimeout, "qpdf", "--password="+pw, "--decrypt", src, dst)
+		if err == nil {
+			return i, nil
+		}
+		if !isBadPassword(err) {
+			return -1, err
+		}
+	}
+	return -1, errNoPassword
+}
+
+// isBadPassword separates a guess that was wrong from a run that went wrong.
+// qpdf exits 2 and says "invalid password" for the first; a missing file, an
+// unwritable destination or no qpdf at all must not be mistaken for it, or a
+// broken machine would report every document as password-protected.
+func isBadPassword(err error) bool {
+	return exitCode(err) == 2 && strings.Contains(err.Error(), "invalid password")
+}
+
+// exitCode digs the process exit status out of what runCmd returns, which wraps
+// it. qpdf answers questions with exit codes rather than output, so this is how
+// its answers are read. -1 means the command never ran or was killed.
+func exitCode(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
+
 // ToPDF normalizes any supported input into a PDF at dst.
 func ToPDF(ctx context.Context, src, ext, dst string) error {
 	kind, ok := kindOf(ext)
@@ -176,6 +274,19 @@ func OCR(ctx context.Context, src, dst string, signed bool) (string, error) {
 		return OCRTesseract, os.Rename(tmp, dst)
 	}
 	logf("ocrmypdf failed, falling back to plain normalize: %v", err)
+
+	// One thing must never reach the chain below, and this is where it would
+	// arrive: an encrypted PDF. ocrmypdf refuses those outright, and Ghostscript
+	// then "succeeds" on a file it cannot read by writing a blank single page —
+	// which became the archive, made pdftotext find nothing and PageCount report
+	// one page for a forty-eight page tax return, and left the document marked
+	// ready and absent from the Failed view. The pipeline decrypts before it
+	// gets here, so this is the second lock on that door rather than the first;
+	// failing is the right outcome either way, because the original is untouched
+	// and a password makes the document readable.
+	if PDFNeedsPassword(ctx, src) {
+		return "", errors.New("password-protected, so it can be neither OCR'd nor normalized")
+	}
 
 	// Fallback chain. A document is never lost to a conversion failure; the
 	// worst case is an archive equal to the original with no text layer.

@@ -78,10 +78,16 @@ type Doc struct {
 	NativeText bool `json:"native_text"`
 	// NeedsRescue marks a scanned document whose OCR output still looks poor,
 	// making it a candidate for the model to re-read.
-	NeedsRescue bool   `json:"needs_rescue,omitempty"`
-	Signed      bool   `json:"signed"`
-	Enriched    bool   `json:"enriched"`
-	Content     string `json:"content"`
+	NeedsRescue bool `json:"needs_rescue,omitempty"`
+	// Encrypted records that the original arrived password-protected and the
+	// copy in the archive is the decrypted one. The original keeps its
+	// encryption — it is the preservation copy, and re-encrypting it later
+	// could not reproduce those bytes faithfully — so this is also the note
+	// that the two files now differ in more than a text layer.
+	Encrypted bool   `json:"encrypted"`
+	Signed    bool   `json:"signed"`
+	Enriched  bool   `json:"enriched"`
+	Content   string `json:"content"`
 	// What the model cost for this one document. The tokens are the most
 	// recent call's, so they describe the run whose title and tags are on
 	// display; the cents are cumulative across every call ever made for this

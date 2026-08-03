@@ -1330,6 +1330,11 @@ button.pill-plain {
   text-align: center;
   padding: var(--space-6);
 }
+/* The two buttons only belong to the overlay you opened on purpose. A drag is
+   already carrying the files, so during one this row is not there at all. */
+.drop-actions { display: none; gap: 10px; margin-top: var(--space-2); }
+.drop-overlay.picking .drop-actions { display: flex; }
+
 .drop-overlay .big {
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);

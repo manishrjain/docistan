@@ -1809,3 +1809,309 @@ func TestResultsCarriesTheTagRegions(t *testing.T) {
 		}
 	}
 }
+
+// The fixtures for the encryption tests are built here rather than checked in,
+// because a binary PDF in the repository is a file nobody can read in a diff
+// and nobody dares regenerate. testPDF renders one with the program's own text
+// renderer, so the fixture has real extractable text — which is the thing the
+// decryption tests have to prove came through intact.
+func testPDF(t *testing.T, dir, name, text string) string {
+	t.Helper()
+	txt := filepath.Join(dir, name+".txt")
+	if err := os.WriteFile(txt, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pdf := filepath.Join(dir, name+".pdf")
+	if err := textToPDF(txt, pdf); err != nil {
+		t.Fatalf("rendering the %s fixture: %v", name, err)
+	}
+	return pdf
+}
+
+// encryptPDF locks a fixture the way the documents that started this arrived:
+// a user password is one nobody can open without, an owner password on its own
+// only restricts what may be done with a file that opens fine.
+//
+// qpdf is required rather than skipped around. It is already a runtime
+// dependency — the code under test shells out to it for both the detection and
+// the decryption — so a machine that cannot build these fixtures cannot run the
+// program either, and skipping would report that as a pass.
+func encryptPDF(t *testing.T, src, dst, userPW, ownerPW string) string {
+	t.Helper()
+	_, err := runCmd(context.Background(), 30*time.Second, "qpdf", "--encrypt",
+		"--user-password="+userPW, "--owner-password="+ownerPW, "--bits=256", "--", src, dst)
+	if err != nil {
+		t.Fatalf("building the encrypted fixture: %v (qpdf 11.7+ is needed for these flags, "+
+			"and qpdf itself is a dependency of the pipeline)", err)
+	}
+	return dst
+}
+
+// A password-protected PDF has to be recognised as one before anything is done
+// to it, because everything downstream mistakes it for a document that is
+// merely empty: ocrmypdf refuses it, Ghostscript writes a blank page instead,
+// and pdftotext then finds nothing to find. The right password must produce a
+// copy that reads exactly like the original, and the wrong one must produce
+// nothing at all — not a partial file that a later stage would archive.
+func TestEncryptedPDFIsDetectedAndDecryptsWithItsPassword(t *testing.T) {
+	const text = "Statement of account 4471, closing balance 12,940.55"
+	dir := t.TempDir()
+	locked := encryptPDF(t, testPDF(t, dir, "plain", text),
+		filepath.Join(dir, "locked.pdf"), "s3cret-open", "s3cret-owner")
+
+	ctx := context.Background()
+	if got := PDFEncryption(ctx, locked); got != pdfLocked {
+		t.Errorf("PDFEncryption = %v, want pdfLocked", got)
+	}
+	if !PDFNeedsPassword(ctx, locked) {
+		t.Error("PDFNeedsPassword = false for a PDF that cannot be opened without one")
+	}
+
+	// A wrong password is a wrong answer, not a broken machine: the caller has
+	// to be able to tell the two apart, so this is the sentinel and not some
+	// qpdf exit status.
+	out := filepath.Join(dir, "out.pdf")
+	if which, err := DecryptPDF(ctx, locked, out, []string{"not-the-one"}); !errors.Is(err, errNoPassword) {
+		t.Errorf("DecryptPDF with the wrong password = (%d, %v), want errNoPassword", which, err)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("a failed decryption left %s behind, which a later stage would archive as the document", out)
+	}
+
+	// The position identifies which line of the password file was the right
+	// one — 0 is the empty password, so the second candidate is 2 — without the
+	// caller ever having to hold the password to find that out.
+	which, err := DecryptPDF(ctx, locked, out, []string{"not-the-one", "s3cret-open"})
+	if err != nil {
+		t.Fatalf("DecryptPDF with the right password: %v", err)
+	}
+	if which != 2 {
+		t.Errorf("DecryptPDF reported position %d, want 2 (the second candidate)", which)
+	}
+	if got := PDFEncryption(ctx, out); got != pdfPlain {
+		t.Errorf("the decrypted copy is still %v, so nothing downstream could read it either", got)
+	}
+	got, err := ExtractText(ctx, out)
+	if err != nil {
+		t.Fatalf("pdftotext on the decrypted copy: %v", err)
+	}
+	if !strings.Contains(got, text) {
+		t.Errorf("the decrypted copy reads %q, want it to contain %q", got, text)
+	}
+}
+
+// Plenty of statements carry only an owner password: nothing stops them being
+// opened, they just say they would rather not be printed. Those must never
+// become failures a person has to find a password for — the empty password is
+// tried first precisely so a file like this costs one qpdf run and then behaves
+// like any other document.
+func TestOwnerPasswordOnlyPDFOpensWithTheEmptyPassword(t *testing.T) {
+	dir := t.TempDir()
+	restricted := encryptPDF(t, testPDF(t, dir, "plain", "Form 1040 page 1 of 48"),
+		filepath.Join(dir, "restricted.pdf"), "", "no-printing-please")
+
+	ctx := context.Background()
+	if got := PDFEncryption(ctx, restricted); got != pdfRestricted {
+		t.Errorf("PDFEncryption = %v, want pdfRestricted", got)
+	}
+	// The narrow question is the one the OCR guard asks, and the answer has to
+	// be no: this file needs nothing from anybody.
+	if PDFNeedsPassword(ctx, restricted) {
+		t.Error("PDFNeedsPassword = true for a file that opens with no password at all")
+	}
+
+	// Nothing is supplied — no password file, no candidates — and it still
+	// works, which is the whole point.
+	out := filepath.Join(dir, "out.pdf")
+	which, err := DecryptPDF(ctx, restricted, out, nil)
+	if err != nil {
+		t.Fatalf("DecryptPDF on a restricted-only PDF with no candidates: %v", err)
+	}
+	if which != 0 {
+		t.Errorf("DecryptPDF reported position %d, want 0 (the empty password)", which)
+	}
+	if got := PDFEncryption(ctx, out); got != pdfPlain {
+		t.Errorf("the copy is still %v, so the restrictions came along with it", got)
+	}
+}
+
+// The ordinary document must not pay for any of this. An unencrypted PDF is
+// reported as unencrypted and left exactly where it is — the pipeline goes on
+// working from the original, and no decrypted copy is written for the archive
+// to be built from.
+func TestPlainPDFIsLeftAlone(t *testing.T) {
+	dir := t.TempDir()
+	plain := testPDF(t, dir, "plain", "Northwind Utilities, March 2026")
+
+	ctx := context.Background()
+	if got := PDFEncryption(ctx, plain); got != pdfPlain {
+		t.Errorf("PDFEncryption = %v, want pdfPlain", got)
+	}
+	if PDFNeedsPassword(ctx, plain) {
+		t.Error("PDFNeedsPassword = true for a plain PDF")
+	}
+
+	p := &Pipeline{app: &App{cfg: Config{PasswordFile: filepath.Join(dir, "passwords")}}}
+	// Encrypted starts true to prove the stage clears it. A document whose
+	// original was replaced by an unencrypted one and then reprocessed would
+	// otherwise keep claiming an encryption that is no longer there.
+	doc := &Doc{ID: 1, Encrypted: true}
+	dst := filepath.Join(dir, "decrypted.pdf")
+	src, err := p.decrypt(ctx, doc, plain, dst)
+	if err != nil {
+		t.Fatalf("decrypt on a plain PDF: %v", err)
+	}
+	if src != plain {
+		t.Errorf("decrypt returned %q, want the original %q", src, plain)
+	}
+	if doc.Encrypted {
+		t.Error("a plain PDF was recorded as encrypted")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("decrypt wrote %s for a file that needed nothing done to it", dst)
+	}
+}
+
+// This is the bug, at the stage that now catches it. A document nobody can open
+// must fail, visibly, with something the reader can act on — that failure is
+// what puts it in the Failed view, keeps the original for a Retry, and stops a
+// blank Ghostscript page being written as the archive and filed as ready. And
+// when the password is there, the same stage has to produce a readable copy and
+// say so on the document, without the password appearing anywhere.
+func TestLockedDocumentFailsAtDecryptUntilItsPasswordIsKnown(t *testing.T) {
+	const (
+		text = "Interest certificate for FY 2025-26"
+		pw   = "MRJN0412-open"
+	)
+	dir := t.TempDir()
+	locked := encryptPDF(t, testPDF(t, dir, "plain", text),
+		filepath.Join(dir, "locked.pdf"), pw, "owner-only")
+
+	ctx := context.Background()
+	pwFile := filepath.Join(dir, "passwords")
+	// A wrong password is loaded rather than none, so the failure below is the
+	// one that had a real secret in hand and still did not write it down.
+	p := &Pipeline{app: &App{cfg: Config{PasswordFile: pwFile}, pdfPasswords: []string{"wrong-" + pw}}}
+	doc := &Doc{ID: 17}
+	dst := filepath.Join(dir, "decrypted.pdf")
+
+	_, err := p.decrypt(ctx, doc, locked, dst)
+	if err == nil {
+		t.Fatal("decrypt succeeded on a document whose password nobody has")
+	}
+	for _, want := range []string{"password-protected", pwFile, "reprocess"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the failure reads %q, which does not tell the reader %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), pw) {
+		t.Error("the failure carries a password, and this one is written to the sidecar and the journal")
+	}
+	if doc.Encrypted {
+		t.Error("a document that was never decrypted is claiming a decrypted copy in the archive")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("a failed decryption left %s behind for the archive to be built from", dst)
+	}
+
+	// Now the password is known, which is exactly what the Retry button does
+	// after someone adds it to the file.
+	p.app.pdfPasswords = []string{"wrong-" + pw, pw}
+	src, err := p.decrypt(ctx, doc, locked, dst)
+	if err != nil {
+		t.Fatalf("decrypt with the password in hand: %v", err)
+	}
+	if src != dst {
+		t.Errorf("decrypt returned %q, want the decrypted copy %q — the archive must not be built from the encrypted original", src, dst)
+	}
+	if !doc.Encrypted {
+		t.Error("the document does not record that it arrived encrypted, so its page cannot say the archive copy differs from the original")
+	}
+	got, err := ExtractText(ctx, src)
+	if err != nil {
+		t.Fatalf("pdftotext on the decrypted copy: %v", err)
+	}
+	if !strings.Contains(got, text) {
+		t.Errorf("the decrypted copy reads %q, want it to contain %q", got, text)
+	}
+	// The original is the preservation copy and stays exactly as it arrived,
+	// encryption and all: re-encrypting it later could not reproduce it.
+	if PDFEncryption(ctx, locked) != pdfLocked {
+		t.Error("the original was modified — it must be left encrypted")
+	}
+}
+
+// The password file is hand-written, next to the key file and read the same
+// way. These are the shapes a person writing one produces. Nothing else is
+// interpreted: a password may contain quotes, spaces or an equals sign, and
+// unwrapping any of those the way the key file does would silently corrupt it.
+func TestPDFPasswordFile(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{"one per line", "alpha\nbravo\n", []string{"alpha", "bravo"}},
+		{"no trailing newline", "alpha", []string{"alpha"}},
+		{"blank lines", "\n\nalpha\n\n\nbravo\n", []string{"alpha", "bravo"}},
+		{"comments", "# hdfc statement\nalpha\n# tax return\nbravo\n", []string{"alpha", "bravo"}},
+		{"indented comment", "  # noted\nalpha\n", []string{"alpha"}},
+		{"trailing whitespace", "alpha   \nbravo\t\n", []string{"alpha", "bravo"}},
+		{"carriage returns", "alpha\r\nbravo\r\n", []string{"alpha", "bravo"}},
+		{"spaces inside are part of it", "my pass phrase\n", []string{"my pass phrase"}},
+		{"quotes and equals are part of it", "\"quoted\"\nPW=abc\n", []string{"\"quoted\"", "PW=abc"}},
+		{"hash inside is part of it", "a#1b\n", []string{"a#1b"}},
+		{"empty", "\n\n  \n", nil},
+		{"comments only", "# nothing here yet\n", nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "passwords")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := pdfPasswords(path)
+			if err != nil {
+				t.Fatalf("pdfPasswords: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("pdfPasswords(%q) = %q, want %q", tc.content, got, tc.want)
+			}
+		})
+	}
+
+	// The ordinary state of a machine that has never met an encrypted document.
+	// It is not a failure, and it must not be logged as one every boot.
+	t.Run("missing file", func(t *testing.T) {
+		got, err := pdfPasswords(filepath.Join(t.TempDir(), "absent"))
+		if err != nil || got != nil {
+			t.Errorf("pdfPasswords on a missing file = (%q, %v), want (nil, nil)", got, err)
+		}
+	})
+
+	// The one thing this function must never do. Errors get logged, and a log
+	// line with a bank password in it is precisely what the whole feature is
+	// arranged to avoid — so the only failure it can have is a read that never
+	// reached the contents, and this is what proves it.
+	t.Run("no password can reach an error", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a mode-000 file regardless, so the failure cannot be set up here")
+		}
+		const secret = "0412-mrjn-hdfc"
+		path := filepath.Join(t.TempDir(), "passwords")
+		if err := os.WriteFile(path, []byte(secret+"\n"), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		got, err := pdfPasswords(path)
+		if err == nil {
+			t.Fatalf("pdfPasswords on an unreadable file = %q, want an error", got)
+		}
+		if len(got) != 0 {
+			t.Errorf("pdfPasswords returned %q alongside its error", got)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("the error carries the password: %v", err)
+		}
+	})
+}

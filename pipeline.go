@@ -494,10 +494,23 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 	archive := store.ArchivePath(doc.ID)
 
 	if _, err := os.Stat(archive); err != nil {
+		// Decryption comes before everything derived, because everything
+		// derived is made from what it returns.
+		src := orig
+		if doc.OriginalExt == ".pdf" {
+			p.setStage(job, "decrypt")
+			decrypted := archive + ".dec.pdf"
+			defer os.Remove(decrypted)
+			src, err = p.decrypt(ctx, doc, orig, decrypted)
+			if err != nil {
+				return err
+			}
+		}
+
 		p.setStage(job, "normalize")
 		normalized := archive + ".norm.pdf"
 		defer os.Remove(normalized)
-		if err := ToPDF(ctx, orig, doc.OriginalExt, normalized); err != nil {
+		if err := ToPDF(ctx, src, doc.OriginalExt, normalized); err != nil {
 			return fmt.Errorf("normalize: %w", err)
 		}
 
@@ -514,7 +527,10 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 		doc.NativeText = hadText
 
 		p.setStage(job, "ocr")
-		doc.Signed = doc.OriginalExt == ".pdf" && IsSignedPDF(orig)
+		// Asked of src rather than orig: on an encrypted original pdfsig cannot
+		// read the file and the byte-scan fallback is looking at ciphertext, so
+		// the question is only answerable on the copy we can open.
+		doc.Signed = doc.OriginalExt == ".pdf" && IsSignedPDF(src)
 		source, err := OCR(ctx, normalized, archive, doc.Signed)
 		if err != nil {
 			return fmt.Errorf("ocr: %w", err)
@@ -561,6 +577,72 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 	}
 
 	return nil
+}
+
+// decrypt resolves a password-protected original into something the rest of the
+// pipeline can read, and returns the file to work from — the original itself
+// when there was nothing to do.
+//
+// The original is never rewritten. It is the preservation copy, the bytes the
+// bank or the tax office produced, and re-encrypting a decrypted PDF afterwards
+// would not reproduce them faithfully. What changes is everything derived: the
+// archival PDF, its text and its thumbnail are all made from the decrypted copy,
+// which is the whole reason the document can be read and searched at all.
+//
+// A file no password opens fails here, deliberately, because the alternative is
+// the bug this replaces: ocrmypdf refuses the file, Ghostscript "succeeds" by
+// writing a blank page, and a forty-eight page tax return is filed as a
+// one-page document with no text, marked ready, and invisible in the Failed
+// view. Failing keeps the original, puts the document on the Failed list with a
+// reason someone can act on, and leaves Retry as the way to finish the job.
+func (p *Pipeline) decrypt(ctx context.Context, doc *Doc, orig, dst string) (string, error) {
+	if PDFEncryption(ctx, orig) == pdfPlain {
+		// Cleared rather than left alone: a document reprocessed after its
+		// original was replaced by an unencrypted one would otherwise keep
+		// claiming an encryption that is no longer there.
+		doc.Encrypted = false
+		return orig, nil
+	}
+
+	which, err := DecryptPDF(ctx, orig, dst, p.app.pdfPasswords)
+	switch {
+	case errors.Is(err, errNoPassword):
+		// An instruction, not a diagnosis. This is the sentence the Failed row
+		// and the document page show, and it is the only thing standing between
+		// the reader and a document they cannot open; the stage beside it
+		// already says "decrypt", so it does not repeat that.
+		return "", fmt.Errorf("password-protected; add its password to %s and reprocess", p.passwordFileName())
+	case err != nil:
+		return "", fmt.Errorf("decrypt: %w", err)
+	}
+
+	// Set only now, so the flag means what the document page says it means:
+	// this document was encrypted and the copy in the archive is readable. A
+	// document that failed above is not "decrypted in the archive" — it has no
+	// archive at all.
+	doc.Encrypted = true
+	// Which password worked is worth a line. What it was is never written down
+	// anywhere: not here, not in the journal, not in the sidecar. Position 0 is
+	// the empty password, which means the file only carried restrictions and
+	// nobody had to know anything to open it.
+	if which == 0 {
+		logf("doc %d: encrypted with restrictions only, opened with the empty password", doc.ID)
+	} else {
+		logf("doc %d: password-protected, decrypted with a password from %s", doc.ID, p.passwordFileName())
+	}
+	return dst, nil
+}
+
+// passwordFileName is what to call the password file when telling someone to
+// put a password in it. The configured path is the useful answer — it is right
+// even when -pdf-passwords moved it — but that path is empty on a machine with
+// no home directory, and "add its password to  and reprocess" is not an
+// instruction anybody can follow.
+func (p *Pipeline) passwordFileName() string {
+	if path := p.app.cfg.PasswordFile; path != "" {
+		return path
+	}
+	return "the -pdf-passwords file"
 }
 
 // save persists a document. persist retries the sidecar write and the index

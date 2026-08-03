@@ -112,6 +112,7 @@ func (s *Search) schema() *api.CollectionSchema {
 			f("file_size", "int64", stored),
 			f("ocr_source", "string", stored),
 			f("signed", "bool", stored),
+			f("encrypted", "bool", stored),
 			f("native_text", "bool", stored),
 			f("enriched", "bool", stored),
 			f("text_ts", "int64", stored),
@@ -168,6 +169,7 @@ func tsDoc(d *Doc) map[string]any {
 		"file_size":       d.FileSize,
 		"ocr_source":      d.OCRSource,
 		"signed":          d.Signed,
+		"encrypted":       d.Encrypted,
 		"enriched":        d.Enriched,
 		"native_text":     d.NativeText,
 		"llm_in":          d.LLMIn,
@@ -860,6 +862,7 @@ func docFromMap(m map[string]any) *Doc {
 		FileSize:      num("file_size"),
 		PageCount:     int(num("page_count")),
 		Signed:        boolean("signed"),
+		Encrypted:     boolean("encrypted"),
 		Enriched:      boolean("enriched"),
 		NativeText:    boolean("native_text"),
 	}
