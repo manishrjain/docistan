@@ -65,11 +65,11 @@
       <div class="filter-date-row">
         <span class="micro">Date</span>
         <nav class="seg" aria-label="Document date range">
-          <a href="{{$page.WithRange "month"}}"{{if $page.RangeOn "month"}} class="on"{{end}}>Last month</a>
-          <a href="{{$page.WithRange "quarter"}}"{{if $page.RangeOn "quarter"}} class="on"{{end}}>Last quarter</a>
-          <a href="{{$page.WithRange "year"}}"{{if $page.RangeOn "year"}} class="on"{{end}}>Last year</a>
+          <a href="{{$page.WithRange "month"}}"{{if $page.RangeOn "month"}} class="on filtering"{{end}}>Last month</a>
+          <a href="{{$page.WithRange "quarter"}}"{{if $page.RangeOn "quarter"}} class="on filtering"{{end}}>Last quarter</a>
+          <a href="{{$page.WithRange "year"}}"{{if $page.RangeOn "year"}} class="on filtering"{{end}}>Last year</a>
           <a href="{{$page.WithRange ""}}"{{if $page.RangeOn ""}} class="on"{{end}}>All time</a>
-          <a href="{{$page.WithRange "custom"}}"{{if $page.RangeOn "custom"}} class="on"{{end}}>Custom</a>
+          <a href="{{$page.WithRange "custom"}}"{{if $page.RangeOn "custom"}} class="on filtering"{{end}}>Custom</a>
         </nav>
       </div>
 
@@ -156,8 +156,11 @@
     <label class="pill-tag pill-dashed browse-more" for="tags-open">+ {{$page.MoreTags}} more</label>
   {{end}}
 
-  {{if $page.HasFilters}}
-    <a class="pill-plain" href="{{$page.ClearFilters}}">Clear</a>
+  {{/* Clears the tags it stands among, and nothing else. The date range has
+       its own All time, and taking it away from here surprised someone who
+       only wanted their tags back. */}}
+  {{if $page.Query.Tags}}
+    <a class="pill-plain" href="{{$page.ClearTags}}">Clear</a>
   {{end}}
 </div>
 {{end}}

@@ -506,8 +506,11 @@ main {
 .filter-date-row > .micro { margin-right: 2px; }
 
 /* Segmented control: one hairline box, dividers between, ink fill for the
-   selection. Deliberately distinct from the accent-filled tag pills — a date
-   range is a mode, a tag is a filter. */
+   selection. Ink is the resting selection — a sort order, a view, all time —
+   because those say how you are looking rather than narrowing what you see.
+   A segment that is genuinely excluding documents takes the accent instead,
+   so an applied date range reads as the filter it is, next to the tag pills
+   that are already accent-filled. */
 .seg { display: flex; border: 1px solid var(--color-divider); }
 .seg a {
   font-family: var(--font-mono);
@@ -522,6 +525,9 @@ main {
 }
 .seg a + a { border-left: 1px solid var(--color-divider); }
 .seg a.on { background: var(--color-text); color: var(--color-bg); }
+/* Only the segments that hold documents back. "All time" is selected but
+   excludes nothing, so it stays ink. */
+.seg a.on.filtering { background: var(--color-accent); color: var(--color-bg); }
 /* Each view names itself and then says how big it is. The count is quieter
    than the name because it is the second thing you read, and it fades with the
    ink rather than to a fixed grey so it works on the selected segment too. */

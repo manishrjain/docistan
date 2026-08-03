@@ -685,6 +685,17 @@ func (p page) RangeOn(r string) bool {
 
 func (p page) HasFilters() bool { return p.Query.HasFilters() }
 
+// ClearTags drops the tag selection alone. It backs the Clear that sits among
+// the tag pills, so it clears what it stands beside; the date range is reached
+// from its own control, and having this take that away too meant a reader who
+// wanted their tags back lost the window they had chosen as well.
+func (p page) ClearTags() string {
+	return p.urlWith(func(q url.Values) {
+		q.Del("tag")
+		q.Del("page")
+	})
+}
+
 // ClearFilters keeps the search term — clearing filters and clearing the
 // query are separate actions, and the header has its own Clear for the query.
 func (p page) ClearFilters() string {
