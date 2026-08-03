@@ -274,6 +274,11 @@ document.addEventListener("DOMContentLoaded", () => {
   // Exposed so background re-tagging can refresh the pills in place.
   let applyMeta = () => {};
 
+  // Whether an edit is in the air: typed but not yet saved, or being saved
+  // right now. Reloading over either would throw away what someone typed, so
+  // the refresh at the end of processing asks first.
+  let unsavedEdits = () => false;
+
   if (editor && field) {
   const known = (editor.dataset.known || "")
     .split(",")
@@ -477,6 +482,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   render();
 
+  unsavedEdits = () => dirty.size > 0 || saving;
+
   applyMeta = (data) => {
     if (Array.isArray(data.tags)) {
       tags = data.tags.map((t) => String(t).toLowerCase());
@@ -528,21 +535,43 @@ document.addEventListener("DOMContentLoaded", () => {
       applyStages(data.stages);
       applyMeta(data);
       if (data.status !== "processing" && !data.queued) {
-        if (data.status === "ready") showPreview();
+        if (data.status === "ready") settle();
         return data;
       }
     }
     return null;
   }
 
-  // The viewer was pointed at an archival PDF that did not exist when the page
-  // was drawn — the document was still being processed, or was locked and had
-  // never been readable at all — so it is showing the error it got. Now that
-  // there is a file there, load it.
+  // Processing has finished, and almost everything on this page is now a
+  // description of a document that no longer exists: a new title and summary,
+  // new tags, a different page count and file size, a text section that was
+  // empty and is now twelve thousand characters, and a viewer pointed at an
+  // archival PDF that did not exist when the page was drawn.
   //
-  // Reloading the frame rather than the page: the timeline, the tags and the
-  // title have all just been updated in place, and throwing that away to fetch
-  // the same information again would undo the point of watching at all.
+  // The poll updates the timeline, the title and the tags in place, and for a
+  // while that seemed like enough — but it is a handful of the things that
+  // changed, and someone who reprocesses a document and sees the old summary
+  // sitting under a finished timeline has been told the work did nothing. So
+  // the whole page is fetched again, once, at the end.
+  //
+  // Live updates still earn their place while the work is running: that is when
+  // there is something to watch and nothing yet worth reloading for.
+  function settle() {
+    // Except over an edit in progress. Autosave means a tag typed a moment ago
+    // may still be in the air, and a reload would take it — so that page keeps
+    // the in-place updates and at least gets its viewer back.
+    const el = document.activeElement;
+    const typing = el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+    if (typing || unsavedEdits()) {
+      showPreview();
+      return;
+    }
+    location.reload();
+  }
+
+  // The viewer alone, for when the page cannot be reloaded out from under
+  // someone. It was pointed at an archival PDF that did not exist when the page
+  // was drawn, so it is showing the error it got; now there is a file there.
   function showPreview() {
     const frame = document.querySelector(".doc-preview iframe");
     if (!frame) return;
