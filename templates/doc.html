@@ -66,6 +66,11 @@
             </button>
           </form>
         {{end}}
+
+        {{/* Shown by doc.js for a moment after an edit saves, and never
+             rendered without it: without JavaScript the form has a Save button
+             and a page that reloads, which says the same thing by arriving. */}}
+        <span class="saved" hidden aria-live="polite">✓ Saved</span>
       </div>
 
       {{/* Revealed by doc.js in place of the browser's confirm dialog. */}}

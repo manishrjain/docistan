@@ -946,6 +946,21 @@ button.pill-plain {
   gap: var(--space-2);
   margin-bottom: 20px;
 }
+/* Sits in the row with the tools rather than over the page, because it is a
+   remark about the thing just edited and not news. Accent-filled and gone in
+   under two seconds: long enough to be caught out of the corner of an eye,
+   short enough that it never has to be dismissed. */
+.saved {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  font: 10px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: var(--color-accent);
+  color: var(--color-bg);
+}
 .tool {
   width: 40px;
   height: 40px;

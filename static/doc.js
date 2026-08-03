@@ -13,15 +13,44 @@ document.addEventListener("DOMContentLoaded", () => {
   const heading = document.querySelector(".doc-title");
 
   // --- feedback ----------------------------------------------------------
-  // Edits report themselves as toasts, which are hard to miss. Model progress
-  // reports itself in the Naturalization timeline instead, next to the other
-  // steps, because that is where a reader already looks to see what ran.
+  // A save that worked and a save that did not are not the same kind of news,
+  // and used to be told the same way — both as a toast over the page.
+  //
+  // Succeeding is the ordinary case and wants the smallest possible remark: a
+  // chip in the row of tools, next to the buttons that do things to this
+  // document, gone again in under two seconds. Failing is the opposite. It
+  // carries a reason, the edit is still unsaved, and it keeps the toast, which
+  // stays until it is read.
+  //
+  // Nothing marks the save as in flight. It is one small request and the chip
+  // is the answer; a "Saving…" that is replaced 80ms later reads as a flicker
+  // rather than as progress. Model progress does report itself, in the
+  // Naturalization timeline, because that runs for seconds and is worth
+  // watching.
+  const savedChip = document.querySelector(".tools .saved");
   let saveToast;
+  let savedTimer;
+
   function setStatus(text, kind) {
+    if (kind === "bad") {
+      // Whatever the chip last claimed is no longer true.
+      showSaved(false);
+      saveToast?.remove();
+      saveToast = window.toast ? toast(text, { kind, sticky: true }) : null;
+      return;
+    }
+    // A save that succeeded clears an earlier failure: the edit did land in the
+    // end, and a stuck "Not saved" is then a lie the reader has to dismiss.
     saveToast?.remove();
-    saveToast = window.toast
-      ? toast(text, { kind, sticky: !kind })
-      : null;
+    saveToast = null;
+    showSaved(kind === "ok");
+  }
+
+  function showSaved(on) {
+    if (!savedChip) return;
+    clearTimeout(savedTimer);
+    savedChip.hidden = !on;
+    if (on) savedTimer = setTimeout(() => (savedChip.hidden = true), 1800);
   }
 
   // --- timeline ----------------------------------------------------------
