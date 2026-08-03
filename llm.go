@@ -47,6 +47,21 @@ const (
 	maxTags = 5
 )
 
+// capText applies that bound. It lives outside Enrich so the two cuts can be
+// tested without a call to the model, which is the only part of Enrich that
+// could go wrong here and the only part a test cannot reach.
+//
+// Both ends land on character boundaries: the caps are byte caps, but a byte cut
+// through a multi-byte character reaches the model as a replacement character in
+// the middle of a word, and the head cut is exactly where dates and reference
+// numbers sit.
+func capText(text string) string {
+	if len(text) <= textCap {
+		return text
+	}
+	return truncateBytes(text, headCap) + "\n\n…[middle omitted]…\n\n" + tailBytes(text, tailCap)
+}
+
 // modelPrices is USD per million tokens, from OpenAI's published price page
 // (August 2026). OpenAI does not expose prices over the API and does not
 // reprice existing models — new prices arrive as new model names — so a table
@@ -255,9 +270,7 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 	if text == "" {
 		return meta, used, errors.New("no text to work from")
 	}
-	if len(text) > textCap {
-		text = text[:headCap] + "\n\n…[middle omitted]…\n\n" + text[len(text)-tailCap:]
-	}
+	text = capText(text)
 
 	var sb strings.Builder
 	sb.WriteString("You file documents for a personal archive. Extract metadata from the document text.\n")

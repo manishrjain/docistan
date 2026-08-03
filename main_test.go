@@ -1074,6 +1074,172 @@ func TestIndexDerivesCreatedTimestamp(t *testing.T) {
 	}
 }
 
+// The payload caps are measured in bytes on purpose, but a byte cut through a
+// multi-byte character produces a string that is not valid UTF-8, and everything
+// downstream of these caps quietly rewrites the broken bytes to U+FFFD rather
+// than rejecting them. So the property to pin is that whatever comes back is
+// still valid text and still within the byte limit it was given.
+func TestTruncateBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"shorter than the limit is returned as it stands", "hello", 10, "hello"},
+		{"a length exactly at the limit is not a truncation", "hello", 5, "hello"},
+		{"a cut that already lands between characters keeps them all", "héllo", 3, "hé"},
+		{"a cut inside a two-byte character drops it", "héllo", 2, "h"},
+		{"a cut one byte into a three-byte character drops it", "a€b", 2, "a"},
+		{"a cut two bytes into a three-byte character drops it", "a€b", 3, "a"},
+		{"a three-byte character that fits is kept whole", "a€b", 4, "a€"},
+		{"a cut inside a four-byte character drops it", "a😀b", 3, "a"},
+		{"a four-byte character that fits is kept whole", "a😀b", 5, "a😀"},
+		{"a limit of zero leaves nothing", "héllo", 0, ""},
+		// Text that is nothing but wide characters is the case the byte cut got
+		// wrong most often: only one offset in three is a legal place to stop.
+		{"text of only multi-byte characters stops at the last whole one",
+			strings.Repeat("日", 5), 7, "日日"},
+		// U+FFFD is a rune real documents carry — this app counts them on purpose
+		// in garbageRatio — so a complete one at the end of the cut must survive.
+		// Only an incomplete encoding, which decodes as U+FFFD of size one, is
+		// evidence that the cut landed mid-character.
+		{"a replacement character the text really contains is kept", "ab�cd", 5, "ab�"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateBytes(tc.in, tc.max)
+			if got != tc.want {
+				t.Errorf("truncateBytes(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateBytes(%q, %d) = % x, which is not valid UTF-8", tc.in, tc.max, got)
+			}
+			if len(got) > tc.max {
+				t.Errorf("truncateBytes(%q, %d) returned %d bytes, over the limit", tc.in, tc.max, len(got))
+			}
+		})
+	}
+}
+
+// The tail cut is not the head cut mirrored. Keeping the last N bytes leaves the
+// damaged character at the *start* of what is kept, so the boundary has to be
+// found by moving forward, and reusing the backward walk here would return a
+// string that still begins with orphaned continuation bytes.
+func TestTailBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"shorter than the limit is returned as it stands", "hello", 10, "hello"},
+		{"a length exactly at the limit is not a truncation", "hello", 5, "hello"},
+		{"a suffix that already starts between characters keeps them all",
+			"日本語", 6, "本語"},
+		{"a suffix starting one byte inside a character skips the remains of it",
+			"日本語", 4, "語"},
+		{"a suffix starting two bytes inside a character skips the remains of it",
+			"日本語", 5, "語"},
+		{"a suffix too small for a whole character is empty rather than broken",
+			"abc€", 2, ""},
+		{"a limit of zero leaves nothing", "日本語", 0, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tailBytes(tc.in, tc.max)
+			if got != tc.want {
+				t.Errorf("tailBytes(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("tailBytes(%q, %d) = % x, which is not valid UTF-8", tc.in, tc.max, got)
+			}
+			if len(got) > tc.max {
+				t.Errorf("tailBytes(%q, %d) returned %d bytes, over the limit", tc.in, tc.max, len(got))
+			}
+			if !strings.HasSuffix(tc.in, got) {
+				t.Errorf("tailBytes(%q, %d) = %q, which is not a suffix of the input", tc.in, tc.max, got)
+			}
+		})
+	}
+}
+
+// This is the assertion that would have caught the original bug: a long document
+// in a script that spends three bytes a character lands the index cap inside a
+// character, and the JSON encoder on the way to Typesense replaces the split
+// rune with U+FFFD instead of reporting anything. A 400KB scan in Japanese is an
+// ordinary document here, not a contrived input.
+func TestIndexedContentIsValidUTF8(t *testing.T) {
+	text := strings.Repeat("日", 140000) // 420000 bytes, past contentIndexLimit
+	if len(text) <= contentIndexLimit {
+		t.Fatalf("fixture is only %d bytes, under the %d-byte cap", len(text), contentIndexLimit)
+	}
+	// Without this the test would pass on a cap that happened to fall between
+	// characters, and prove nothing about the cut.
+	if utf8.ValidString(text[:contentIndexLimit]) {
+		t.Fatalf("fixture does not exercise the bug: a byte cut at %d is already on a boundary", contentIndexLimit)
+	}
+
+	content, ok := tsDoc(&Doc{Content: text})["content"].(string)
+	if !ok {
+		t.Fatal("the indexed content is not a string")
+	}
+	if !utf8.ValidString(content) {
+		t.Error("the indexed content is not valid UTF-8, so Typesense stores a replacement character at the cut")
+	}
+	if len(content) > contentIndexLimit {
+		t.Errorf("the indexed content is %d bytes, over the %d-byte cap", len(content), contentIndexLimit)
+	}
+	if !strings.HasPrefix(text, content) {
+		t.Error("the indexed content is not a prefix of the document text")
+	}
+}
+
+// Enrich sends a long document head-and-tail, and both cuts used to be byte
+// cuts, so a German or Japanese document reached the model with a replacement
+// character at each seam — one of them right where the dates and reference
+// numbers are. The truncation lives outside Enrich so this can be checked
+// without a call to the model.
+func TestCapTextCutsBothEndsOnCharacterBoundaries(t *testing.T) {
+	if got := capText("Rechnung Müller — März"); got != "Rechnung Müller — März" {
+		t.Errorf("a short document was altered: %q", got)
+	}
+
+	text := strings.Repeat("日", 20000) // 60000 bytes, past textCap
+	if len(text) <= textCap {
+		t.Fatalf("fixture is only %d bytes, under the %d-byte cap", len(text), textCap)
+	}
+	// Both naive cuts have to be broken for this fixture to mean anything.
+	if utf8.ValidString(text[:headCap]) {
+		t.Fatalf("fixture does not exercise the head cut: byte %d is already a boundary", headCap)
+	}
+	if utf8.ValidString(text[len(text)-tailCap:]) {
+		t.Fatalf("fixture does not exercise the tail cut: byte %d is already a boundary", len(text)-tailCap)
+	}
+
+	got := capText(text)
+	if !utf8.ValidString(got) {
+		t.Error("the text sent to the model is not valid UTF-8")
+	}
+	const marker = "\n\n…[middle omitted]…\n\n"
+	if !strings.Contains(got, marker) {
+		t.Error("the middle was dropped without saying so")
+	}
+	head, tail, _ := strings.Cut(got, marker)
+	if len(head) > headCap {
+		t.Errorf("the head is %d bytes, over the %d-byte cap", len(head), headCap)
+	}
+	if len(tail) > tailCap {
+		t.Errorf("the tail is %d bytes, over the %d-byte cap", len(tail), tailCap)
+	}
+	if !strings.HasPrefix(text, head) {
+		t.Error("the head is not the start of the document")
+	}
+	if !strings.HasSuffix(text, tail) {
+		t.Error("the tail is not the end of the document")
+	}
+}
+
 // A write that cannot reach the index is not allowed to be skipped or handed to
 // a later reconciliation, so the helper under persist has to keep going through
 // failures — and stop the instant one attempt works, rather than paying for a

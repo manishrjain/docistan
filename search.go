@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/typesense/typesense-go/v3/typesense"
 	"github.com/typesense/typesense-go/v3/typesense/api"
@@ -138,10 +139,7 @@ func (s *Search) EnsureFreshCollection(ctx context.Context) error {
 // tsDoc converts a Doc into the map Typesense stores. Typesense ids are
 // strings, so the integer id is rendered in base 10.
 func tsDoc(d *Doc) map[string]any {
-	content := d.Content
-	if len(content) > contentIndexLimit {
-		content = content[:contentIndexLimit]
-	}
+	content := truncateBytes(d.Content, contentIndexLimit)
 	tags := d.Tags
 	if tags == nil {
 		tags = []string{}
@@ -531,6 +529,55 @@ func clip(s string, n int) string {
 		return s
 	}
 	return strings.TrimSpace(string(r[:n])) + "…"
+}
+
+// truncateBytes cuts s to at most max bytes without splitting a character. The
+// limit stays a byte limit — these are payload caps, and a document in a script
+// that spends three bytes a character really does fit fewer of them — but a cut
+// that lands inside a rune leaves a string that is not valid UTF-8, and the JSON
+// encoder downstream rewrites the stray bytes to U+FFFD instead of complaining.
+// So the cut walks back to the last boundary at or before the limit.
+//
+// Anything already within the limit comes back untouched, which is the common
+// case and worth not allocating for.
+func truncateBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 0 {
+		return ""
+	}
+	s = s[:max]
+	// DecodeLastRuneInString reports (RuneError, 1) for a byte that cannot end a
+	// valid encoding. U+FFFD is also a rune real text carries — this app counts
+	// them on purpose in garbageRatio — so it is the size, not the rune, that
+	// says the cut landed mid-character.
+	for len(s) > 0 {
+		if r, size := utf8.DecodeLastRuneInString(s); r != utf8.RuneError || size != 1 {
+			break
+		}
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// tailBytes is truncateBytes taken from the other end: at most max bytes off the
+// end of s, still landing on a character boundary. It cannot be the same walk,
+// because keeping a suffix means the damaged rune is at the *start* of what is
+// kept, so the fix is to move the start forward to the next boundary rather than
+// backward — dropping the continuation bytes whose leading byte was cut away.
+func tailBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 0 {
+		return ""
+	}
+	s = s[len(s)-max:]
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return s
 }
 
 // AllIDs walks every page of a query and returns the ids in order. Used by
