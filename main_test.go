@@ -297,7 +297,18 @@ func TestTextDensityIsOneThreshold(t *testing.T) {
 		{"a real text layer", strings.Repeat("Invoice line item 42.00 ", 60), 3, true},
 		{"empty", "", 1, false},
 		{"whitespace only", "\n \n\t\n", 1, false},
-		{"one page, thirty good characters", "Received with thanks, $42.00.", 1, true},
+		// Real text, and far too little of it to be a page of a document — the
+		// shape of a scanned page whose only extractable text is a caption. It
+		// is below the bar and so gets read again, which costs a slow pass and,
+		// if that pass finds nothing more, nothing else: OCR keeps whichever
+		// read more.
+		{"one page, thirty good characters", "Received with thanks, $42.00.", 1, false},
+		// A receipt is short because it is a receipt, not because anything went
+		// unread. This is the case the bar must stay below.
+		{"a one-page receipt", strings.Repeat("Item 4.20 VAT 0.84 ", 30), 1, true},
+		// A scanner watermark: the old floor on total characters existed to
+		// catch this, and the density bar now does it unaided.
+		{"scanner watermark", "Scanned by CamScanner", 1, false},
 		{"mojibake", strings.Repeat("�", 400), 1, false},
 		// pdfinfo failed. The question cannot be asked, so it is not answered
 		// either way: no claim that the text is the document, and no rescue.

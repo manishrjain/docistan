@@ -309,6 +309,21 @@ func ocrFlags(mode ocrMode) []string {
 	return []string{"--skip-text", "--deskew"}
 }
 
+// lostText reports whether an OCR pass came back with less text than the
+// document already had. Unreadable output counts as lost: a pass whose result
+// cannot even be read is not one to keep.
+//
+// Rune counts rather than bytes, so a document in a non-Latin script is not
+// judged to have gained text by being re-encoded.
+func lostText(ctx context.Context, produced, baseline string) bool {
+	after, err := ExtractText(ctx, produced)
+	if err != nil {
+		return true
+	}
+	return utf8.RuneCountInString(strings.TrimSpace(after)) <
+		utf8.RuneCountInString(strings.TrimSpace(baseline))
+}
+
 // ocrPass runs one pass. Only the mode flags vary between passes; the
 // archival format the result has to be in does not.
 func ocrPass(ctx context.Context, src, dst string, mode ocrMode) error {
@@ -322,7 +337,10 @@ func ocrPass(ctx context.Context, src, dst string, mode ocrMode) error {
 
 // OCR produces the archival PDF. It returns which engine supplied the text so
 // the UI can explain the result.
-func OCR(ctx context.Context, src, dst string, mode ocrMode) (string, error) {
+//
+// baseline is the text the source already had, and matters only on the redo
+// path: see below.
+func OCR(ctx context.Context, src, dst string, mode ocrMode, baseline string) (string, error) {
 	if mode == ocrSkipSigned {
 		// Preserve the signature; these are digitally generated and already
 		// carry a text layer.
@@ -338,6 +356,19 @@ func OCR(ctx context.Context, src, dst string, mode ocrMode) (string, error) {
 		// least the pages that are wholly image, and a thinner text layer is a
 		// better outcome than the chain below, which produces none at all.
 		logf("ocrmypdf --redo-ocr failed, retrying with --skip-text: %v", err)
+		err = ocrPass(ctx, src, tmp, ocrSkipText)
+	} else if err == nil && mode == ocrRedoText && lostText(ctx, tmp, baseline) {
+		// The escalation is a bet, and this is where it is settled rather than
+		// assumed. --redo-ocr is meant to keep the text that was already there
+		// and add what it finds in the images, but it re-renders the page to do
+		// it and can come back with less than it started with — measured on a
+		// real document, 72 characters in and 56 out.
+		//
+		// Both answers are in hand by this point and the cheap pass costs about
+		// a second, so the document takes whichever read more of it. That makes
+		// a wrong guess about the density bar cost time and nothing else, which
+		// is the property that lets the bar sit high enough to be useful.
+		logf("--redo-ocr read less than the document already had, keeping the --skip-text result")
 		err = ocrPass(ctx, src, tmp, ocrSkipText)
 	}
 	if err == nil {
@@ -454,8 +485,13 @@ func garbageRatio(text string) int {
 //
 // So the bar is density, and it is the same density the rescue asks about —
 // one threshold with one meaning, rather than "has text" and "has enough text
-// to be the document" drifting apart as two separate standards. Twenty
-// characters a page is far below any real page and far above any stamp.
+// to be the document" drifting apart as two separate standards.
+//
+// Density alone, with no separate minimum on the total: at this bar a document
+// clearing it has at least minCharsPerPage characters however few pages it has,
+// so a floor could never be the binding test. There was one when the bar was
+// twenty — it was what caught a one-page scan whose entire text was "Scanned by
+// CamScanner" — and it is redundant now rather than merely unused.
 //
 // Without a page count the question cannot be asked at all, and it answers no
 // rather than guessing.
@@ -465,8 +501,20 @@ func HasTextLayer(text string, pages int) bool {
 	}
 	trimmed := strings.TrimSpace(text)
 	runes := utf8.RuneCountInString(trimmed)
-	return runes >= 25 && runes/pages >= 20 && garbageRatio(trimmed) <= 5
+	return runes/pages >= minCharsPerPage && garbageRatio(trimmed) <= 5
 }
+
+// What counts as a page's worth of text, measured on this archive rather than
+// guessed: the median page holds 1,404 characters and the tenth percentile 231,
+// while the documents found to be silently under-read held 13 and 21.
+//
+// Two hundred sits in the gap. Below it are documents whose text is really in
+// their images — a ten-page slide deck at 199 a page turned out to be a third
+// under-read — and above it are the documents that are short because they are
+// receipts and emails, complete as they stand. Pushing higher starts paying for
+// those: the share of documents re-read is 6% at this bar, 10% at 300 and 35%
+// at 1000, while the gain stays with the image-heavy few.
+const minCharsPerPage = 200
 
 // NeedsVisionRescue decides whether to re-read a document with the model. It is
 // HasTextLayer's question over again on what came back: if OCR did not produce

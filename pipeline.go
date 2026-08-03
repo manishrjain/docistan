@@ -551,7 +551,7 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 			// convenience that did not come off.
 			logf("doc %d: %v", doc.ID, err)
 		}
-		source, err := OCR(ctx, normalized, archive, ocrModeFor(doc.Signed, pre, prePages))
+		source, err := OCR(ctx, normalized, archive, ocrModeFor(doc.Signed, pre, prePages), pre)
 		if err != nil {
 			return fmt.Errorf("ocr: %w", err)
 		}
