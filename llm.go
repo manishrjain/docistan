@@ -246,7 +246,7 @@ func metaSchema(maxTags int) map[string]any {
 			"tags": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": fmt.Sprintf("1-%d short lowercase tags: as many as genuinely apply and no more, so a one-page receipt comes back with two or three rather than filling the allowance. Tags are the only classification, so include both the kind of document (invoice, statement, tax) and who or what it concerns (northwind, car, medical). A document printed on a numbered form also carries that form's own designation, lowercased and hyphenated as the form prints it — w-2, 1099-int, form-16 — whoever issues it, tax authority or not.", maxTags),
+				"description": fmt.Sprintf("1-%d short lowercase tags: as many as genuinely apply and no more, so a one-page receipt comes back with two or three rather than filling the allowance. Tags are the only classification, so include both the kind of document (invoice, statement, tax) and who or what it concerns (northwind, car, medical). A document printed on a numbered form also carries that form's own designation, lowercased and closed up with no hyphens or spaces however the form prints it — w2, 1099int, form16 — whoever issues it, tax authority or not.", maxTags),
 			},
 			"created_date": map[string]any{
 				"type":        "string",
