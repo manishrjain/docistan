@@ -404,14 +404,22 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	doc.Error = ""
 	doc.FailedStage = ""
 	p.save(ctx, doc)
-	p.app.record("ingested", doc.ID, doc.OriginalName, ingestDetail(doc))
 
 	// The document is complete and usable now. Metadata is a separate concern
 	// that depends on a remote service with its own budget, so it is queued
 	// rather than waited on.
+	//
+	// Immediately after the save and before the journal line, because a page
+	// watching this document reloads itself the moment it is neither processing
+	// nor queued, and between those two states there must be nothing for it to
+	// observe. A journal append here — a mutex and a write — was a window in
+	// which the document had gone ready and had not yet been queued, and a poll
+	// landing in it would refresh the page onto the metadata this is about to
+	// replace.
 	if !doc.Enriched && p.app.enrichq != nil {
 		p.app.enrichq.Add(doc.ID)
 	}
+	p.app.record("ingested", doc.ID, doc.OriginalName, ingestDetail(doc))
 }
 
 // removeFromInbox deletes a file only if it is actually sitting in the inbox.
