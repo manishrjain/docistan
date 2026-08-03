@@ -332,8 +332,15 @@ func when(ts int64, by string) string {
 }
 
 // readStage covers getting text out of the document.
+//
+// The step is named after whatever actually produced the text. Calling it OCR
+// regardless was a small lie on every document that carried its own text
+// layer, and a flat contradiction on a signed one: the page says the signature
+// was preserved and the document therefore not OCR'd, directly above a step
+// headed OCR reporting three thousand characters. Those characters are real —
+// pdftotext read them out of the PDF — but no OCR ran to find them.
 func readStage(doc *Doc) Stage {
-	s := Stage{Key: "text", Name: "OCR"}
+	s := Stage{Key: "text", Name: readVerb(doc)}
 	chars := len(strings.TrimSpace(doc.Content))
 
 	// Status wins over the content: a reprocess leaves the previous text in
@@ -344,7 +351,7 @@ func readStage(doc *Doc) Stage {
 		return s
 	}
 	if chars == 0 {
-		s.Name, s.State = "OCR — no text found", "failed"
+		s.Name, s.State = s.Name+" — no text found", "failed"
 		s.Detail = "nothing to search or summarise"
 		return s
 	}
@@ -355,7 +362,7 @@ func readStage(doc *Doc) Stage {
 		parts = append(parts, fmt.Sprintf("%d page%s", doc.PageCount, plural(doc.PageCount)))
 	}
 	parts = append(parts, commaNum(chars)+" characters")
-	s.Name = "OCR — " + strings.Join(parts, ", ")
+	s.Name += " — " + strings.Join(parts, ", ")
 
 	var by string
 	switch {
@@ -370,6 +377,19 @@ func readStage(doc *Doc) Stage {
 	}
 	s.Detail = when(doc.TextTS, by)
 	return s
+}
+
+// readVerb names the step after the tool that did the work. Only tesseract is
+// OCR; a PDF that arrived with a text layer — including every signed one,
+// which is deliberately left untouched — was simply read.
+func readVerb(doc *Doc) string {
+	if doc.OCRSource == OCRTesseract && !doc.NativeText {
+		return "OCR"
+	}
+	if doc.OCRSource == OCRLLM {
+		return "Read by the model"
+	}
+	return "Text"
 }
 
 // taggingStage keeps one fixed label and says what is happening underneath it,
