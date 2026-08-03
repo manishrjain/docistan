@@ -1,4 +1,4 @@
-module github.com/manishrjain/docistan
+module github.com/manishrjain/docovia
 
 go 1.25.5
 

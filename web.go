@@ -544,18 +544,18 @@ func (a *App) render(w http.ResponseWriter, name string, data page) {
 // row of tabs truncates from the right.
 func (p page) BrowserTitle() string {
 	if p.Title != "" {
-		return p.Title + " · Docistan"
+		return p.Title + " · Docovia"
 	}
 	// A search gets its terms in the tab. The count belongs to the archive,
 	// not to the page, and reading "4 docs" above three results is a small
 	// lie that costs nothing to avoid.
 	if q := strings.TrimSpace(p.Query.Q); q != "" {
-		return fmt.Sprintf("\u201c%s\u201d · Docistan", q)
+		return fmt.Sprintf("\u201c%s\u201d · Docovia", q)
 	}
 	if p.Total > 0 {
-		return fmt.Sprintf("Docistan — %s doc%s", commaNum(p.Total), plural(p.Total))
+		return fmt.Sprintf("Docovia — %s doc%s", commaNum(p.Total), plural(p.Total))
 	}
-	return "Docistan"
+	return "Docovia"
 }
 
 // urlWith rebuilds the current index URL with the query string edited in
@@ -1590,7 +1590,7 @@ func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
 // temporary file — but it also means the headers are gone before the first
 // document is read, and a failure part way through can only be logged.
 func (a *App) streamZip(w http.ResponseWriter, r *http.Request, ids []int) {
-	name := fmt.Sprintf("docistan-%s.zip", time.Now().Format("2006-01-02"))
+	name := fmt.Sprintf("docovia-%s.zip", time.Now().Format("2006-01-02"))
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", disposition("attachment", name))
 

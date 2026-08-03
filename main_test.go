@@ -81,7 +81,7 @@ func TestOpenAIKeyEnvWins(t *testing.T) {
 }
 
 // A blank environment variable is the same as an unset one — otherwise
-// `OPENAI_API_KEY= ./docistan` would silently disable the file fallback.
+// `OPENAI_API_KEY= ./docovia` would silently disable the file fallback.
 func TestOpenAIKeyBlankEnvFallsThrough(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "key")
 	if err := os.WriteFile(path, []byte("sk-from-file\n"), 0o600); err != nil {

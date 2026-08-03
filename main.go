@@ -59,7 +59,7 @@ func main() {
 	flag.StringVar(&cfg.DataDir, "data", defaultDataDir(), "document archive directory")
 	flag.StringVar(&cfg.Listen, "listen", "127.0.0.1:8080", "listen address")
 	flag.StringVar(&cfg.TypesenseURL, "typesense-url", "http://localhost:8108", "Typesense URL")
-	flag.StringVar(&cfg.TypesenseKey, "typesense-key", cmp.Or(os.Getenv("TYPESENSE_API_KEY"), "docistan-dev-key"), "Typesense API key")
+	flag.StringVar(&cfg.TypesenseKey, "typesense-key", cmp.Or(os.Getenv("TYPESENSE_API_KEY"), "docovia-dev-key"), "Typesense API key")
 	flag.StringVar(&cfg.Collection, "collection", "documents", "Typesense collection name; give a second instance its own")
 	flag.IntVar(&cfg.Workers, "workers", 2, "ingest workers")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
@@ -70,7 +70,7 @@ func main() {
 	flag.Parse()
 
 	if err := run(cfg); err != nil {
-		log.Fatalf("docistan: %v", err)
+		log.Fatalf("docovia: %v", err)
 	}
 }
 
@@ -419,7 +419,7 @@ func defaultDataDir() string {
 	if err != nil {
 		return "./data"
 	}
-	return filepath.Join(home, "docistan-data")
+	return filepath.Join(home, "docovia-data")
 }
 
 func defaultKeyFile() string {

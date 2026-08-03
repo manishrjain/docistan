@@ -1,4 +1,4 @@
-/* docistan: the app around this viewer is light-only, so the viewer is
+/* docovia: the app around this viewer is light-only, so the viewer is
    pinned to light too. Neutralised rather than deleted, so a pdf.js
    upgrade shows up as a conflict here instead of silently restoring a
    dark pane inside a paper-white page. */
@@ -2758,7 +2758,7 @@
 
 :is(.annotationLayer, .annotationEditorLayer){
   .annotationCommentButton{
-    color-scheme:only light;/*docistan: light-only app*/
+    color-scheme:only light;/*docovia: light-only app*/
     --comment-button-bg:light-dark(white, #1c1b22);
     --comment-button-fg:light-dark(#5b5b66, #fbfbfe);
     --comment-button-active-bg:light-dark(#0041a4, #a6ecf4);
@@ -3196,7 +3196,7 @@
 }
 
 .commentPopup{
-  color-scheme:only light;/*docistan: light-only app*/
+  color-scheme:only light;/*docovia: light-only app*/
 
   --divider-color:light-dark(#cfcfd8, #3a3944);
   --comment-shadow:0 0.5px 2px 0 light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.2)), 0 4px 16px 0 light-dark(rgb(0 0 0 / 0.1), rgb(0 0 0 / 0.4));
@@ -6132,7 +6132,7 @@ button.hasPopupMenu{
 }
 
 :root{
-  color-scheme:only light;/*docistan: light-only app*/
+  color-scheme:only light;/*docovia: light-only app*/
 
   --viewer-container-height:0;
   --pdfViewer-padding-bottom:0;
@@ -8165,7 +8165,7 @@ dialog :link{
   }
 }
 
-/* docistan: pin the viewer to light. pdf.js resolves light-dark() from the
+/* docovia: pin the viewer to light. pdf.js resolves light-dark() from the
    computed color-scheme, and its :root leaves that at the UA default, so
    without this the toolbar follows the OS and goes dark inside a
    paper-white page. Appended last so it wins on order. */

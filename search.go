@@ -346,8 +346,8 @@ const perPage = 24
 // without escaping the surroundings, so we ask for markers that cannot occur
 // in real text, escape everything, and only then turn them into real tags.
 const (
-	hlStart = "@@docistan-hl@@"
-	hlEnd   = "@@/docistan-hl@@"
+	hlStart = "@@docovia-hl@@"
+	hlEnd   = "@@/docovia-hl@@"
 )
 
 func escapeFilterValue(v string) string {

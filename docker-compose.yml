@@ -4,14 +4,14 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8108:8108"
-    # No volume on purpose: docistan rebuilds the whole collection from the
+    # No volume on purpose: docovia rebuilds the whole collection from the
     # JSON sidecars on every boot, so a persisted index would only be a second
     # source of truth that can drift.
     tmpfs:
       - /data
     command: >
       --data-dir /data
-      --api-key=${TYPESENSE_API_KEY:-docistan-dev-key}
+      --api-key=${TYPESENSE_API_KEY:-docovia-dev-key}
       --enable-cors=false
     healthcheck:
       # The image ships no HTTP client at all — no curl, no wget, no nc — so

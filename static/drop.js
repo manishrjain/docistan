@@ -9,7 +9,7 @@ overlay.innerHTML =
   '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
   '<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>' +
   '<div class="big">Drop files anywhere</div>' +
-  '<div class="micro">Welcome to Docistan — arrive, get processed, belong</div>' +
+  '<div class="micro">Welcome to Docovia — arrive, get processed, belong</div>' +
   "</div>";
 
 document.addEventListener("DOMContentLoaded", () => {
