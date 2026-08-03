@@ -94,13 +94,11 @@
         </div>
       </div>
 
-      {{/* A failure is not a banner among banners: it is the state of the
-           document and it usually wants something done about it, so it has a
-           box of its own at the head of the timeline below. What is left here
-           is the document that is merely still working. */}}
-      {{if and (ne $d.Status "ready") (ne $d.Status "failed")}}
-        <p class="banner {{$d.Status}}">{{$d.Status}}</p>
-      {{end}}
+      {{/* No status banner. Neither of the two things it could say is worth a
+           line here: a failure has its own box at the head of the timeline
+           below, and a document still being processed is already saying so in
+           that timeline, step by step, which is more than the word
+           "processing" ever told anyone. */}}
       {{if $d.Trashed}}
         {{/* The date rather than "in the trash": what someone needs to know
              here is how long they have to change their mind. */}}

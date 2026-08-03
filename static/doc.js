@@ -483,9 +483,32 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!data) continue;
       applyStages(data.stages);
       applyMeta(data);
-      if (data.status !== "processing" && !data.queued) return data;
+      if (data.status !== "processing" && !data.queued) {
+        if (data.status === "ready") showPreview();
+        return data;
+      }
     }
     return null;
+  }
+
+  // The viewer was pointed at an archival PDF that did not exist when the page
+  // was drawn — the document was still being processed, or was locked and had
+  // never been readable at all — so it is showing the error it got. Now that
+  // there is a file there, load it.
+  //
+  // Reloading the frame rather than the page: the timeline, the tags and the
+  // title have all just been updated in place, and throwing that away to fetch
+  // the same information again would undo the point of watching at all.
+  function showPreview() {
+    const frame = document.querySelector(".doc-preview iframe");
+    if (!frame) return;
+    try {
+      frame.contentWindow.location.reload();
+    } catch {
+      // Same origin, so the reload above is the normal path; this is for a
+      // viewer that has navigated somewhere the parent may no longer touch.
+      frame.src = frame.src;
+    }
   }
 
   // Confirmation, when the markup asks for one, then the action. Without
