@@ -185,8 +185,18 @@ func (s *Search) Upsert(ctx context.Context, d *Doc) error {
 	return err
 }
 
+// Delete takes one id out of the index. An id that was not in it is the state
+// the caller asked for rather than a failure, so it is reported as success:
+// every caller retries this until it succeeds, and Typesense's answer for "no
+// such document" is a 404, which no amount of retrying will turn into anything
+// else. Persisting a tombstone lands here for an id that is normally already
+// gone, so this is the ordinary path, not a rare one.
 func (s *Search) Delete(ctx context.Context, id int) error {
 	_, err := s.client.Collection(s.collectionName).Document(strconv.Itoa(id)).Delete(ctx)
+	var httpErr *typesense.HTTPError
+	if errors.As(err, &httpErr) && httpErr.Status == 404 {
+		return nil
+	}
 	return err
 }
 

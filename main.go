@@ -239,6 +239,13 @@ func retryUntil(ctx context.Context, initial, max time.Duration, what string, fn
 //
 // So the only way out other than success is the context: shutdown, or a client
 // that has given up. Callers get nil or ctx.Err(), nothing else.
+//
+// A tombstone is the one document that is written but not indexed. Its sidecar
+// still goes to disk — that record is the whole reason one is kept, and it is
+// what holds the id — while the index is told to forget the id instead of being
+// handed the document. Deciding that here rather than at each call site is what
+// makes "a permanently deleted document is not in the index" true for callers
+// that do not know the rule, including the ones not written yet.
 func (a *App) persist(ctx context.Context, doc *Doc) error {
 	err := retryUntil(ctx, retryInitial, retryMax, fmt.Sprintf("doc %d: writing sidecar", doc.ID), func() error {
 		return a.store.Save(doc)
@@ -246,9 +253,33 @@ func (a *App) persist(ctx context.Context, doc *Doc) error {
 	if err != nil {
 		return err
 	}
+	if indexOpFor(doc) == indexRemove {
+		return retryUntil(ctx, retryInitial, retryMax, fmt.Sprintf("doc %d: removing from index", doc.ID), func() error {
+			return a.search.Delete(ctx, doc.ID)
+		})
+	}
 	return retryUntil(ctx, retryInitial, retryMax, fmt.Sprintf("doc %d: indexing", doc.ID), func() error {
 		return a.search.Upsert(ctx, doc)
 	})
+}
+
+// What persist should tell the index about a document.
+type indexOp int
+
+const (
+	indexUpsert indexOp = iota // store the document, the ordinary case
+	indexRemove                // take the id out: this is a tombstone
+)
+
+// indexOpFor is the whole of that decision, and it is a function of the
+// document alone — nothing to reach, nothing to stand in for — so the rule that
+// must never break can be checked directly instead of being inferred from a
+// live write to a search server.
+func indexOpFor(d *Doc) indexOp {
+	if d.Gone() {
+		return indexRemove
+	}
+	return indexUpsert
 }
 
 // sweepInterval is how often the trash is looked at. The deadline is a date
@@ -344,7 +375,7 @@ func (a *App) replaySidecars(ctx context.Context) (indexed int, unfinished []int
 	err = a.store.Each(func(d *Doc) error {
 		// Tombstones stay on disk to keep their ids reserved, but must not
 		// come back into the index.
-		if d.Status == StatusDeleted {
+		if d.Gone() {
 			return nil
 		}
 		if d.Status == StatusProcessing {

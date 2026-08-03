@@ -98,9 +98,24 @@ type Doc struct {
 	EnrichedTS int64 `json:"enriched_ts,omitempty"`
 }
 
+// Gone reports whether this is a tombstone rather than a document: the sidecar
+// outlived the files it described, and stays only to keep the id it consumed
+// from ever being handed out again.
+//
+// Four places have to agree about that, so it is written once. The replay that
+// rebuilds the index at boot skips these; persist removes them from the index
+// instead of writing them to it; permanent deletion refuses to run a second
+// time; and every handler that loads a document in order to change it answers
+// 404 — the same answer the document page already gives, because that page
+// reads from the index and tombstones are not in it.
+func (d *Doc) Gone() bool { return d.Status == StatusDeleted }
+
 // Trashed reports whether the document is in the trash. Every view and the
 // enrichment queue ask this question, so it is answered in one place rather
 // than by each of them remembering which way the comparison goes.
+//
+// This is not Gone: a trashed document still has all of its files and is still
+// in the index, which is what the trash view lists.
 func (d *Doc) Trashed() bool { return d.DeleteAfterTS > 0 }
 
 // Trash moves the document to the trash by setting its purge deadline. Nothing

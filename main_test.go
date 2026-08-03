@@ -1095,3 +1095,166 @@ func TestRemoveFromInboxIsLoudOnlyWhenSomethingIsWrong(t *testing.T) {
 		t.Errorf("a file that was already gone was reported as a problem:\n%s", buf.String())
 	}
 }
+
+// persist is the single write path, so "a permanently deleted document is not
+// in the index" has to be true there rather than in each of its callers, and
+// the part of persist that decides it is this function — a document in, one of
+// two operations out, nothing else consulted. Checking it directly is what lets
+// the rule be tested at all: a test that had to watch a live upsert could only
+// run where a search server is running, which is not where a rule like this
+// gets broken.
+//
+// The trashed case is the one that would be easy to get wrong from the other
+// side. A document in the trash still has every one of its files and the trash
+// view is a filter over the index, so removing it there would empty the trash
+// rather than fill it.
+func TestIndexOpForRemovesOnlyTombstones(t *testing.T) {
+	trashed := &Doc{ID: 4, Status: StatusReady, Title: "Council tax"}
+	trashed.Trash(time.Now())
+
+	name := func(op indexOp) string {
+		if op == indexRemove {
+			return "be removed from the index"
+		}
+		return "be written to the index"
+	}
+	cases := []struct {
+		what string
+		doc  *Doc
+		want indexOp
+	}{
+		{"still processing", &Doc{ID: 1, Status: StatusProcessing}, indexUpsert},
+		{"ready", &Doc{ID: 2, Status: StatusReady}, indexUpsert},
+		{"that failed, which is still a document you can find", &Doc{ID: 3, Status: StatusFailed}, indexUpsert},
+		{"in the trash, which is a view of the index", trashed, indexUpsert},
+		{"that was deleted for good", &Doc{ID: 5, Status: StatusDeleted}, indexRemove},
+	}
+	for _, c := range cases {
+		if got := indexOpFor(c.doc); got != c.want {
+			t.Errorf("a document %s should %s, but persist would make it %s", c.what, name(c.want), name(got))
+		}
+	}
+}
+
+// The sequence that put purged documents back on the site: a document is
+// destroyed, so its files are gone and the index has forgotten it, but the
+// sidecar stays behind to hold the id — and every route that changes a document
+// begins by reading exactly that file. Trashing one, then restoring it, brought
+// it back into the listing pointing at files that no longer exist.
+//
+// Both defences are checked against a tombstone made by the real Store.Delete
+// rather than one written out by hand here, since a hand-made tombstone only
+// proves this test agrees with itself. LoadMeta is included because the delete
+// route reads the status from there, alongside the title it needs for the
+// journal, instead of reading the sidecar a second time.
+func TestPurgedDocumentCannotComeBack(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := &Doc{
+		ID: 1, SHA256: "0f1e2d", OriginalName: "scan_001.pdf", OriginalExt: ".pdf",
+		Status: StatusReady, Title: "Water bill", Content: "the whole text of it",
+	}
+	for _, p := range []string{s.OriginalPath(1, ".pdf"), s.ArchivePath(1), s.ThumbPath(1)} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Save(doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Gone() {
+		t.Fatal("a ready document reports itself as a tombstone")
+	}
+
+	if err := s.Delete(1); err != nil {
+		t.Fatal(err)
+	}
+	tomb, err := s.Load(1)
+	if err != nil {
+		t.Fatalf("the tombstone must stay readable, or the id it reserves is lost: %v", err)
+	}
+	if !tomb.Gone() {
+		t.Errorf("a deleted document loads with status %q, which the guard in loadDoc lets through as an ordinary document", tomb.Status)
+	}
+	if got := indexOpFor(tomb); got != indexRemove {
+		t.Error("persist would write the tombstone into the index, which is how a deleted document reappears in the listing")
+	}
+	meta, err := s.LoadMeta(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.Gone() {
+		t.Errorf("LoadMeta reports status %q for a tombstone, so the delete route cannot tell it has already run", meta.Status)
+	}
+	// Why the resurrection was worse than a stale row: the files are really
+	// gone, so a document brought back is one whose every link is a 404.
+	for _, p := range []string{s.OriginalPath(1, ".pdf"), s.ArchivePath(1), s.ThumbPath(1)} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived the delete (%v)", filepath.Base(p), err)
+		}
+	}
+}
+
+// What a tombstone keeps is a deliberate list. The id is the whole reason the
+// file stays — ids get written on paper, so one must never be handed to a
+// second document — and the hash, the original name and the title are what let
+// someone reading the archive later say which document this was. The text and
+// the tags are the bulk, and keeping them would make deletion a rename.
+//
+// The status is checked in the file rather than only on the struct, because the
+// replay that rebuilds the index at every boot reads that key to decide what
+// not to index: a value that did not survive the round trip would resurrect
+// every deleted document in the archive on the next restart.
+func TestDeleteLeavesATombstoneThatKeepsTheIdentity(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := &Doc{
+		ID: 7, SHA256: "9a8b7c", OriginalName: "scan_007.pdf", OriginalExt: ".pdf",
+		Status: StatusReady, Title: "Dentist receipt", Summary: "one visit",
+		Content: "the whole text of it", Tags: []string{"health", "receipt"},
+		AddedTS: 1_700_000_000, PageCount: 3, FileSize: 40 << 10,
+	}
+	doc.Trash(time.Now())
+	if err := s.Save(doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(7); err != nil {
+		t.Fatal(err)
+	}
+
+	tomb, err := s.Load(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tomb.Status != StatusDeleted {
+		t.Errorf("tombstone status is %q, want %q", tomb.Status, StatusDeleted)
+	}
+	if tomb.ID != doc.ID || tomb.SHA256 != doc.SHA256 || tomb.OriginalName != doc.OriginalName || tomb.Title != doc.Title {
+		t.Errorf("the tombstone lost the identity it exists to keep: %+v", tomb)
+	}
+	if tomb.AddedTS != doc.AddedTS {
+		t.Errorf("added_ts is %d, want %d: when it arrived is part of the record", tomb.AddedTS, doc.AddedTS)
+	}
+	if tomb.DeletedTS == 0 {
+		t.Error("the tombstone does not say when the document was deleted")
+	}
+	if tomb.Content != "" || tomb.Summary != "" || len(tomb.Tags) != 0 {
+		t.Errorf("the bulk survived the delete: %d bytes of text, summary %q, tags %v",
+			len(tomb.Content), tomb.Summary, tomb.Tags)
+	}
+	if tomb.Trashed() {
+		t.Errorf("the tombstone still carries a purge deadline (%d), so the sweeper would come back for a document that has already gone", tomb.DeleteAfterTS)
+	}
+
+	b, err := os.ReadFile(s.DocPath(7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"status": "`+StatusDeleted+`"`)) {
+		t.Errorf("the sidecar on disk does not record the deletion:\n%s", b)
+	}
+}

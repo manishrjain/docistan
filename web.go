@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -901,6 +902,15 @@ func pathID(w http.ResponseWriter, r *http.Request) (int, bool) {
 // loadDoc goes one step further and reads the sidecar, which is what every
 // handler that intends to change a document needs. Edits apply to the sidecar
 // because it, not the indexed copy, is authoritative.
+//
+// A tombstone is not a document and is answered as missing. It is a record that
+// something was destroyed: its files are gone, so a deleted document is not
+// there to be edited, retried, enriched, trashed or restored, and every one of
+// those handlers reaches its document through here. This is what makes them
+// agree with the document page, which already 404s because it reads the index
+// via search.Get and tombstones are not in it. Without it a stale tab could
+// post to any of them and put a purged document back into the listing —
+// findable, restorable, and 404 on its own PDF.
 func (a *App) loadDoc(w http.ResponseWriter, r *http.Request) (*Doc, bool) {
 	id, ok := pathID(w, r)
 	if !ok {
@@ -908,6 +918,10 @@ func (a *App) loadDoc(w http.ResponseWriter, r *http.Request) (*Doc, bool) {
 	}
 	doc, err := a.store.Load(id)
 	if err != nil {
+		http.NotFound(w, r)
+		return nil, false
+	}
+	if doc.Gone() {
 		http.NotFound(w, r)
 		return nil, false
 	}
@@ -1010,6 +1024,13 @@ const (
 	purgeBySweeper = "trash expired"
 )
 
+// errGone is purge refusing to destroy what is already destroyed. A sentinel
+// rather than a log line, because the two callers answer it differently: the
+// single-document route turns it into the 404 the rest of the site gives for a
+// tombstone, and the bulk action counts it as one id of a selection that did
+// not move.
+var errGone = errors.New("document is already deleted")
+
 // purge is permanent deletion, shared by the three ways to reach it: the
 // document page, the bulk action, and the sweeper. Files go, the sidecar
 // becomes a tombstone so the id stays spoken for, and the index entry is
@@ -1025,6 +1046,14 @@ func (a *App) purge(ctx context.Context, id int, event, why string) error {
 	// deleted" makes the reader go looking.
 	var title string
 	if doc, err := a.store.LoadMeta(id); err == nil {
+		// Already a tombstone, so there is nothing left to destroy. Running the
+		// delete again would rewrite it — losing the time of the real deletion —
+		// and journal a second deletion of a document that has been gone for
+		// weeks. The read that fetches the title carries the status, so asking
+		// costs nothing, and this is the only way into Store.Delete.
+		if doc.Gone() {
+			return errGone
+		}
 		title = doc.Title
 	}
 	if err := a.store.Delete(id); err != nil {
@@ -1062,6 +1091,15 @@ func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.purge(r.Context(), id, "deleted", ""); err != nil {
+		// Already deleted is not an error to report, it is a document that is
+		// not there — the same answer its page and every other route that
+		// changes a document give for a tombstone. This route reads the id
+		// straight out of the path rather than through loadDoc, because purge
+		// needs the title for its journal line before the document goes.
+		if errors.Is(err, errGone) {
+			http.NotFound(w, r)
+			return
+		}
 		http.Error(w, "deleting document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1161,6 +1199,14 @@ func (a *App) setTrashedByID(ctx context.Context, id int, trash bool) error {
 	doc, err := a.store.Load(id)
 	if err != nil {
 		return err
+	}
+	// The bulk route's own version of what loadDoc does for the single-document
+	// ones: a selection made before a purge — or before the sweeper ran — still
+	// posts the ids it saw, and a tombstone is not a document to move in or out
+	// of the trash. persist would keep it out of the index either way; refusing
+	// here is what also keeps the tombstone unedited and the journal honest.
+	if doc.Gone() {
+		return errGone
 	}
 	if trash {
 		doc.Trash(time.Now())
