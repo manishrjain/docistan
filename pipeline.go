@@ -623,11 +623,12 @@ func (p *Pipeline) decrypt(ctx context.Context, doc *Doc, orig, dst string) (str
 	which, err := DecryptPDF(ctx, orig, dst, p.app.passwords())
 	switch {
 	case errors.Is(err, errNoPassword):
-		// An instruction, not a diagnosis. This is the sentence the Failed row
-		// and the document page show, and it is the only thing standing between
-		// the reader and a document they cannot open; the stage beside it
-		// already says "decrypt", so it does not repeat that.
-		return "", fmt.Errorf("password-protected; add its password to %s and reprocess", p.passwordFileName())
+		// Short, and without the path it used to name. The document page says
+		// this in the timeline now, with the box to type the password into
+		// directly underneath — an instruction to go and edit a file by hand is
+		// worse advice than the form already on screen, and the path it named
+		// went stale the moment the password file moved into the archive.
+		return "", errNoPassword
 	case err != nil:
 		return "", fmt.Errorf("decrypt: %w", err)
 	}
@@ -698,11 +699,11 @@ func (p *Pipeline) adoptDecrypted(doc *Doc, orig, decrypted string) error {
 	return nil
 }
 
-// passwordFileName is what to call the password file when telling someone to
-// put a password in it. The configured path is the useful answer — it is right
-// both for the default in the archive and for a -pdf-passwords elsewhere — but
-// a Config that never went through resolvePasswordFile has none, and "add its
-// password to  and reprocess" is not an instruction anybody can follow.
+// passwordFileName is what to call the password file in the log line that says
+// a document was opened with one. The configured path is the useful answer — it
+// is right both for the default in the archive and for a -pdf-passwords
+// elsewhere — but a Config that never went through resolvePasswordFile has
+// none, and a log line naming an empty path names nothing.
 func (p *Pipeline) passwordFileName() string {
 	if path := p.app.cfg.PasswordFile; path != "" {
 		return path

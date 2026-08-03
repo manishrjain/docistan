@@ -674,13 +674,32 @@ func (s *Search) ReservedCounts(ctx context.Context) (ReservedCounts, error) {
 // their contents are wanted here. The whole list is read before anything is
 // deleted, so the pages are walking a set that is not changing underneath them.
 func (s *Search) ExpiredTrashIDs(ctx context.Context, now int64) ([]int, error) {
+	return s.idsMatching(ctx, fmt.Sprintf("delete_after_ts:>0 && delete_after_ts:<=%d", now))
+}
+
+// LockedIDs lists documents still waiting for a password, newest filter first.
+// Trashed ones are left out: a document on its way to being deleted is not work
+// anybody wants done, and reprocessing it would only spend qpdf runs on it.
+//
+// This exists because a password is rarely a document's alone — one bank sends
+// the same locked statement every month — so learning one is a reason to go back
+// and try the others.
+func (s *Search) LockedIDs(ctx context.Context) ([]int, error) {
+	return s.idsMatching(ctx, "delete_after_ts:=0 && tags:="+TagLocked)
+}
+
+// idsMatching pages a filter down to ids and nothing else. Both callers match
+// sets that can run to thousands and want none of the contents, and both read
+// the whole list before acting on any of it, so the pages walk a set that is not
+// changing underneath them.
+func (s *Search) idsMatching(ctx context.Context, filter string) ([]int, error) {
 	const batch = 250
 	var out []int
 	for page := 1; ; page++ {
 		res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
 			Q:             pointer.String("*"),
 			QueryBy:       pointer.String("title"),
-			FilterBy:      pointer.String(fmt.Sprintf("delete_after_ts:>0 && delete_after_ts:<=%d", now)),
+			FilterBy:      pointer.String(filter),
 			IncludeFields: pointer.String("id"),
 			PerPage:       pointer.Int(batch),
 			Page:          pointer.Int(page),

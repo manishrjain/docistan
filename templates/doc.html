@@ -159,8 +159,16 @@
            did not tell them enough. */}}
       {{if eq $d.Status "failed"}}
         <div class="fail-box">
-          <h5>{{if $d.Locked}}Password required{{else}}Processing failed{{end}}</h5>
-          <p>{{if $d.Error}}{{$d.Error}}{{else}}{{$d.FailReason}}{{end}}</p>
+          {{/* A locked document needs no sentence: the heading says what is
+               wrong, the box below is what to do about it, and the timeline
+               already carries the step that stopped. Every other failure does
+               need one, because nothing else on the page explains it. */}}
+          {{if $d.Locked}}
+            <h5>Password required</h5>
+          {{else}}
+            <h5>Processing failed</h5>
+            <p>{{if $d.Error}}{{$d.Error}}{{else}}{{$d.FailReason}}{{end}}</p>
+          {{end}}
 
           {{if $d.Locked}}
             {{/* A plain POST form, like every other action on this page, so it

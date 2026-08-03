@@ -2209,10 +2209,17 @@ func TestLockedDocumentFailsAtDecryptUntilItsPasswordIsKnown(t *testing.T) {
 	if err == nil {
 		t.Fatal("decrypt succeeded on a document whose password nobody has")
 	}
-	for _, want := range []string{"password-protected", pwFile, "reprocess"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the failure reads %q, which does not tell the reader %q", err, want)
-		}
+	// The sentinel itself, so a caller can tell "nobody has the password" apart
+	// from "qpdf is broken" — which is the distinction that decides whether the
+	// document offers a password box or reports a fault. It deliberately carries
+	// no instruction and no path: the document page says this in its timeline
+	// with the box to type into right below, and the path this used to name went
+	// stale the moment the password file moved into the archive.
+	if !errors.Is(err, errNoPassword) {
+		t.Errorf("the failure is %q, which no caller can tell apart from qpdf failing", err)
+	}
+	if strings.Contains(err.Error(), pwFile) {
+		t.Errorf("the failure names %s, sending the reader to edit a file by hand", pwFile)
 	}
 	if strings.Contains(err.Error(), pw) {
 		t.Error("the failure carries a password, and this one is written to the sidecar and the journal")

@@ -1620,7 +1620,53 @@ func (a *App) handleDocUnlock(w http.ResponseWriter, r *http.Request) {
 	// That it was unlocked, and nothing about what with. The document page and
 	// the journal both stop there.
 	a.record("unlocked", doc.ID, "", "")
+	a.retryLocked(r.Context(), doc.ID)
 	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)
+}
+
+// retryLocked puts every other locked document back through the pipeline, now
+// that there is one more password to try.
+//
+// A password is rarely one document's own: a bank sends the same locked
+// statement every month under the same password, so the one just proved against
+// this document is the likeliest thing to open the others — and without this,
+// unlocking four statements means typing the same password four times and
+// wondering why the archive did not notice.
+//
+// Best effort by design. The unlock itself has already succeeded and been
+// redirected on; this is opportunistic work on other documents, so a failure
+// here is logged and dropped rather than turned into an error about a document
+// the reader did not ask about. The ones that do not open simply stay locked,
+// exactly as they were.
+func (a *App) retryLocked(ctx context.Context, except int) {
+	ids, err := a.search.LockedIDs(ctx)
+	if err != nil {
+		logf("looking for other locked documents: %v", err)
+		return
+	}
+	var queued int
+	for _, id := range ids {
+		if id == except {
+			continue
+		}
+		doc, err := a.store.Load(id)
+		if err != nil {
+			logf("doc %d: %v", id, err)
+			continue
+		}
+		if err := a.reprocess(ctx, doc); err != nil {
+			logf("doc %d: %v", id, err)
+			continue
+		}
+		if err := a.pipeline.EnqueueDoc(id); err != nil {
+			logf("doc %d: %v", id, err)
+			continue
+		}
+		queued++
+	}
+	if queued > 0 {
+		logf("a new password may open other documents: requeued %d still locked", queued)
+	}
 }
 
 // tryPassword answers whether pw opens this document and nothing else. It runs
