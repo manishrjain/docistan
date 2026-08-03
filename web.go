@@ -300,11 +300,50 @@ type Stage struct {
 // interesting when they fail, and a failure names its own stage in the banner
 // above this list.
 func (a *App) stagesFor(doc *Doc) []Stage {
-	return []Stage{
-		landedStage(doc),
-		readStage(doc),
-		a.taggingStage(doc),
+	out := []Stage{landedStage(doc)}
+	// Only documents that arrived locked have anything to say here, which is
+	// why this is a step rather than a fourth fixed row: on every other
+	// document there was no lock and nothing happened.
+	if s, ok := unlockStage(doc); ok {
+		out = append(out, s)
 	}
+	return append(out, readStage(doc), a.taggingStage(doc))
+}
+
+// unlockStage is what happened to a password. It sits between arriving and
+// being read because that is where it happened — nothing could be read until
+// the file opened — and because a timeline is where someone looks to find out
+// why a document is not what they sent.
+//
+// This used to be a banner at the top of the page, which put a paragraph about
+// checksums above a document whose owner wanted to read it. It is the same two
+// facts either way; a step states them where they belong, in the order they
+// occurred.
+func unlockStage(doc *Doc) (Stage, bool) {
+	switch {
+	case doc.Locked():
+		// Still locked: the step names where the pipeline stopped. Without it
+		// the timeline claims the text step failed, when the truth is that it
+		// never ran — nothing had opened the file for it to read.
+		return Stage{
+			Key: "unlock", Name: "Locked — no password opened this file", State: "failed",
+			Detail: "the password goes in the box above, or in the archive's password file",
+		}, true
+	case doc.Encrypted && doc.Signed:
+		// The one document that keeps its lock. qpdf --decrypt rewrites the
+		// file, and a rewritten PDF no longer matches the signature computed
+		// over it, so here the archive copy is the decrypted one.
+		return Stage{
+			Key: "unlock", Name: "Unlocked — the archive copy was decrypted", State: "done",
+			Detail: "the original stays encrypted; decrypting it would invalidate its signature",
+		}, true
+	case doc.Encrypted:
+		return Stage{
+			Key: "unlock", Name: "Unlocked — the password was removed from the original", State: "done",
+			Detail: "both copies now open without one; the recorded checksum still names the encrypted bytes that arrived",
+		}, true
+	}
+	return Stage{}, false
 }
 
 func landedStage(doc *Doc) Stage {
