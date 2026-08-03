@@ -22,9 +22,10 @@ document.addEventListener("DOMContentLoaded", () => {
   function sync() {
     const n = boxes.filter((b) => b.checked).length;
     if (label) label.textContent = `${n} selected`;
-    // Hidden rather than removed: taking it out of the layout would shove the
-    // results down and back every time the first box is ticked.
-    form.dataset.picked = String(n);
+    // Whether the actions are visible is the stylesheet's business, decided
+    // from the checkboxes directly — this used to write a count here for a
+    // selector to read, which meant the buttons could not be hidden until
+    // this file had loaded and run.
     if (all) {
       all.checked = n === boxes.length;
       all.indeterminate = n > 0 && n < boxes.length;

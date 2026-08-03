@@ -643,10 +643,13 @@ main {
   gap: var(--space-2);
 }
 /* Invisible, not absent: removing it would shove the results down and back
-   every time the first box is ticked. Keyed off a count on the form rather
-   than a class on the element — a generic name like .empty is already taken
-   by the no-results state, and quietly inherited its 64px of padding. */
-.picker[data-picked="0"] .picker-actions { visibility: hidden; }
+   every time the first box is ticked.
+   Asked of the checkboxes themselves rather than of a count JavaScript writes
+   onto the form. The attribute version could only match once picker.js had
+   run, so every page load painted the buttons for a frame and then took them
+   away — and with scripting off they never went away at all. The select-all
+   box is excluded because on its own, unscripted, it selects no documents. */
+.picker:not(:has(.pick:not(.pick-all):checked)) .picker-actions { visibility: hidden; }
 .picked-count {
   font-family: var(--font-mono);
   font-size: 11px;
