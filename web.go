@@ -320,6 +320,10 @@ func (a *App) stagesFor(doc *Doc) []Stage {
 // facts either way; a step states them where they belong, in the order they
 // occurred.
 func unlockStage(doc *Doc) (Stage, bool) {
+	// A step is a line in a list, not a paragraph. Each of these says what
+	// happened and then the one fact that outlives it; anything more belongs on
+	// whatever page explains the archive, not on top of a document someone has
+	// just unlocked in order to read.
 	switch {
 	case doc.Locked():
 		// Still locked: the step names where the pipeline stopped. Without it
@@ -327,20 +331,20 @@ func unlockStage(doc *Doc) (Stage, bool) {
 		// never ran — nothing had opened the file for it to read.
 		return Stage{
 			Key: "unlock", Name: "Locked — no password opened this file", State: "failed",
-			Detail: "the password goes in the box above, or in the archive's password file",
+			Detail: "Add the password above",
 		}, true
 	case doc.Encrypted && doc.Signed:
 		// The one document that keeps its lock. qpdf --decrypt rewrites the
 		// file, and a rewritten PDF no longer matches the signature computed
 		// over it, so here the archive copy is the decrypted one.
 		return Stage{
-			Key: "unlock", Name: "Unlocked — the archive copy was decrypted", State: "done",
-			Detail: "the original stays encrypted; decrypting it would invalidate its signature",
+			Key: "unlock", Name: "Unlocked — archive copy decrypted", State: "done",
+			Detail: "Original kept encrypted to preserve its signature",
 		}, true
 	case doc.Encrypted:
 		return Stage{
-			Key: "unlock", Name: "Unlocked — the password was removed from the original", State: "done",
-			Detail: "both copies now open without one; the recorded checksum still names the encrypted bytes that arrived",
+			Key: "unlock", Name: "Unlocked — password removed from original", State: "done",
+			Detail: "Original checksum recorded",
 		}, true
 	}
 	return Stage{}, false
