@@ -249,6 +249,7 @@ func humanSize(n int64) string {
 
 func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", a.handleIndex)
+	mux.HandleFunc("GET /results", a.handleResults)
 	mux.HandleFunc("GET /doc/{id}", a.handleDoc)
 	mux.HandleFunc("POST /doc/{id}", a.handleDocUpdate)
 	mux.HandleFunc("POST /doc/{id}/delete", a.handleDocDelete)
@@ -885,6 +886,44 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		Flash:  actionNotice(r.URL.Query()),
 		URL:    r.URL,
 	})
+}
+
+// handleResults renders the results region and nothing else, for search as you
+// type. The rows carry marked-up snippets, tag pills that are filter links and
+// selection state; rebuilding those in JavaScript would mean a second copy of
+// the rendering and — worse — a second copy of the highlight escaping, which is
+// what keeps document text out of the page's markup. So the server renders the
+// same block it renders inside the page, and the browser swaps it in.
+//
+// Everything about the query is read by parseQuery and built into a page
+// exactly as handleIndex does it, so the two cannot come to disagree about what
+// a filter means.
+func (a *App) handleResults(w http.ResponseWriter, r *http.Request) {
+	q := parseQuery(r.URL.Query())
+
+	res, err := a.search.Query(r.Context(), q)
+	if err != nil {
+		http.Error(w, "search unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	tpl, err := a.templates("index.html")
+	if err != nil {
+		http.Error(w, "template: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// No ViewCounts: those three counts are of the whole archive and do not
+	// move with the search text, so asking for them on every keystroke would be
+	// three round trips spent to render the same numbers the filter bar is
+	// already showing — and this response does not contain that bar.
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tpl.ExecuteTemplate(w, "results", page{
+		Query:  q,
+		Result: res,
+		URL:    r.URL,
+	}); err != nil {
+		logf("render results: %v", err)
+	}
 }
 
 // pathID parses the document number out of the route and answers the request

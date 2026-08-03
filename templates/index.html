@@ -120,8 +120,28 @@
   {{/* A real form: the checkboxes are checkboxes and Download is a submit, so
        selecting and downloading work with scripting off. picker.js only adds
        the running count, the select-all, and hiding the actions until there is
-       something to act on. */}}
-  <form class="picker" method="post" action="/download">
+       something to act on.
+
+       Its contents are a template of their own, which /results renders on its
+       own for search-as-you-type; the form element stays out here so the node
+       search.js swaps into survives every swap. aria-live announces the new
+       count; there is no spinner. */}}
+  <form class="picker" method="post" action="/download" aria-live="polite">
+    {{template "results" .}}
+  </form>
+</main>
+{{end}}
+
+{{/* Everything the results are: the filters carried through a submit, the
+     count and the bulk actions, the rows, and the pager. Rendered inside the
+     page by the block above and on its own by GET /results.
+
+     Deliberately not in here: the filter bar. Its tag facets do narrow with
+     the query, but swapping it mid-typing would shut an open tag-browse panel
+     or the mobile filter sheet under the reader's hands. The facets settle on
+     a real navigation — a tag click, or Enter. */}}
+{{define "results"}}
+  {{$page := .}}
     {{/* The dates too: "download everything matching" has to mean the filter
          actually on screen. */}}
     {{range $page.FilterFields true}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">{{end}}
@@ -264,9 +284,8 @@
       {{end}}
     </nav>
   {{end}}
-  </form>
-</main>
 {{end}}
 
 {{define "head"}}<script src="/static/filters.js" defer></script>
-<script src="/static/picker.js" defer></script>{{end}}
+<script src="/static/picker.js" defer></script>
+<script src="/static/search.js" defer></script>{{end}}

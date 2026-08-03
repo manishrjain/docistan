@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -368,6 +370,82 @@ func TestIndexFormsCarryTheView(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), ">Move to trash<") {
 		t.Error("the trash view offers Move to trash, which is where you already are")
+	}
+}
+
+// Search as you type swaps what /results returns into the picker form, so the
+// response has to be the results region and nothing that surrounds it: a
+// fragment carrying the layout would put a second <html>, a second search box
+// and a second filter bar inside the form it was swapped into, and the nested
+// form would take the Download button with it.
+//
+// Typesense is stubbed rather than run. What is under test is which template
+// the handler executes and what it reads out of the URL, not searching — and a
+// test that needs a server running is a test that gets skipped.
+func TestResultsRendersTheFragmentAndNotThePage(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("q"); got != "oceanside" {
+			t.Errorf("searched for %q, want the term from the fragment URL", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"found":1,"page":1,"hits":[{"document":{"id":"7","title":"Settlement","status":"ready","tags":["alta"],"created_date":"2025-03"},"highlights":[{"field":"content","snippet":"an %soceanside%s statement"}]}],"facet_counts":[]}`,
+			hlStart, hlEnd)
+	}))
+	defer ts.Close()
+
+	a := &App{search: NewSearch(ts.URL, "test-key", "documents")}
+	mux := http.NewServeMux()
+	a.routes(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/results?q=oceanside&tag=alta", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /results: %d\n%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type %q, want html — the browser inserts this as markup", ct)
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<li class="row">`,                 // the result itself
+		"result for \u201coceanside\u201d", // the count, which is what changes as you type
+		"<mark>oceanside</mark>",           // marked up here, where the text was escaped first
+		`name="q" value="oceanside"`,       // the filters, so Download still means these results
+		`name="tag" value="alta"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("fragment is missing %q:\n%s", want, body)
+		}
+	}
+	for _, unwanted := range []string{"<html", "<head", "<body", "topbar", "searchbox", "filterbar", "<form"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("fragment contains %q, which belongs to the page around it:\n%s", unwanted, body)
+		}
+	}
+}
+
+// The two renderings of the results have to be the same markup — that is the
+// point of there being one template — so the block must also execute on its
+// own, against nothing but a page value.
+func TestResultsBlockExecutesStandalone(t *testing.T) {
+	a := &App{}
+	tpl, err := a.templates("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	data := page{
+		Query:  Query{Q: "oceanside", View: ViewTrash},
+		Result: &Result{Found: 0, Facets: map[string][]FacetValue{}},
+	}
+	if err := tpl.ExecuteTemplate(&buf, "results", data); err != nil {
+		t.Fatal(err)
+	}
+	// The empty state belongs to the results, not to the page: typing on to a
+	// term that matches nothing has to say so.
+	if !strings.Contains(buf.String(), "Nothing here.") {
+		t.Errorf("the fragment has no empty state:\n%s", buf.String())
 	}
 }
 
