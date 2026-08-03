@@ -275,6 +275,87 @@ func TestExtensionTaxonomy(t *testing.T) {
 	}
 }
 
+// pageStamps is the entire text layer of a real eight-page document: a scanned
+// zoo ticket with a page number printed over each image. Thirteen characters a
+// page passed for "this PDF has its own text", so tesseract was told to skip
+// every page that had any and the model was told the document was already read.
+const pageStamps = "Page 1 of 8\n\nPage 2 of 8\n\nPage 3 of 8\n\nPage 4 of 8\n\n" +
+	"Page 5 of 8\n\nPage 6 of 8\n\nPage 7 of 8\n\nPage 8 of 8\n\n"
+
+// The two questions — is this text the document, and does the model need to
+// look again — are one question, so they are tested as one. Anything that
+// answers yes to the first must answer no to the second.
+func TestTextDensityIsOneThreshold(t *testing.T) {
+	cases := []struct {
+		name  string
+		text  string
+		pages int
+		want  bool
+	}{
+		{"page furniture", pageStamps, 8, false},
+		{"the same furniture on one page", "Page 1 of 1", 1, false},
+		{"a real text layer", strings.Repeat("Invoice line item 42.00 ", 60), 3, true},
+		{"empty", "", 1, false},
+		{"whitespace only", "\n \n\t\n", 1, false},
+		{"one page, thirty good characters", "Received with thanks, $42.00.", 1, true},
+		{"mojibake", strings.Repeat("�", 400), 1, false},
+		// pdfinfo failed. The question cannot be asked, so it is not answered
+		// either way: no claim that the text is the document, and no rescue.
+		{"no page count", strings.Repeat("real text ", 100), 0, false},
+	}
+	for _, c := range cases {
+		if got := HasTextLayer(c.text, c.pages); got != c.want {
+			t.Errorf("%s: HasTextLayer(%d chars, %d pages) = %v, want %v",
+				c.name, utf8.RuneCountInString(strings.TrimSpace(c.text)), c.pages, got, c.want)
+		}
+		// The rescue is the same threshold read the other way round, except
+		// where there is no page count and neither side claims anything.
+		wantRescue := !c.want && c.pages > 0
+		if got := NeedsVisionRescue(c.text, c.pages); got != wantRescue {
+			t.Errorf("%s: NeedsVisionRescue = %v, want %v", c.name, got, wantRescue)
+		}
+	}
+}
+
+// Which mode OCR runs in is the whole fix: fixing the threshold alone changes
+// nothing, because --skip-text skips any page carrying any text and every page
+// of the stamped scan carries its number.
+func TestOCRModeForPicksThreePaths(t *testing.T) {
+	dense := strings.Repeat("Invoice line item 42.00 ", 60)
+	cases := []struct {
+		name   string
+		signed bool
+		text   string
+		pages  int
+		want   ocrMode
+	}{
+		{"signed", true, dense, 3, ocrSkipSigned},
+		// Signed wins over everything: the signature is worth more than the
+		// text a second pass would add, and ocrmypdf refuses these anyway.
+		{"signed and thin", true, pageStamps, 8, ocrSkipSigned},
+		{"digital PDF", false, dense, 3, ocrSkipText},
+		// No text at all is the branch that keeps --deskew, and it is exactly
+		// the crooked scan that needs it.
+		{"image-only scan", false, "", 8, ocrSkipText},
+		{"whitespace is not text", false, "\n\n \n", 8, ocrSkipText},
+		{"page-stamped scan", false, pageStamps, 8, ocrRedoText},
+	}
+	for _, c := range cases {
+		if got := ocrModeFor(c.signed, c.text, c.pages); got != c.want {
+			t.Errorf("%s: ocrModeFor = %v, want %v", c.name, got, c.want)
+		}
+	}
+
+	// --deskew is incompatible with --redo-ocr; ocrmypdf errors out rather than
+	// ignoring it, so the two must never be built into the same command line.
+	if slices.Contains(ocrFlags(ocrRedoText), "--deskew") {
+		t.Error("--redo-ocr pass carries --deskew, which ocrmypdf refuses")
+	}
+	if !slices.Contains(ocrFlags(ocrSkipText), "--deskew") {
+		t.Error("--skip-text pass lost --deskew, which is the only pass that can keep it")
+	}
+}
+
 // A form that re-posts the current filters has to re-post all of them. The
 // custom-range form used to leave out dir, so choosing a date range silently
 // flipped the sort back to newest-first. Round-tripping through parseQuery is

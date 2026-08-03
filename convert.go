@@ -254,10 +254,76 @@ func textToPDF(src, dst string) error {
 	return nil
 }
 
+// ocrMode is which of three documents this is, as far as ocrmypdf is
+// concerned: one that must not be touched, one whose own text is the document,
+// and one carrying text that is not. The third used to be indistinguishable
+// from the second, which is how eight scanned pages stamped "Page N of 8" were
+// filed as their page numbers and nothing else.
+type ocrMode int
+
+const (
+	ocrSkipSigned ocrMode = iota // signed: copy it, run nothing
+	ocrSkipText                  // its text is the document, or it has none
+	ocrRedoText                  // it has text, but too little to be the document
+)
+
+// ocrModeFor picks the treatment from what is known before OCR runs.
+//
+// The middle case covers two opposite documents on purpose. A digital PDF is
+// skipped page by page and costs almost nothing, and a scan with no text at all
+// has nothing to skip so tesseract reads every page of it — and that second one
+// is where --deskew earns its place, because a genuinely crooked scan is
+// precisely a scan with no text layer.
+//
+// The last case is the hybrid: any text on a page is enough to make --skip-text
+// skip it, so "has some text and fails the density bar" is the real boundary of
+// the trap. Judging that boundary wrongly is survivable, and ocrFlags says why.
+func ocrModeFor(signed bool, text string, pages int) ocrMode {
+	switch {
+	case signed:
+		return ocrSkipSigned
+	case strings.TrimSpace(text) == "" || HasTextLayer(text, pages):
+		return ocrSkipText
+	default:
+		return ocrRedoText
+	}
+}
+
+// ocrFlags is what distinguishes the two passes that actually run tesseract.
+//
+// --redo-ocr keeps text that looks real and OCRs the image regions around it,
+// which is exactly the hybrid document's shape. It is also the reason a
+// misjudgement here is survivable: a fifty-page text PDF whose forty-five blank
+// appendix pages drag its average under the density bar would land in this
+// branch, and --redo-ocr costs it some CPU and changes nothing. --force-ocr
+// would rasterize the same document and degrade it, which is why it is not the
+// choice here despite reading the same amount of text.
+//
+// --deskew is dropped for that pass because ocrmypdf refuses the combination.
+// Nothing is lost: deskew matters for a crooked scan, and a crooked scan has no
+// text layer, so it goes down the --skip-text branch and keeps it.
+func ocrFlags(mode ocrMode) []string {
+	if mode == ocrRedoText {
+		return []string{"--redo-ocr"}
+	}
+	return []string{"--skip-text", "--deskew"}
+}
+
+// ocrPass runs one pass. Only the mode flags vary between passes; the
+// archival format the result has to be in does not.
+func ocrPass(ctx context.Context, src, dst string, mode ocrMode) error {
+	args := append(ocrFlags(mode),
+		"--output-type", "pdfa", "--optimize", "1",
+		"--language", "eng", "--rotate-pages", "--jobs", "2",
+		"--quiet", src, dst)
+	_, err := runCmd(ctx, ocrTimeout, "ocrmypdf", args...)
+	return err
+}
+
 // OCR produces the archival PDF. It returns which engine supplied the text so
 // the UI can explain the result.
-func OCR(ctx context.Context, src, dst string, signed bool) (string, error) {
-	if signed {
+func OCR(ctx context.Context, src, dst string, mode ocrMode) (string, error) {
+	if mode == ocrSkipSigned {
 		// Preserve the signature; these are digitally generated and already
 		// carry a text layer.
 		return OCRSkippedSigned, copyFile(src, dst)
@@ -266,10 +332,14 @@ func OCR(ctx context.Context, src, dst string, signed bool) (string, error) {
 	tmp := dst + ".tmp.pdf"
 	defer os.Remove(tmp)
 
-	_, err := runCmd(ctx, ocrTimeout, "ocrmypdf",
-		"--skip-text", "--output-type", "pdfa", "--optimize", "1",
-		"--language", "eng", "--rotate-pages", "--deskew", "--jobs", "2",
-		"--quiet", src, tmp)
+	err := ocrPass(ctx, src, tmp, mode)
+	if err != nil && mode == ocrRedoText {
+		// Down a rung rather than out to Ghostscript: --skip-text reads at
+		// least the pages that are wholly image, and a thinner text layer is a
+		// better outcome than the chain below, which produces none at all.
+		logf("ocrmypdf --redo-ocr failed, retrying with --skip-text: %v", err)
+		err = ocrPass(ctx, src, tmp, ocrSkipText)
+	}
 	if err == nil {
 		return OCRTesseract, os.Rename(tmp, dst)
 	}
@@ -372,16 +442,35 @@ func garbageRatio(text string) int {
 	return bad * 100 / runes
 }
 
-// HasTextLayer reports whether a PDF carries its own extractable text. The bar
-// is deliberately low — this asks "is there a text layer at all", not "is the
-// text any good" — because a native text layer is exact by construction. A
-// one-line receipt has a real text layer just as much as a long statement.
-func HasTextLayer(text string) bool {
+// HasTextLayer reports whether a PDF's own text is the document.
+//
+// It used to ask only whether any text was there at all, on the reasoning that
+// a native text layer is exact by construction. It is — but page furniture is
+// native text too, and eight scanned pages carrying nothing but "Page N of 8"
+// answered yes to that question, were declared already-read, and had their
+// contents thrown away twice over: ocrmypdf skipped every page because every
+// page had something on it, and the vision rescue was withheld because the
+// document was believed to have its own text.
+//
+// So the bar is density, and it is the same density the rescue asks about —
+// one threshold with one meaning, rather than "has text" and "has enough text
+// to be the document" drifting apart as two separate standards. Twenty
+// characters a page is far below any real page and far above any stamp.
+//
+// Without a page count the question cannot be asked at all, and it answers no
+// rather than guessing.
+func HasTextLayer(text string, pages int) bool {
+	if pages <= 0 {
+		return false
+	}
 	trimmed := strings.TrimSpace(text)
-	return utf8.RuneCountInString(trimmed) >= 25 && garbageRatio(trimmed) <= 5
+	runes := utf8.RuneCountInString(trimmed)
+	return runes >= 25 && runes/pages >= 20 && garbageRatio(trimmed) <= 5
 }
 
-// NeedsVisionRescue decides whether to re-read a document with the model.
+// NeedsVisionRescue decides whether to re-read a document with the model. It is
+// HasTextLayer's question over again on what came back: if OCR did not produce
+// a document either, the model is the last reader left.
 //
 // It applies only to documents that had no native text layer, i.e. ones OCR
 // actually ran on. Length is not used as a cost proxy: a short document is a
@@ -390,12 +479,10 @@ func HasTextLayer(text string) bool {
 // never do is overwrite an exact native text layer with an approximation of a
 // picture of it — which is why that case is excluded by the caller instead.
 func NeedsVisionRescue(text string, pages int) bool {
-	trimmed := strings.TrimSpace(text)
-	runes := utf8.RuneCountInString(trimmed)
 	if pages <= 0 {
 		return false
 	}
-	return runes < 25 || runes/pages < 20 || garbageRatio(trimmed) > 5
+	return !HasTextLayer(text, pages)
 }
 
 // copyFile streams rather than buffering: an ingested scan can be a hundred

@@ -514,16 +514,24 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 			return fmt.Errorf("normalize: %w", err)
 		}
 
-		// Whether the input already carried a text layer decides both how the
-		// result is labelled and whether a vision rescue is ever allowed:
-		// ocrmypdf --skip-text succeeds either way, so asking it afterwards
-		// can't distinguish "OCR'd" from "left alone".
-		hadText := false
+		// Whether the input already carried a text layer decides three things:
+		// how the result is labelled, whether a vision rescue is ever allowed —
+		// ocrmypdf succeeds either way, so asking it afterwards can't
+		// distinguish "OCR'd" from "left alone" — and which mode OCR runs in.
+		//
+		// The page count is what makes that a question about density rather
+		// than presence, and it is needed here, before OCR. doc.PageCount is
+		// set in inspect, after; this is a second pdfinfo on the file about to
+		// be OCR'd, which is cheap, and the archive's own count is still the
+		// one worth recording.
+		var pre string
 		if doc.OriginalExt == ".pdf" {
-			if pre, err := ExtractText(ctx, normalized); err == nil {
-				hadText = HasTextLayer(pre)
+			if text, err := ExtractText(ctx, normalized); err == nil {
+				pre = text
 			}
 		}
+		prePages := PageCount(ctx, normalized)
+		hadText := HasTextLayer(pre, prePages)
 		doc.NativeText = hadText
 
 		p.setStage(job, "ocr")
@@ -543,7 +551,7 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 			// convenience that did not come off.
 			logf("doc %d: %v", doc.ID, err)
 		}
-		source, err := OCR(ctx, normalized, archive, doc.Signed)
+		source, err := OCR(ctx, normalized, archive, ocrModeFor(doc.Signed, pre, prePages))
 		if err != nil {
 			return fmt.Errorf("ocr: %w", err)
 		}
