@@ -271,7 +271,10 @@
   <ul class="rows">
     {{range .Result.Hits}}
       {{$d := .Doc}}
-      <li class="row">
+      {{/* The number is on the row so an "@47" search can tell that the one
+           result on screen is the document that was asked for, without a
+           second lookup to confirm what it just rendered. */}}
+      <li class="row" data-doc-id="{{$d.ID}}">
         {{/* The label is the target, not the 18px box: see .pick-hit. */}}
         <label class="pick-hit"><input type="checkbox" class="pick" name="id" value="{{$d.ID}}"
                aria-label="Select {{docCode $d.ID}}"></label>

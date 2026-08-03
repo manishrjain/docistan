@@ -97,6 +97,12 @@ func (s *Search) schema() *api.CollectionSchema {
 			// failure as an empty cell.
 			f("error", "string", stored),
 			f("failed_stage", "string", stored),
+			// The document number as text, so "@47" can match it by prefix.
+			// Typesense's own id is exact-match only — it cannot be a query_by
+			// field — so the number is indexed a second time as an ordinary
+			// string, which costs a handful of bytes per document and is what
+			// makes a half-typed number find anything at all.
+			f("doc_id", "string"),
 			f("created_ts", "int64", sortable),
 			f("added_ts", "int64", sortable),
 			// Indexed rather than `stored`: every query filters on this, and
@@ -152,7 +158,10 @@ func tsDoc(d *Doc) map[string]any {
 		tags = []string{}
 	}
 	return map[string]any{
-		"id":            strconv.Itoa(d.ID),
+		"id": strconv.Itoa(d.ID),
+		// The same string again under a name that can be searched. See the
+		// schema: Typesense's id filters but does not match prefixes.
+		"doc_id":        strconv.Itoa(d.ID),
 		"title":         d.Title,
 		"summary":       d.Summary,
 		"content":       content,
@@ -282,6 +291,29 @@ func (q Query) Bounds(now time.Time) (lo, hi int64) {
 	return 0, 0
 }
 
+// IDPrefix reads a document-number search: "@47" is the whole document number,
+// "@4" is every number starting with 4. The "@" is what says "I mean a number",
+// because a bare 47 is a perfectly good thing to search the text for — an
+// invoice total, a year, a page reference — and guessing which was meant would
+// get it wrong on exactly the documents that mention numbers.
+//
+// A bare "@" is not a number search: it is the state of having typed the first
+// character, and search-as-you-type would otherwise empty the page between the
+// "@" and the digit. Anything else after the "@" is left to the text search, so
+// "@home" still finds the word.
+func (q Query) IDPrefix() (string, bool) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(q.Q), "@")
+	if !ok || rest == "" {
+		return "", false
+	}
+	for _, r := range rest {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	return rest, true
+}
+
 // SortField resolves what the results are actually ordered by, which is not
 // always what the URL says: with no field chosen, a search orders by relevance
 // and a bare listing orders by arrival.
@@ -399,6 +431,14 @@ func (s *Search) query(ctx context.Context, q Query, perPage int, idsOnly bool) 
 	if text == "" {
 		text = "*"
 	}
+	// "@47" looks up document numbers instead of words. It replaces the text
+	// search and nothing else: the tags and the date range still narrow it, so
+	// "@4" inside the Locked pill means the locked documents whose number starts
+	// with 4.
+	fields, weights := "title,summary,content,tags,original_name", "10,6,4,8,2"
+	if digits, ok := q.IDPrefix(); ok {
+		text, fields, weights = digits, "doc_id", "1"
+	}
 
 	var filters []string
 	add := func(field, value string) {
@@ -453,8 +493,8 @@ func (s *Search) query(ctx context.Context, q Query, perPage int, idsOnly bool) 
 
 	params := &api.SearchCollectionParams{
 		Q:              pointer.String(text),
-		QueryBy:        pointer.String("title,summary,content,tags,original_name"),
-		QueryByWeights: pointer.String("10,6,4,8,2"),
+		QueryBy:        pointer.String(fields),
+		QueryByWeights: pointer.String(weights),
 		PerPage:        pointer.Int(perPage),
 		Page:           pointer.Int(q.Page),
 	}

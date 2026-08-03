@@ -417,7 +417,7 @@ func TestResultsRendersTheFragmentAndNotThePage(t *testing.T) {
 
 	body := rec.Body.String()
 	for _, want := range []string{
-		`<li class="row">`,                 // the result itself
+		`<li class="row" data-doc-id=`,     // the result itself, numbered for "@47"
 		"result for \u201coceanside\u201d", // the count, which is what changes as you type
 		"<mark>oceanside</mark>",           // marked up here, where the text was escaped first
 		`name="q" value="oceanside"`,       // the filters, so Download still means these results
@@ -1984,7 +1984,7 @@ func TestResultsCarriesTheTagRegions(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		`id="results"`,     // the rows, as before
-		`<li class="row">`, //
+		`<li class="row" data-doc-id=`, //
 		`id="tag-pills"`,   // the pills, their counts and the state of each
 		`class="pill-tag on"`,
 		`>escrow<`,

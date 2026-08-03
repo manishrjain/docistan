@@ -92,8 +92,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // A submit is a real navigation, and the request this was about to make is
   // then a request for a page that is being replaced.
-  form.addEventListener("submit", () => {
+  //
+  // "@47" is the exception: a document number typed in full is a request for
+  // that document, so Enter opens it rather than a list of one. Only on Enter —
+  // during typing, "@4" on the way to "@47" must not teleport anybody to DOC-4.
+  //
+  // The check is against the rows already on screen rather than a lookup,
+  // because the results for what is in the box are what is being displayed: if
+  // exactly one row is there and it is that number, it is the document meant. A
+  // number that matches nothing, or a prefix matching several, submits normally
+  // and shows the list. With scripting off, so does every search.
+  form.addEventListener("submit", (e) => {
     clearTimeout(timer);
     inflight?.abort();
+
+    const digits = /^\s*@(\d+)\s*$/.exec(input.value);
+    if (!digits) return;
+    const rows = region.querySelectorAll("[data-doc-id]");
+    if (rows.length !== 1 || rows[0].dataset.docId !== digits[1]) return;
+    e.preventDefault();
+    location.assign("/doc/" + digits[1]);
   });
 });
