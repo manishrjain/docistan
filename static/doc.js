@@ -27,21 +27,65 @@ document.addEventListener("DOMContentLoaded", () => {
   // --- timeline ----------------------------------------------------------
   // The server already knows how to write every step; rather than
   // reimplementing those labels here, the poll returns the rendered stages
-  // and this applies them. A page that watched the work happen therefore
-  // ends up byte-identical to one loaded afterwards.
+  // and this applies them — which steps there are, in what order, as well as
+  // what each one says. A page that watched the work happen therefore ends up
+  // matching one loaded afterwards.
   const timeline = document.querySelector(".timeline");
 
+  // The list of steps is itself part of what changes, not a fixed set of rows
+  // with changing contents. Unlocking is the case that proves it: the page you
+  // are returned to after typing a password has no unlock step, because at that
+  // moment the document is merely processing and nothing has decrypted yet —
+  // the step only exists once it has. Updating rows in place and skipping the
+  // ones that were not already there left that step invisible until a reload,
+  // which is the reload this whole mechanism is here to avoid.
+  //
+  // So the server's list wins outright: rows it names are created if missing,
+  // put in its order, and rows it no longer names are dropped.
   function applyStages(stages) {
     if (!timeline || !Array.isArray(stages)) return;
+    const seen = new Set();
+    let prev = null;
     for (const st of stages) {
-      const row = timeline.querySelector(`li[data-stage="${st.key}"]`);
-      if (!row) continue;
+      seen.add(st.key);
+      let row = timeline.querySelector(`li[data-stage="${st.key}"]`);
+      if (!row) row = newRow(st.key);
+      // Only when it is actually out of place: re-inserting a node restarts the
+      // pulse on whichever step is working, and every poll would otherwise do
+      // that to every row.
+      const inPlace = prev ? prev.nextElementSibling === row : timeline.firstElementChild === row;
+      if (!inPlace) {
+        if (prev) prev.after(row);
+        else timeline.prepend(row);
+      }
       row.className = st.state;
       row.querySelector(".what").textContent = st.name;
       setLine(row, "cost", st.cost);
       setLine(row, "file", st.file);
       setLine(row, "detail", st.detail);
+      prev = row;
     }
+    for (const row of [...timeline.children]) {
+      if (!seen.has(row.dataset.stage)) row.remove();
+    }
+  }
+
+  // The same shape the template writes, so a row this builds and a row the
+  // server rendered are the same row — which is what lets the page that watched
+  // the work happen match the one loaded afterwards.
+  function newRow(key) {
+    const row = document.createElement("li");
+    row.dataset.stage = key;
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    dot.setAttribute("aria-hidden", "true");
+    const step = document.createElement("span");
+    step.className = "step";
+    const what = document.createElement("span");
+    what.className = "what";
+    step.append(what);
+    row.append(dot, step);
+    return row;
   }
 
   // Order matters: cost, then file, then the timestamp. A line that appears
