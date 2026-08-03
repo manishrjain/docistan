@@ -304,9 +304,11 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 		// upload path (acceptUpload in web.go) already refuses these with a
 		// visible flash before they ever reach the inbox, so this branch only
 		// fires for consume-folder drops — and since the file is then deleted,
-		// the journal line is all that says the archive ever saw that name.
-		logf("rejecting %s: unsupported type %q, deleting — the archive keeps only supported documents", name, ext)
-		p.app.journal("rejected", 0, name, fmt.Sprintf("unsupported type %q", ext))
+		// this line is all that says the archive ever saw that name. That is
+		// why the detail carries the deletion too: whoever finds the file gone
+		// has only this to read, whether they read it in the log now or in the
+		// journal a month from now.
+		p.app.record("rejected", 0, name, fmt.Sprintf("unsupported type %q, deleted from the inbox", ext))
 		p.removeFromInbox(path, "unsupported")
 		return
 	}
@@ -368,8 +370,11 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 			// the inbox — but it collapses for the one that did not, a reprocess
 			// whose sidecar would not load and which matched itself. Hence
 			// removeFromInbox rather than a bare os.Remove.
-			logf("%s duplicates document %d, deleting", name, existing)
-			p.app.journal("duplicate", existing, name, "already in the archive")
+			//
+			// The detail names which copy went, because "duplicate" on its own
+			// reads like something was lost: the archive's copy is exactly
+			// these bytes and stays.
+			p.app.record("duplicate", existing, name, "already in the archive, deleted from the inbox")
 			p.removeFromInbox(path, "duplicate")
 			return
 		}
@@ -387,9 +392,11 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 		doc.Status = StatusFailed
 		doc.Error = err.Error()
 		doc.FailedStage = job.Stage
-		logf("doc %d failed at %s: %v", doc.ID, job.Stage, err)
 		p.save(ctx, doc)
-		p.app.journal("failed", doc.ID, "", fmt.Sprintf("%s: %v", job.Stage, err))
+		// The stage leads the detail, so a pipeline failure is told apart from
+		// the other thing that fails against a document — enrichment, whose
+		// line names itself the same way.
+		p.app.record("failed", doc.ID, "", fmt.Sprintf("%s: %v", job.Stage, err))
 		return
 	}
 
@@ -397,8 +404,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	doc.Error = ""
 	doc.FailedStage = ""
 	p.save(ctx, doc)
-	logf("doc %d ready: %q (%s)", doc.ID, doc.Title, doc.OCRSource)
-	p.app.journal("ingested", doc.ID, doc.OriginalName, ingestDetail(doc))
+	p.app.record("ingested", doc.ID, doc.OriginalName, ingestDetail(doc))
 
 	// The document is complete and usable now. Metadata is a separate concern
 	// that depends on a remote service with its own budget, so it is queued
@@ -434,15 +440,27 @@ func (p *Pipeline) removeFromInbox(path, why string) {
 	}
 }
 
-// ingestDetail is what the journal records about a finished document: how much
-// of it there is, and where its text came from. Those are the two facts a later
+// ingestDetail is what is recorded about a finished document: how much of it
+// there is, and where its text came from. Those are the two facts a later
 // reader needs to judge whether the document was read well, and the second one
 // is not visible from the file itself.
+//
+// The title leads when it is not simply the filename, which is the case for a
+// document that has been through the model and is now being reprocessed: the
+// event already carries the original name, so repeating it as a title would
+// say nothing, while "Northwind Utilities Statement" is the only word for that
+// document a person would recognise.
 func ingestDetail(doc *Doc) string {
-	if doc.PageCount <= 0 {
-		return doc.OCRSource
+	var parts []string
+	if doc.Title != "" && doc.Title != doc.OriginalName {
+		parts = append(parts, fmt.Sprintf("%q", doc.Title))
 	}
-	return fmt.Sprintf("%d page%s, %s", doc.PageCount, plural(doc.PageCount), doc.OCRSource)
+	if doc.PageCount <= 0 {
+		parts = append(parts, doc.OCRSource)
+	} else {
+		parts = append(parts, fmt.Sprintf("%d page%s, %s", doc.PageCount, plural(doc.PageCount), doc.OCRSource))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (p *Pipeline) intake(ctx context.Context, path, name, ext, sum string, size int64) (*Doc, error) {

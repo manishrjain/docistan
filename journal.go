@@ -22,7 +22,9 @@ type JournalEvent struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// journal appends one event. Every caller is doing something else that matters
+// journal appends one event. It is the writer, not the way to state an event:
+// record below is the only caller, so that no site can record something in one
+// place and not the other. Every caller is doing something else that matters
 // more — ingesting a document, answering a request — so this is best effort in
 // the strongest sense: a journal that cannot be written is a journal that is
 // missing a line, never a document that failed to process.
@@ -54,6 +56,49 @@ func (a *App) journal(event string, docID int, name, detail string) {
 	if _, err := f.Write(append(b, '\n')); err != nil {
 		logf("journal %s: %v", event, err)
 	}
+}
+
+// record states one document-lifecycle event: the journal line that outlives
+// the process, and the log line someone watching a terminal during an import
+// reads while it is happening. Both are derived from the same four values,
+// which is the entire point — every site below used to write the two by hand,
+// in two formats, and nothing but care kept them saying the same thing.
+//
+// The journal is the durable record and the log is a view of it, so anything
+// worth telling the terminal belongs in detail rather than in a second call
+// beside this one. logf stays for diagnostics that are not events: a retry, a
+// fallback, a rate-limit pause. Those have no document behind them and would
+// bury the journal, which is meant to stay about two lines per document.
+func (a *App) record(event string, docID int, name, detail string) {
+	a.journal(event, docID, name, detail)
+	// The line is already rendered, so it is passed as data rather than as a
+	// format: a title or an error message containing a % must not be read as a
+	// verb.
+	logf("%s", recordLine(event, docID, name, detail))
+}
+
+// recordLine renders one event for the log: what it happened to, what happened,
+// and what there is to say about it.
+//
+// The subject is the document when there is one and the file's name when there
+// is not — a rejected file never becomes a document, and its name is the only
+// handle anyone will ever have on it. When there is both, the name follows the
+// event ("DOC-12 duplicate scan_001.pdf"), because the id says which document
+// this is about and the name says which file arrived. An event with nothing to
+// add is a bare line rather than one ending in a colon with nothing after it.
+func recordLine(event string, docID int, name, detail string) string {
+	subject := name
+	if docID > 0 {
+		subject = docCode(docID)
+	}
+	line := strings.TrimSpace(subject + " " + event)
+	if docID > 0 && name != "" {
+		line += " " + name
+	}
+	if detail != "" {
+		line += ": " + detail
+	}
+	return line
 }
 
 // journalTailBytes is how much of the journal the status page will ever read.

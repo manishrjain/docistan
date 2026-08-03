@@ -764,6 +764,159 @@ func TestJournalTailBounds(t *testing.T) {
 	}
 }
 
+// Every event used to be stated twice — a logf for whoever was watching and a
+// journal call for the durable record — written by hand at each site, in two
+// formats, which is exactly how the two came to say slightly different things.
+// One call now has to produce both halves and they have to agree: the log line
+// has to name the document and carry the same detail the entry keeps, and the
+// call has to leave exactly one entry behind rather than a line and no record,
+// or a record and a silent terminal.
+func TestRecordLogsAndJournalsTheSameEvent(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{store: s}
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	const detail = `"Northwind Utilities Statement" · [statement utilities] · 2026-02 · 397 in · 107 out · 0.02¢`
+	a.record("enriched", 4, "", detail)
+
+	line := buf.String()
+	if strings.Count(strings.TrimSpace(line), "\n") != 0 {
+		t.Errorf("one call wrote more than one log line:\n%s", line)
+	}
+	for _, want := range []string{docCode(4), "enriched", detail} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the log line does not mention %q, so the terminal says less than the journal:\n%s", want, line)
+		}
+	}
+
+	got := readJournalTail(s.JournalPath(), journalTailBytes, 50)
+	if len(got) != 1 {
+		t.Fatalf("one call left %d journal entries, want exactly 1: %+v", len(got), got)
+	}
+	if ev := got[0]; ev.Event != "enriched" || ev.DocID != 4 || ev.Name != "" || ev.Detail != detail {
+		t.Errorf("the entry is %+v, which is not what the log line said", got[0])
+	}
+	if got[0].TS <= 0 {
+		t.Errorf("the entry has no timestamp: %+v", got[0])
+	}
+}
+
+// The log line is derived from the four values the event already carries, so
+// the shapes those values come in are what it has to survive. A rejected file
+// never became a document and has only a name; a restore has nothing to add and
+// must not produce a line ending in a colon with nothing after it; an ingest
+// has both an id and a filename, and both are worth reading.
+func TestRecordLine(t *testing.T) {
+	cases := []struct {
+		what   string
+		event  string
+		docID  int
+		name   string
+		detail string
+		want   string
+	}{
+		{
+			"a document with something to say",
+			"enriched", 4, "", "397 in · 107 out · 0.02¢",
+			"DOC-4 enriched: 397 in · 107 out · 0.02¢",
+		},
+		{
+			"a file that never became a document, which only its name identifies",
+			"rejected", 0, "notes.docx", `unsupported type ".docx", deleted from the inbox`,
+			`notes.docx rejected: unsupported type ".docx", deleted from the inbox`,
+		},
+		{
+			"an arrival, where the id says which document and the name says which file",
+			"duplicate", 12, "scan_001.pdf", "already in the archive",
+			"DOC-12 duplicate scan_001.pdf: already in the archive",
+		},
+		{
+			"an event that speaks for itself",
+			"restored", 7, "", "",
+			"DOC-7 restored",
+		},
+	}
+	for _, c := range cases {
+		if got := recordLine(c.event, c.docID, c.name, c.detail); got != c.want {
+			t.Errorf("%s reads as %q, want %q", c.what, got, c.want)
+		}
+	}
+}
+
+// The log line used to be the only place the model's decisions were written
+// down and the journal the only place the cost was, so neither could answer
+// what the model had actually done to the archive. Both live in the detail now,
+// which is what the two halves share. The cost keeps the rule it always had:
+// a model the price table does not know says nothing rather than claiming the
+// run was free.
+func TestEnrichDetail(t *testing.T) {
+	cases := []struct {
+		what  string
+		doc   Doc
+		used  Usage
+		cents float64
+		want  string
+	}{
+		{
+			"a priced run, which says what it decided and what that cost",
+			Doc{Title: "Northwind Utilities Statement", Tags: []string{"statement", "utilities"}, CreatedDate: "2026-02"},
+			Usage{In: 397, Out: 107}, 0.02,
+			`"Northwind Utilities Statement" · [statement utilities] · 2026-02 · 397 in · 107 out · 0.02¢`,
+		},
+		{
+			"an unpriced model on a document the run gave no tags or date",
+			Doc{Title: "scan_001.pdf"},
+			Usage{In: 1203, Out: 88}, 0,
+			`"scan_001.pdf" · 1,203 in · 88 out`,
+		},
+	}
+	for _, c := range cases {
+		if got := enrichDetail(&c.doc, c.used, c.cents); got != c.want {
+			t.Errorf("%s reads as %q, want %q", c.what, got, c.want)
+		}
+	}
+}
+
+// The title moved into the ingest detail when the log line that used to carry
+// it went away, but only where it says something the event does not already:
+// a freshly ingested document is titled with the filename the event names, and
+// printing that twice would be noise. A reprocess of a document the model has
+// since titled is the case worth the room.
+func TestIngestDetail(t *testing.T) {
+	cases := []struct {
+		what string
+		doc  Doc
+		want string
+	}{
+		{
+			"a new document, whose title is still the filename",
+			Doc{OriginalName: "scan_001.pdf", Title: "scan_001.pdf", PageCount: 3, OCRSource: OCRTesseract},
+			"3 pages, tesseract",
+		},
+		{
+			"a reprocess of a document that has been titled since",
+			Doc{OriginalName: "scan_001.pdf", Title: "Northwind Utilities Statement", PageCount: 1, OCRSource: OCRNone},
+			`"Northwind Utilities Statement" · 1 page, none`,
+		},
+		{
+			"a document nothing could count the pages of",
+			Doc{OriginalName: "scan_001.pdf", Title: "scan_001.pdf", OCRSource: OCRTesseract},
+			"tesseract",
+		},
+	}
+	for _, c := range cases {
+		if got := ingestDetail(&c.doc); got != c.want {
+			t.Errorf("%s reads as %q, want %q", c.what, got, c.want)
+		}
+	}
+}
+
 // An edit event has to say what changed, not that a save happened: the document
 // page autosaves, so a field that was focused and left alone posts exactly like
 // a real edit. Nothing changed has to produce nothing at all, or the journal

@@ -527,10 +527,12 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 		return
 	}
 	if err != nil {
-		logf("doc %d: enrichment failed: %v", id, err)
 		doc.Tags = appendTag(doc.Tags, TagNeedsReview)
 		q.save(ctx, doc)
-		q.app.journal("failed", id, "", "enrichment: "+err.Error())
+		// "enrichment" leads for the same reason the pipeline's failures lead
+		// with their stage: both events are called failed, and what failed is
+		// the thing worth knowing first.
+		q.app.record("failed", id, "", "enrichment: "+err.Error())
 		q.mu.Lock()
 		q.failed++
 		q.mu.Unlock()
@@ -556,22 +558,32 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	q.mu.Lock()
 	q.done++
 	q.mu.Unlock()
-	// The cost is named only when the table knows this model, so an unpriced
-	// run says nothing rather than claiming it was free. Both the log line and
-	// the journal entry are silent on the same terms.
-	cents := centsStr(llmCents(q.app.cfg.LLMModel, used))
-	var cost string
-	if cents != "" {
-		cost = ", " + cents
-	}
-	logf("doc %d tagged: %q %v %s (%d in / %d out tokens%s)",
-		doc.ID, doc.Title, doc.Tags, doc.CreatedDate, used.In, used.Out, cost)
+	q.app.record("enriched", id, "", enrichDetail(doc, used, llmCents(q.app.cfg.LLMModel, used)))
+}
 
-	detail := fmt.Sprintf("%s in · %s out", commaNum(used.In), commaNum(used.Out))
-	if cents != "" {
-		detail += " · " + cents
+// enrichDetail says what the model decided and what it cost. What it decided is
+// the substance of the event — a title, a set of tags and a date, which are
+// exactly the fields a person would otherwise open the document to check — and
+// the tokens are how anyone judges whether that was worth paying for. It used
+// to be that only the log carried the decisions and only the journal kept the
+// cost, so neither could answer "what did this model actually do to my archive"
+// on its own.
+//
+// The cost is named only when the price table knows this model, so an unpriced
+// run says nothing rather than claiming it was free.
+func enrichDetail(doc *Doc, used Usage, cents float64) string {
+	parts := []string{fmt.Sprintf("%q", doc.Title)}
+	if len(doc.Tags) > 0 {
+		parts = append(parts, "["+strings.Join(doc.Tags, " ")+"]")
 	}
-	q.app.journal("enriched", id, "", detail)
+	if doc.CreatedDate != "" {
+		parts = append(parts, doc.CreatedDate)
+	}
+	parts = append(parts, fmt.Sprintf("%s in · %s out", commaNum(used.In), commaNum(used.Out)))
+	if s := centsStr(cents); s != "" {
+		parts = append(parts, s)
+	}
+	return strings.Join(parts, " · ")
 }
 
 // save stores the metadata the model produced. persist holds until the write

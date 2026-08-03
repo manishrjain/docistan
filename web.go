@@ -1000,7 +1000,7 @@ func (a *App) handleDocUpdate(w http.ResponseWriter, r *http.Request) {
 	// Only after the edit is durable, and only when it was an edit at all: the
 	// page autosaves, so most of these requests change nothing.
 	if detail := editDetail(&before, doc); detail != "" {
-		a.journal("edited", doc.ID, "", detail)
+		a.record("edited", doc.ID, "", detail)
 	}
 
 	// Autosave posts in the background and stays on the page.
@@ -1063,7 +1063,7 @@ func (a *App) purge(ctx context.Context, id int, event, why string) error {
 	if why != "" {
 		detail = strings.TrimPrefix(title+" — "+why, " — ")
 	}
-	a.journal(event, id, "", detail)
+	a.record(event, id, "", detail)
 
 	// Removal gets the same contract as a write: the index is what every page
 	// is drawn from, so a document deleted from disk but left in it is a search
@@ -1129,7 +1129,7 @@ func (a *App) setTrashed(w http.ResponseWriter, r *http.Request, trash bool) {
 		http.Error(w, "saving document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.journalTrash(doc, trash)
+	a.recordTrash(doc, trash)
 
 	if wantsJSON(r) {
 		writeJSON(w, map[string]any{"trashed": doc.Trashed(), "delete_after_ts": doc.DeleteAfterTS})
@@ -1138,15 +1138,15 @@ func (a *App) setTrashed(w http.ResponseWriter, r *http.Request, trash bool) {
 	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)
 }
 
-// journalTrash records the move. The trashing line carries the date rather than
+// recordTrash records the move. The trashing line carries the date rather than
 // the retention period, because "purges 2026-09-01" is a fact about this
 // document and "30 days" is a fact about the configuration.
-func (a *App) journalTrash(doc *Doc, trash bool) {
+func (a *App) recordTrash(doc *Doc, trash bool) {
 	if !trash {
-		a.journal("restored", doc.ID, "", "")
+		a.record("restored", doc.ID, "", "")
 		return
 	}
-	a.journal("trashed", doc.ID, "", "purges "+time.Unix(doc.DeleteAfterTS, 0).Format("2006-01-02"))
+	a.record("trashed", doc.ID, "", "purges "+time.Unix(doc.DeleteAfterTS, 0).Format("2006-01-02"))
 }
 
 // The bulk actions the index offers, as the form posts them.
@@ -1216,7 +1216,7 @@ func (a *App) setTrashedByID(ctx context.Context, id int, trash bool) error {
 	if err := a.persist(ctx, doc); err != nil {
 		return err
 	}
-	a.journalTrash(doc, trash)
+	a.recordTrash(doc, trash)
 	return nil
 }
 
@@ -1299,7 +1299,7 @@ func (a *App) handleDocRetry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cannot reprocess: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	a.journal("reprocessed", doc.ID, "", "")
+	a.record("reprocessed", doc.ID, "", "")
 	if wantsJSON(r) {
 		writeJSON(w, map[string]any{"status": "processing"})
 		return
@@ -1678,7 +1678,10 @@ func (a *App) acceptUpload(ctx context.Context, fh *multipart.FileHeader) Flash 
 	}
 	if found {
 		os.Remove(tmpName)
-		a.journal("duplicate", id, name, "already in the archive")
+		// No "deleted from the inbox" here, unlike the pipeline's duplicate:
+		// this file was refused on the way in and never reached the inbox, so
+		// there is nothing to say went.
+		a.record("duplicate", id, name, "already in the archive")
 		return Flash{Text: fmt.Sprintf("%s is already in the archive", name), DocID: id}
 	}
 
