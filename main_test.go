@@ -1952,9 +1952,10 @@ func TestPlainPDFIsLeftAlone(t *testing.T) {
 	}
 
 	p := &Pipeline{app: &App{cfg: Config{PasswordFile: filepath.Join(dir, "passwords")}}}
-	// Encrypted starts true to prove the stage clears it. A document whose
-	// original was replaced by an unencrypted one and then reprocessed would
-	// otherwise keep claiming an encryption that is no longer there.
+	// Encrypted starts true to prove the stage leaves it alone. This is what a
+	// reprocess of an already-replaced document looks like: its original is
+	// plain now, and clearing the flag would erase the only record that a
+	// password was ever needed.
 	doc := &Doc{ID: 1, Encrypted: true}
 	dst := filepath.Join(dir, "decrypted.pdf")
 	src, err := p.decrypt(ctx, doc, plain, dst)
@@ -1964,7 +1965,15 @@ func TestPlainPDFIsLeftAlone(t *testing.T) {
 	if src != plain {
 		t.Errorf("decrypt returned %q, want the original %q", src, plain)
 	}
-	if doc.Encrypted {
+	if !doc.Encrypted {
+		t.Error("a reprocess cleared Encrypted, so the document has forgotten that it arrived password-protected")
+	}
+	// A document that was never encrypted must not acquire the flag either.
+	fresh := &Doc{ID: 2}
+	if _, err := p.decrypt(ctx, fresh, plain, dst); err != nil {
+		t.Fatalf("decrypt on a plain PDF: %v", err)
+	}
+	if fresh.Encrypted {
 		t.Error("a plain PDF was recorded as encrypted")
 	}
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
@@ -2034,10 +2043,12 @@ func TestLockedDocumentFailsAtDecryptUntilItsPasswordIsKnown(t *testing.T) {
 	if !strings.Contains(got, text) {
 		t.Errorf("the decrypted copy reads %q, want it to contain %q", got, text)
 	}
-	// The original is the preservation copy and stays exactly as it arrived,
-	// encryption and all: re-encrypting it later could not reproduce it.
+	// This stage never rewrites the original, whatever becomes of it later.
+	// Replacing it with the decrypted copy is adoptDecrypted's decision, taken
+	// once the document is known not to be signed, and nothing here has asked
+	// that question yet.
 	if PDFEncryption(ctx, locked) != pdfLocked {
-		t.Error("the original was modified — it must be left encrypted")
+		t.Error("decrypt modified the original — this stage only ever writes its copy")
 	}
 }
 
@@ -2114,4 +2125,317 @@ func TestPDFPasswordFile(t *testing.T) {
 			t.Errorf("the error carries the password: %v", err)
 		}
 	})
+}
+
+// restrictPDF builds the other encrypted shape: no user password, so it opens
+// for anybody, and an owner password that forbids printing and copying. This is
+// what most statements that are "password-protected" actually are, and the
+// restrictions are real ones rather than the flags qpdf leaves permissive by
+// default — otherwise the test that they are gone afterwards would pass on a
+// file that never had any.
+func restrictPDF(t *testing.T, src, dst string) string {
+	t.Helper()
+	_, err := runCmd(context.Background(), 30*time.Second, "qpdf", "--encrypt",
+		"--user-password=", "--owner-password=no-printing-please", "--bits=256",
+		"--print=none", "--modify=none", "--extract=n", "--", src, dst)
+	if err != nil {
+		t.Fatalf("building the restricted fixture: %v", err)
+	}
+	return dst
+}
+
+// decryptAndAdopt runs the two stages that between them decide what becomes of
+// a document's original: the decryption, and the replacement that follows it.
+// The pipeline runs them a few lines apart with the signature check in between,
+// because whether the original may be replaced depends on the answer — so a
+// test that wants the signed branch sets doc.Signed before calling this, which
+// is exactly what the pipeline does with what IsSignedPDF told it.
+func decryptAndAdopt(t *testing.T, p *Pipeline, doc *Doc, orig string) error {
+	t.Helper()
+	dec := filepath.Join(t.TempDir(), "decrypted.pdf")
+	src, err := p.decrypt(context.Background(), doc, orig, dec)
+	if err != nil {
+		return err
+	}
+	return p.adoptDecrypted(doc, orig, src)
+}
+
+// lockedFixture puts a prepared file where a document's original lives and
+// returns the path along with the hash of the bytes as they arrived, which is
+// what the sidecar records and what every one of these tests checks did not
+// move.
+func lockedFixture(t *testing.T, s *Store, id int, src string) (orig, arrived string) {
+	t.Helper()
+	orig = s.OriginalPath(id, ".pdf")
+	if err := copyFile(src, orig); err != nil {
+		t.Fatalf("placing the original: %v", err)
+	}
+	sum, _, err := hashFile(orig)
+	if err != nil {
+		t.Fatalf("hashing the original: %v", err)
+	}
+	return orig, sum
+}
+
+// originalsDir is what is actually sitting in originals/ afterwards, including
+// dotfiles. The atomic write leaves its temp file there if it fails part way,
+// and a stray .tmp-* beside a document is how a half-written original would
+// first show itself.
+func originalsDir(t *testing.T, s *Store) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Dir(s.OriginalPath(1, ".pdf")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// The point of the whole thing: once a document can be opened, nothing left on
+// disk still demands a password. The decrypted copy takes the original's place,
+// which deliberately overrides the rule that the original is the untouched
+// preservation copy — an owner's judgement that a file nobody can open without
+// first finding a password is worth less than the same file openable. The text
+// has to come through intact, and the recorded hash has to stay as it was: it
+// is the dedup identity, and the same locked file sent again is still the same
+// document.
+func TestSuccessfulDecryptionReplacesTheOriginal(t *testing.T) {
+	const (
+		text = "Interest certificate FY 2025-26, account 4471"
+		pw   = "MRJN-0412-open"
+	)
+	fixtures := t.TempDir()
+	locked := encryptPDF(t, testPDF(t, fixtures, "plain", text),
+		filepath.Join(fixtures, "locked.pdf"), pw, "owner-too")
+
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig, arrived := lockedFixture(t, s, 7, locked)
+
+	p := &Pipeline{app: &App{store: s, cfg: Config{PasswordFile: s.PasswordsPath()}, pdfPasswords: []string{pw}}}
+	doc := &Doc{ID: 7, SHA256: arrived, OriginalExt: ".pdf"}
+	if err := decryptAndAdopt(t, p, doc, orig); err != nil {
+		t.Fatalf("decrypting a document whose password is known: %v", err)
+	}
+
+	ctx := context.Background()
+	if got := PDFEncryption(ctx, orig); got != pdfPlain {
+		t.Errorf("the original is %v, want pdfPlain — it was replaced precisely so it would open with no password", got)
+	}
+	got, err := ExtractText(ctx, orig)
+	if err != nil {
+		t.Fatalf("pdftotext on the replaced original: %v", err)
+	}
+	if !strings.Contains(got, text) {
+		t.Errorf("the replaced original reads %q, want it to contain %q — the document itself has to survive losing its lock", got, text)
+	}
+
+	// The stored hash is of the bytes that arrived, and it now describes no file
+	// on disk. That is the trade, not an oversight: FindByHash has to recognise
+	// the same encrypted file if it is dropped in again, and the only hash that
+	// can match what the sender will send is the one taken before we changed it.
+	if doc.SHA256 != arrived {
+		t.Errorf("SHA256 is %s, want the arriving %s — the same file sent again would be ingested a second time", doc.SHA256, arrived)
+	}
+	onDisk, _, err := hashFile(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk == arrived {
+		t.Error("the original still hashes to the encrypted bytes, so nothing was replaced")
+	}
+	if !doc.Encrypted {
+		t.Error("the document does not record that it arrived encrypted, so its page cannot explain why its checksum names bytes that are gone")
+	}
+	// The replacement goes through a temp file in originals/ and a rename. Only
+	// the document may be left behind.
+	if names := originalsDir(t, s); len(names) != 1 || names[0] != "7.pdf" {
+		t.Errorf("originals/ holds %v, want only 7.pdf", names)
+	}
+}
+
+// A file that opens with the empty password but refuses to be printed or copied
+// gets the same treatment, because it is the same annoyance and removing the
+// restrictions costs nothing: qpdf rewrites it losslessly and nobody had to
+// know a password for it in the first place.
+func TestRestrictedOriginalIsReplacedAndLosesItsRestrictions(t *testing.T) {
+	const text = "Form 1040, page 1 of 48"
+	fixtures := t.TempDir()
+	restricted := restrictPDF(t, testPDF(t, fixtures, "plain", text),
+		filepath.Join(fixtures, "restricted.pdf"))
+
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig, arrived := lockedFixture(t, s, 3, restricted)
+
+	ctx := context.Background()
+	if got := PDFEncryption(ctx, orig); got != pdfRestricted {
+		t.Fatalf("the fixture is %v, want pdfRestricted — this test is about the file that opens but is locked down", got)
+	}
+
+	// No passwords at all are configured, because none are needed: the empty
+	// password DecryptPDF always tries first is the whole of what this takes.
+	p := &Pipeline{app: &App{store: s, cfg: Config{PasswordFile: s.PasswordsPath()}}}
+	doc := &Doc{ID: 3, SHA256: arrived, OriginalExt: ".pdf"}
+	if err := decryptAndAdopt(t, p, doc, orig); err != nil {
+		t.Fatalf("decrypting a restricted document: %v", err)
+	}
+
+	if got := PDFEncryption(ctx, orig); got != pdfPlain {
+		t.Errorf("the original is %v, want pdfPlain", got)
+	}
+	// Asked of qpdf rather than inferred: restrictions cannot outlive the
+	// encryption that carries them, so "not encrypted" is the strongest form of
+	// "prints and copies like any other document".
+	out, err := runCmd(ctx, 30*time.Second, "qpdf", "--show-encryption", orig)
+	if err != nil {
+		t.Fatalf("qpdf --show-encryption on the replaced original: %v", err)
+	}
+	if !strings.Contains(out, "File is not encrypted") {
+		t.Errorf("qpdf says the replaced original is still encrypted:\n%s", out)
+	}
+	got, err := ExtractText(ctx, orig)
+	if err != nil {
+		t.Fatalf("pdftotext on the replaced original: %v", err)
+	}
+	if !strings.Contains(got, text) {
+		t.Errorf("the replaced original reads %q, want it to contain %q", got, text)
+	}
+	if doc.SHA256 != arrived {
+		t.Errorf("SHA256 is %s, want the arriving %s", doc.SHA256, arrived)
+	}
+}
+
+// The one document that keeps its encrypted original. qpdf --decrypt rewrites
+// the file, and a rewritten PDF no longer matches the bytes its signature was
+// computed over — so replacing this one would trade an annoyance for the
+// destruction of the only thing that makes the document evidence. It stays
+// locked; the archive copy is decrypted like everybody else's.
+//
+// On the fixture: this drives the decision directly with doc.Signed set, rather
+// than signing a PDF. Signing needs a certificate and a signer — pyhanko,
+// PDFBox — and neither is a dependency of this program, so a test that required
+// one would not run on a machine that can run the pipeline. Building a
+// signature dictionary by hand instead would prove only that the detector can
+// be fooled by a forgery. The flag is what the pipeline itself passes here,
+// from IsSignedPDF on the decrypted copy, and the branch under test is what is
+// done with it.
+func TestSignedAndEncryptedOriginalIsKept(t *testing.T) {
+	const pw = "notary-2026"
+	fixtures := t.TempDir()
+	locked := encryptPDF(t, testPDF(t, fixtures, "plain", "Deed of conveyance, executed 12 March 2026"),
+		filepath.Join(fixtures, "signed-locked.pdf"), pw, "owner-too")
+
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig, arrived := lockedFixture(t, s, 11, locked)
+
+	p := &Pipeline{app: &App{store: s, cfg: Config{PasswordFile: s.PasswordsPath()}, pdfPasswords: []string{pw}}}
+	doc := &Doc{ID: 11, SHA256: arrived, OriginalExt: ".pdf", Signed: true}
+	if err := decryptAndAdopt(t, p, doc, orig); err != nil {
+		t.Fatalf("decrypting a signed document: %v", err)
+	}
+
+	ctx := context.Background()
+	if got := PDFEncryption(ctx, orig); got != pdfLocked {
+		t.Errorf("the original is %v, want pdfLocked — the signed copy must keep its encryption, since that is the only version whose signature still verifies", got)
+	}
+	onDisk, _, err := hashFile(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk != arrived {
+		t.Error("the signed original was rewritten, which invalidates the signature it was kept for")
+	}
+	// It is still an encrypted document, and its page still has to say so — the
+	// banner reads Signed as well, and says the opposite thing for this one.
+	if !doc.Encrypted {
+		t.Error("the document does not record that it arrived encrypted")
+	}
+}
+
+// The ordinary document pays nothing for any of this. A plain PDF is not
+// rewritten — not re-encoded, not even touched — because there is nothing to
+// take off it, and a reprocess of a document whose original was already
+// replaced arrives here looking exactly like this one.
+func TestPlainOriginalIsNeverRewritten(t *testing.T) {
+	fixtures := t.TempDir()
+	plain := testPDF(t, fixtures, "plain", "Northwind Utilities, March 2026")
+
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig, arrived := lockedFixture(t, s, 5, plain)
+	before, err := os.Stat(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := &Pipeline{app: &App{store: s, cfg: Config{PasswordFile: s.PasswordsPath()}}}
+	// Encrypted set, as it is on a reprocess of a document that arrived locked
+	// and has already had its original replaced: the flag stays, and this stage
+	// still has nothing to do.
+	doc := &Doc{ID: 5, SHA256: arrived, OriginalExt: ".pdf", Encrypted: true}
+	if err := decryptAndAdopt(t, p, doc, orig); err != nil {
+		t.Fatalf("reprocessing a document whose original is already plain: %v", err)
+	}
+
+	after, err := os.Stat(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("the original's mtime moved from %s to %s, so something wrote it", before.ModTime(), after.ModTime())
+	}
+	onDisk, _, err := hashFile(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk != arrived {
+		t.Error("the original's bytes changed, and nothing here had any reason to change them")
+	}
+	if !doc.Encrypted {
+		t.Error("a reprocess cleared Encrypted, and the banner explaining the document's checksum would vanish with it")
+	}
+	if names := originalsDir(t, s); len(names) != 1 || names[0] != "5.pdf" {
+		t.Errorf("originals/ holds %v, want only 5.pdf", names)
+	}
+}
+
+// Where the passwords live. The default belongs in the archive, so that a
+// backup of the documents carries the means to open them and a restore onto
+// another machine is not one missing file away from a folder of documents
+// nobody can read. The flag still wins, for anyone who keeps them elsewhere.
+//
+// It cannot be the flag's default value, which is the whole reason this
+// function exists: the default is derived from -data, and nothing knows -data
+// until flag.Parse has run. An empty flag therefore means "not given".
+func TestPasswordFileDefaultsIntoTheArchive(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := s.PasswordsPath(), filepath.Join(dir, "passwords"); got != want {
+		t.Errorf("PasswordsPath = %q, want %q", got, want)
+	}
+	if got := resolvePasswordFile("", s); got != s.PasswordsPath() {
+		t.Errorf("with no -pdf-passwords the file is %q, want the archive's %q", got, s.PasswordsPath())
+	}
+	elsewhere := filepath.Join(t.TempDir(), ".docovia-passwords")
+	if got := resolvePasswordFile(elsewhere, s); got != elsewhere {
+		t.Errorf("with -pdf-passwords %q the file is %q, want the flag to win", elsewhere, got)
+	}
 }

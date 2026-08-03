@@ -79,11 +79,14 @@ type Doc struct {
 	// NeedsRescue marks a scanned document whose OCR output still looks poor,
 	// making it a candidate for the model to re-read.
 	NeedsRescue bool `json:"needs_rescue,omitempty"`
-	// Encrypted records that the original arrived password-protected and the
-	// copy in the archive is the decrypted one. The original keeps its
-	// encryption — it is the preservation copy, and re-encrypting it later
-	// could not reproduce those bytes faithfully — so this is also the note
-	// that the two files now differ in more than a text layer.
+	// Encrypted records that the document arrived password-protected. It says
+	// that and only that: the original is normally replaced by the decrypted
+	// copy as soon as we can open it, so nothing on disk still carries the
+	// encryption and this flag is the only record that a password was ever
+	// needed. It stays set for the life of the document — a reprocess reading
+	// the now-plain original must not clear it — and the document page's banner
+	// is keyed to it. A signed document is the exception that keeps its
+	// encrypted original, which is why that banner asks about Signed too.
 	Encrypted bool   `json:"encrypted"`
 	Signed    bool   `json:"signed"`
 	Enriched  bool   `json:"enriched"`
@@ -195,6 +198,13 @@ func (s *Store) ArchivePath(id int) string { return s.path("archive", strconv.It
 func (s *Store) ThumbPath(id int) string   { return s.path("thumbs", strconv.Itoa(id)+".jpg") }
 func (s *Store) ConsumeDir() string        { return s.path("consume") }
 func (s *Store) JournalPath() string       { return s.path("journal.jsonl") }
+
+// PasswordsPath is where the PDF passwords live by default. In the data
+// directory rather than the home directory because they belong to the documents
+// they open: whoever backs up the archive backs these up with it, and an archive
+// restored onto another machine can still read its own encrypted documents. The
+// -pdf-passwords flag still overrides it for anyone who keeps them elsewhere.
+func (s *Store) PasswordsPath() string { return s.path("passwords") }
 func (s *Store) OriginalPath(id int, ext string) string {
 	return s.path("originals", strconv.Itoa(id)+ext)
 }

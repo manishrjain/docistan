@@ -109,7 +109,15 @@
         <p class="banner info">Digitally signed — the signature was preserved, so this document was not OCR'd.</p>
       {{end}}
       {{if $d.Encrypted}}
-        <p class="banner info">Password-protected — the original is kept exactly as it arrived, still encrypted; the copy in the archive was decrypted so it can be read and searched.</p>
+        {{/* Two true sentences, not one. The password is normally gone from
+             every copy, which is the whole reason it was taken off — but a
+             signed document keeps its encrypted original, and telling its owner
+             the lock is gone would send them to a file that still asks. */}}
+        {{if $d.Signed}}
+          <p class="banner info">Password-protected — the original is kept as it arrived, still encrypted, because decrypting it would invalidate its signature; the copy in the archive was decrypted so it can be read and searched.</p>
+        {{else}}
+          <p class="banner info">Password-protected when it arrived — the password has been taken off, so both the original and the archive copy now open without one. The recorded checksum still describes the encrypted file that was sent.</p>
+        {{end}}
       {{end}}
       {{if .Search}}
         <p class="searching">Jumped to <strong>{{.Search}}</strong> in the document · <a href="/doc/{{$d.ID}}">clear</a></p>

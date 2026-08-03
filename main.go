@@ -77,8 +77,12 @@ func main() {
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
 	flag.StringVar(&cfg.KeyFile, "openai-key-file", defaultKeyFile(),
 		"file holding the OpenAI API key, read when OPENAI_API_KEY is unset")
-	flag.StringVar(&cfg.PasswordFile, "pdf-passwords", defaultPasswordFile(),
-		"file holding passwords for encrypted PDFs, one per line")
+	// Empty rather than a default, because the default is <data>/passwords and
+	// -data is not parsed yet. resolvePasswordFile settles it once both are
+	// known; the help text has to state the default itself, since there is no
+	// value here for flag to print.
+	flag.StringVar(&cfg.PasswordFile, "pdf-passwords", "",
+		"file holding passwords for encrypted PDFs, one per line (default <data>/passwords)")
 	flag.BoolVar(&cfg.Dev, "dev", false, "reload templates from disk on each request")
 	flag.Parse()
 
@@ -92,6 +96,11 @@ func run(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("data dir: %w", err)
 	}
+	// Before the config is handed to anything: App takes a copy of it, and the
+	// pipeline reads cfg.PasswordFile out of that copy to tell a reader where to
+	// put a password.
+	cfg.PasswordFile = resolvePasswordFile(cfg.PasswordFile, store)
+
 	search := NewSearch(cfg.TypesenseURL, cfg.TypesenseKey, cfg.Collection)
 	app := &App{cfg: cfg, store: store, search: search}
 
@@ -458,12 +467,19 @@ func defaultKeyFile() string {
 	return filepath.Join(home, ".openai.secret")
 }
 
-func defaultPasswordFile() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+// resolvePasswordFile settles where the passwords are read from. The flag wins
+// when it was given; otherwise they live in the archive, next to the documents
+// they open, so that one backup covers both.
+//
+// This cannot be the flag's default value: it is derived from -data, which is
+// not known until flag.Parse has run and there is a store to ask. An empty flag
+// is therefore "not given" rather than "no file", and the resolution happens
+// here, once, before anything reads cfg.PasswordFile.
+func resolvePasswordFile(flagValue string, store *Store) string {
+	if flagValue != "" {
+		return flagValue
 	}
-	return filepath.Join(home, ".docovia-passwords")
+	return store.PasswordsPath()
 }
 
 // pdfPasswords reads the candidates for encrypted documents, one per line.

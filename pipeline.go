@@ -531,6 +531,18 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 		// read the file and the byte-scan fallback is looking at ciphertext, so
 		// the question is only answerable on the copy we can open.
 		doc.Signed = doc.OriginalExt == ".pdf" && IsSignedPDF(src)
+		// Here rather than in decrypt, because whether the original may be
+		// replaced depends on doc.Signed and this is the first moment it is
+		// known: the question can only be asked of a copy that opens.
+		if err := p.adoptDecrypted(doc, orig, src); err != nil {
+			// Not fatal. writeFileAtomicFrom renames or fails, so the original
+			// is whole either way, and every derived file is already being made
+			// from the decrypted copy — the document is complete and readable
+			// with an encrypted original, which is what it had before this
+			// existed. Failing it here would hide a good document behind a
+			// convenience that did not come off.
+			logf("doc %d: %v", doc.ID, err)
+		}
 		source, err := OCR(ctx, normalized, archive, doc.Signed)
 		if err != nil {
 			return fmt.Errorf("ocr: %w", err)
@@ -583,11 +595,12 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 // pipeline can read, and returns the file to work from — the original itself
 // when there was nothing to do.
 //
-// The original is never rewritten. It is the preservation copy, the bytes the
-// bank or the tax office produced, and re-encrypting a decrypted PDF afterwards
-// would not reproduce them faithfully. What changes is everything derived: the
-// archival PDF, its text and its thumbnail are all made from the decrypted copy,
-// which is the whole reason the document can be read and searched at all.
+// This stage does not touch the original: it writes the decrypted copy beside
+// the archive and returns it, and everything derived — the archival PDF, its
+// text and its thumbnail — is made from that, which is the whole reason the
+// document can be read and searched at all. Replacing the original with the
+// decrypted copy is adoptDecrypted's job, later, once it is known whether the
+// document is signed.
 //
 // A file no password opens fails here, deliberately, because the alternative is
 // the bug this replaces: ocrmypdf refuses the file, Ghostscript "succeeds" by
@@ -597,10 +610,13 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 // reason someone can act on, and leaves Retry as the way to finish the job.
 func (p *Pipeline) decrypt(ctx context.Context, doc *Doc, orig, dst string) (string, error) {
 	if PDFEncryption(ctx, orig) == pdfPlain {
-		// Cleared rather than left alone: a document reprocessed after its
-		// original was replaced by an unencrypted one would otherwise keep
-		// claiming an encryption that is no longer there.
-		doc.Encrypted = false
+		// doc.Encrypted is deliberately left alone rather than cleared. A
+		// document whose original has already been replaced by its decrypted
+		// copy arrives here plain on every reprocess, and clearing the flag
+		// would erase the one record that a password was ever needed — the
+		// banner would vanish and the sidecar would stop explaining why its
+		// sha256 does not match the file beside it. The flag says the document
+		// arrived encrypted, which no later pass can make untrue.
 		return orig, nil
 	}
 
@@ -633,11 +649,60 @@ func (p *Pipeline) decrypt(ctx context.Context, doc *Doc, orig, dst string) (str
 	return dst, nil
 }
 
+// adoptDecrypted puts the decrypted copy in the original's place, so that once
+// a document can be opened, nothing left on disk still demands a password.
+//
+// This overrides the archive's usual rule that originals/<id>.<ext> is the
+// preservation copy, untouched from the moment it arrived. That is deliberate,
+// and it is the owner's decision rather than an oversight: a file nobody can
+// open without first finding a password is worth less than the same file
+// openable, and the encrypted form has no value that survives losing the
+// password. The archival PDF is a re-render, so the original is still the only
+// copy of exactly what the bank produced — minus its lock.
+//
+// Both encrypted cases get this. A file that needs a real password and one that
+// opens with the empty password but forbids printing or copying are equally
+// annoying to deal with later, and removing restrictions is lossless.
+//
+// decrypted == orig means this pass decrypted nothing — a plain PDF, or a
+// document whose original was replaced on an earlier pass and is plain now — so
+// there is nothing to do and the original is not rewritten.
+func (p *Pipeline) adoptDecrypted(doc *Doc, orig, decrypted string) error {
+	if !doc.Encrypted || decrypted == orig {
+		return nil
+	}
+	if doc.Signed {
+		// The one document that keeps its encrypted original. qpdf --decrypt
+		// rewrites the file, and a rewritten PDF no longer matches the bytes its
+		// signature was computed over, so replacing this original would destroy
+		// the only thing that makes it evidence. The lock is the lesser
+		// annoyance; the archive copy is decrypted as usual, so the document is
+		// still readable and searchable.
+		logf("doc %d: signed as well as encrypted, so the original stays encrypted — decrypting it would invalidate the signature; the archive copy is the decrypted one", doc.ID)
+		return nil
+	}
+	// Atomic, via a temp file in originals/ and a rename: a half-written
+	// original is the one failure this system cannot recover from, since the
+	// archive PDF is derived from the original and the original is derived from
+	// nothing. Either the encrypted file or the decrypted one is there, never
+	// part of both.
+	if err := copyFile(decrypted, orig); err != nil {
+		return fmt.Errorf("replacing the original with its decrypted copy: %w", err)
+	}
+	// doc.SHA256 stays as it was: it is the hash of the bytes that arrived, and
+	// it no longer describes the file on disk. That is the point. It is the
+	// dedup identity — dropping the same locked file into the inbox again must
+	// still be recognised as a duplicate by FindByHash, and the only hash that
+	// can match is the one of the encrypted bytes the sender will send again.
+	logf("doc %d: the original now holds the decrypted copy; its recorded sha256 still names the encrypted bytes that arrived", doc.ID)
+	return nil
+}
+
 // passwordFileName is what to call the password file when telling someone to
 // put a password in it. The configured path is the useful answer — it is right
-// even when -pdf-passwords moved it — but that path is empty on a machine with
-// no home directory, and "add its password to  and reprocess" is not an
-// instruction anybody can follow.
+// both for the default in the archive and for a -pdf-passwords elsewhere — but
+// a Config that never went through resolvePasswordFile has none, and "add its
+// password to  and reprocess" is not an instruction anybody can follow.
 func (p *Pipeline) passwordFileName() string {
 	if path := p.app.cfg.PasswordFile; path != "" {
 		return path
