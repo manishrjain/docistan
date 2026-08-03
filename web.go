@@ -2096,12 +2096,21 @@ func parseDateTS(s string) int64 {
 	return 0
 }
 
-// normalizeMonth clamps any date-ish string to YYYY-MM.
+// normalizeMonth clamps any date-ish string to YYYY-MM. A bare year expands to
+// December of it, which is the same rule the model is given for a document that
+// names a year and no month: filed at the end of the year it belongs to beats
+// filed nowhere. Without this the model answering "2022" would be discarded here
+// and look exactly like a document it had failed to date.
 func normalizeMonth(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) >= 7 {
 		if _, err := time.Parse("2006-01", s[:7]); err == nil {
 			return s[:7]
+		}
+	}
+	if len(s) == 4 {
+		if _, err := time.Parse("2006", s); err == nil {
+			return s + "-12"
 		}
 	}
 	return ""

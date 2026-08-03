@@ -1065,6 +1065,30 @@ func TestEditDetail(t *testing.T) {
 // bit is not worth failing a test over.
 func closeEnough(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
+// The year-only input is the one worth pinning. The schema asks for YYYY-12 on a
+// document that names only a year and the model does answer in that form, but
+// nothing holds it to that, and a bare "2022" used to be discarded here — a
+// failure indistinguishable from the model having found no date at all.
+func TestNormalizeMonth(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"2022", "2022-12"},
+		{"2022-03", "2022-03"},
+		{"2022-03-14", "2022-03"},
+		{" 2022 ", "2022-12"},
+		{"2022-13", ""},
+		{"22", ""},
+		// Four characters that are not a year, and a year with a partial month:
+		// both are junk rather than something to round off to December.
+		{"abcd", ""},
+		{"2022-3", ""},
+		{"", ""},
+	} {
+		if got := normalizeMonth(tc.in); got != tc.want {
+			t.Errorf("normalizeMonth(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // Dropping the field from the document only works if the index still receives
 // the number it sorts and filters on, so this pins the derivation at the one
 // place that now performs it.

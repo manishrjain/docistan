@@ -44,7 +44,13 @@ const (
 	textCap = 36000
 	headCap = 32000
 	tailCap = 4000
-	maxTags = 5
+	// Twelve rather than five, now that the schema asks for a form number as
+	// well as the kind of document and who it concerns. Tags are the only
+	// classification here, so a W-2 that is genuinely a tax document, an
+	// employer's and a person's has use for all of those, and the form number
+	// should not have to displace one to fit. A ceiling this high is an
+	// invitation to pad, so the schema asks for only as many as apply.
+	maxTags = 12
 )
 
 // capText applies that bound. It lives outside Enrich so the two cuts can be
@@ -240,11 +246,11 @@ func metaSchema(maxTags int) map[string]any {
 			"tags": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": fmt.Sprintf("1-%d short lowercase tags. Tags are the only classification, so include both the kind of document (invoice, statement, tax) and who or what it concerns (northwind, car, medical).", maxTags),
+				"description": fmt.Sprintf("1-%d short lowercase tags: as many as genuinely apply and no more, so a one-page receipt comes back with two or three rather than filling the allowance. Tags are the only classification, so include both the kind of document (invoice, statement, tax) and who or what it concerns (northwind, car, medical). A document printed on a numbered form also carries that form's own designation, lowercased and hyphenated as the form prints it — w-2, 1099-int, form-16 — whoever issues it, tax authority or not.", maxTags),
 			},
 			"created_date": map[string]any{
 				"type":        "string",
-				"description": "The month the document itself is dated, as YYYY-MM. This is the statement or issue date, not a due date, a billing-period end, or a printed-on date. Empty string if the document carries no date.",
+				"description": "The month the document itself is dated, as YYYY-MM. This is the statement or issue date, not a due date, a billing-period end, or a printed-on date. A document that names no month but belongs unambiguously to one year — a tax year, a form year, 'your 2022 forms are enclosed' — is dated December of that year, YYYY-12, which files it at the end of the year it belongs to; do not guess a likelier month, since inventing precision is worse than December. The year is the one the document is about, not the one it was sent in: a 2022 W-2 issued in January 2023 is 2022-12. Empty string only when there is no year either.",
 			},
 		},
 	}
@@ -293,8 +299,9 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 	}
 	fmt.Fprintf(&sb, "The original filename is %q; use it only if the text is uninformative.\n", in.Filename)
 
-	// A document already carrying the maximum would otherwise lose one to the
-	// cap however careful the model was, so the ceiling rises to fit.
+	// Rare now the cap is twelve, but a document that arrived with more — hand
+	// tagged, or tagged when the ceiling was lower — would otherwise lose one to
+	// the cap however careful the model was, so the ceiling rises to fit.
 	limit := maxTags
 	if n := len(in.CurrentTags); n > limit {
 		limit = n
