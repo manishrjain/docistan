@@ -282,6 +282,33 @@ func TestExtensionTaxonomy(t *testing.T) {
 const pageStamps = "Page 1 of 8\n\nPage 2 of 8\n\nPage 3 of 8\n\nPage 4 of 8\n\n" +
 	"Page 5 of 8\n\nPage 6 of 8\n\nPage 7 of 8\n\nPage 8 of 8\n\n"
 
+// A title the model is asked to preserve has to be one somebody meant. The
+// pipeline titles an untitled document after its own filename so nothing shows
+// up blank, and defending that would preserve the very thing the model is being
+// asked to fix.
+func TestOnlyARealTitleIsWorthDefending(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  *Doc
+		want string
+	}{
+		{"never titled, carrying its filename",
+			&Doc{Title: "Scan 2026-05-02 11.14.38.pdf", OriginalName: "Scan 2026-05-02 11.14.38.pdf"}, ""},
+		{"titled by an earlier pass",
+			&Doc{Title: "Taronga Zoo Sydney Entry Tickets", OriginalName: "zoo.pdf"},
+			"Taronga Zoo Sydney Entry Tickets"},
+		{"titled by hand, and happens to resemble the filename",
+			&Doc{Title: "Zoo entry", OriginalName: "zoo entry.pdf"}, "Zoo entry"},
+		{"no title at all",
+			&Doc{Title: "", OriginalName: "zoo.pdf"}, ""},
+	}
+	for _, c := range cases {
+		if got := realTitle(c.doc); got != c.want {
+			t.Errorf("%s: realTitle = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // The two questions — is this text the document, and does the model need to
 // look again — are one question, so they are tested as one. Anything that
 // answers yes to the first must answer no to the second.
@@ -2075,9 +2102,9 @@ func TestResultsCarriesTheTagRegions(t *testing.T) {
 
 	body := rec.Body.String()
 	for _, want := range []string{
-		`id="results"`,     // the rows, as before
+		`id="results"`,                 // the rows, as before
 		`<li class="row" data-doc-id=`, //
-		`id="tag-pills"`,   // the pills, their counts and the state of each
+		`id="tag-pills"`,               // the pills, their counts and the state of each
 		`class="pill-tag on"`,
 		`>escrow<`,
 		`id="tag-browse"`, // the vocabulary, and the foot that counts it

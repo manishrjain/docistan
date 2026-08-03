@@ -36,6 +36,11 @@ type EnrichInput struct {
 	// the list outright, so without this a second pass silently drops
 	// whatever the first pass — or a person — put there.
 	CurrentTags []string
+	// CurrentTitle is the title on the document now, for the same reason and
+	// with the same danger: what comes back replaces it. Empty when the
+	// document has never been titled by anything but its own filename, which
+	// the prompt already knows about and should feel free to improve on.
+	CurrentTitle string
 }
 
 // textCap bounds what we send. Dates and totals cluster at the start and end
@@ -297,6 +302,23 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 		sb.WriteString("you leave out is deleted; dropping a tag someone chose is worse than keeping ")
 		sb.WriteString("one that is merely imprecise.\n")
 	}
+	// Same danger as the tags, and it went unsaid for longer: the title comes
+	// back replaced whether or not there was anything wrong with it. Re-running
+	// the model on unchanged text produced "Ticket Receipt" one time and
+	// "Admission Tickets" the next — both fine, and the second one silently
+	// overwrote a title its owner may have chosen deliberately.
+	//
+	// Only when it is a real title. A document nobody has titled carries its own
+	// filename, and offering that back as something to preserve would defend the
+	// very thing this step exists to improve on.
+	if in.CurrentTitle != "" {
+		fmt.Fprintf(&sb, "This document is currently titled %q.\n", in.CurrentTitle)
+		sb.WriteString("Your answer replaces that title, so return it unchanged unless it is wrong ")
+		sb.WriteString("or genuinely uninformative — someone may have written it, and a title that ")
+		sb.WriteString("keeps changing is worse than one that is merely not how you would have put it. ")
+		sb.WriteString("Rewrite it when it names the wrong document, and leave it alone for the sake ")
+		sb.WriteString("of phrasing.\n")
+	}
 	fmt.Fprintf(&sb, "The original filename is %q; use it only if the text is uninformative.\n", in.Filename)
 
 	// Rare now the cap is twelve, but a document that arrived with more — hand
@@ -540,7 +562,8 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 		Filename: doc.OriginalName, Text: doc.Content, KnownTags: withoutReserved(known),
 		// needs-review is ours, not a description of the document; offering it
 		// back would invite the model to keep it forever.
-		CurrentTags: withoutTags(doc.Tags, TagNeedsReview),
+		CurrentTags:  withoutTags(doc.Tags, TagNeedsReview),
+		CurrentTitle: realTitle(doc),
 	})
 	// Whatever the outcome, tokens the model actually billed belong to this
 	// document — a failed parse still cost money.
@@ -630,6 +653,21 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-time.After(d):
 		return true
 	}
+}
+
+// realTitle is the document's title if it has one, and empty if what it is
+// carrying is only the name of the file it arrived as.
+//
+// The pipeline titles an untitled document after its own filename so that
+// nothing shows up blank, which means "has a title" and "has been titled" are
+// different questions. Only the second is worth defending: handing the model
+// "Scan 2026-05-02 11.14.38.pdf" and asking it to keep that would preserve
+// exactly what it was called in to fix.
+func realTitle(doc *Doc) string {
+	if doc.Title == doc.OriginalName {
+		return ""
+	}
+	return doc.Title
 }
 
 func appendTag(tags []string, t string) []string {
