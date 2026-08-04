@@ -462,6 +462,39 @@ func TestReadStageWorkingWhileProcessing(t *testing.T) {
 	}
 }
 
+// A row goes quiet when the pipeline finishes, but the title, summary and tags
+// are all still to come — so the index has to ask the queue, which is the only
+// thing that knows. The index itself cannot: a document is written to Typesense
+// as ready the moment the local tools are done.
+func TestEnrichingIDs(t *testing.T) {
+	app := &App{}
+	hits := []Hit{{Doc: &Doc{ID: 1}}, {Doc: &Doc{ID: 2}}, {Doc: &Doc{ID: 3}}}
+
+	// No queue at all — no model configured — must not panic or claim work.
+	if got := app.enrichingIDs(hits); got != nil {
+		t.Errorf("with no queue: got %v, want nil", got)
+	}
+
+	app.enrichq = NewEnrichQueue(app)
+	app.enrichq.Add(2)
+	got := app.enrichingIDs(hits)
+	if !got[2] || got[1] || got[3] {
+		t.Errorf("queued: got %v, want only 2", got)
+	}
+
+	// In flight counts too, or the badge would blink off for exactly the
+	// seconds the model is working and live.js would stop watching.
+	app.enrichq.next()
+	if got := app.enrichingIDs(hits); !got[2] {
+		t.Errorf("in flight: got %v, want 2 still marked", got)
+	}
+
+	app.enrichq.clearActive()
+	if got := app.enrichingIDs(hits); len(got) != 0 {
+		t.Errorf("finished: got %v, want empty", got)
+	}
+}
+
 // A title is free text from a model or a person, and it becomes a filename on
 // someone's disk. These are the shapes that break that.
 func TestDownloadName(t *testing.T) {

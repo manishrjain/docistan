@@ -616,6 +616,11 @@ type page struct {
 	// lookup that failed leaves zeros, which is a row of tags that renders
 	// rather than a page that does not.
 	Reserved ReservedCounts
+	// Enriching is which of the documents on this page still have model work
+	// outstanding. It cannot come from the index: a document is written to
+	// Typesense as ready the moment the local tools finish, and whether the
+	// model has been round to it yet is a fact about a queue in this process.
+	Enriching map[int]bool
 	// Search carries the term that led here, so the PDF viewer can jump
 	// straight to it instead of making the reader find it twice.
 	Search  string
@@ -1097,6 +1102,30 @@ func parseQuery(v url.Values) Query {
 	return q
 }
 
+// enrichingIDs is which of these documents are still waiting on the model or
+// are in front of it now.
+//
+// Asked per rendered page rather than kept anywhere: the queue is a map in
+// memory, twenty-four lookups cost nothing, and the answer is stale the moment
+// it is stored. It is what keeps a row saying "processing" after the pipeline
+// has finished with it — ingestion ends when the text is out, but the title,
+// the summary and the tags are all still to come, and a row that goes quiet at
+// that point says the work is done when the useful half of it has not started.
+// It is also what keeps live.js polling, since it watches for exactly that
+// badge.
+func (a *App) enrichingIDs(hits []Hit) map[int]bool {
+	if a.enrichq == nil || len(hits) == 0 {
+		return nil
+	}
+	out := make(map[int]bool, len(hits))
+	for _, h := range hits {
+		if h.Doc != nil && a.enrichq.Has(h.Doc.ID) {
+			out[h.Doc.ID] = true
+		}
+	}
+	return out
+}
+
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	q := parseQuery(r.URL.Query())
 
@@ -1121,12 +1150,13 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.render(w, "index.html", page{
-		Query:    q,
-		Result:   res,
-		Total:    total,
-		Reserved: reserved,
-		Flash:    actionNotice(r.URL.Query()),
-		URL:      r.URL,
+		Query:     q,
+		Result:    res,
+		Total:     total,
+		Reserved:  reserved,
+		Enriching: a.enrichingIDs(res.Hits),
+		Flash:     actionNotice(r.URL.Query()),
+		URL:       r.URL,
 	})
 }
 
@@ -1166,10 +1196,13 @@ func (a *App) handleResults(w http.ResponseWriter, r *http.Request) {
 	// pills deliberately sit outside the regions below, which is what lets this
 	// leave them alone.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Enriching too, or a search-as-you-type swap would drop the badge off
+	// every row it redrew and stop live.js watching with the work still going.
 	if err := tpl.ExecuteTemplate(w, "regions", page{
-		Query:  q,
-		Result: res,
-		URL:    r.URL,
+		Query:     q,
+		Result:    res,
+		Enriching: a.enrichingIDs(res.Hits),
+		URL:       r.URL,
 	}); err != nil {
 		logf("render regions: %v", err)
 	}

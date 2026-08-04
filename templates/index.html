@@ -329,7 +329,14 @@
                    what changes, not how loud it is. */}}
               {{if $d.Locked}}<span class="status failed">Locked</span>
               {{else if eq $d.Status "failed"}}<span class="status failed">Failed</span>
-              {{else if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>{{end}}
+              {{else if ne $d.Status "ready"}}<span class="status {{$d.Status}}">{{$d.Status}}</span>
+              {{/* Ready as far as the index is concerned, and still waiting on
+                   the model for its title, summary and tags. The same badge and
+                   the same word, because from here it is the same answer to the
+                   same question — is this document finished — and because
+                   live.js watches for exactly this class to decide whether the
+                   page is still worth refreshing. */}}
+              {{else if index $page.Enriching $d.ID}}<span class="status processing">processing</span>{{end}}
               {{if $d.Trashed}}<span class="status trashed">Trash</span>{{end}}
             </span>
           </div>
