@@ -449,7 +449,7 @@ func TestTaggingStageDistinguishesQueuedFromRunning(t *testing.T) {
 		t.Error("Has() went false while the call was in flight")
 	}
 
-	app.enrichq.clearActive()
+	app.enrichq.clearActive(doc.ID)
 	if app.enrichq.Active(doc.ID) {
 		t.Error("Active() still true after the call finished")
 	}
@@ -489,9 +489,98 @@ func TestEnrichingIDs(t *testing.T) {
 		t.Errorf("in flight: got %v, want 2 still marked", got)
 	}
 
-	app.enrichq.clearActive()
+	app.enrichq.clearActive(2)
 	if got := app.enrichingIDs(hits); len(got) != 0 {
 		t.Errorf("finished: got %v, want empty", got)
+	}
+}
+
+// Several documents can be at the model at once now, which the queue could not
+// say before: active was one id, so with a pool it would have named whichever
+// worker claimed last and called the rest of them queued.
+func TestEnrichQueueTracksSeveralInFlight(t *testing.T) {
+	app := &App{cfg: Config{LLMModel: "gpt-5.6-luna"}, enricher: &OpenAIEnricher{}}
+	app.enrichq = NewEnrichQueue(app)
+	for _, id := range []int{1, 2, 3, 4, 5} {
+		app.enrichq.Add(id)
+	}
+
+	// Four workers each claim one, as Run's pool would.
+	var claimed []int
+	for range 4 {
+		id, ok := app.enrichq.next()
+		if !ok {
+			t.Fatal("next() ran dry with documents still pending")
+		}
+		claimed = append(claimed, id)
+	}
+	if pending, _, _ := app.enrichq.Stats(); pending != 1 {
+		t.Errorf("pending = %d, want 1", pending)
+	}
+
+	for _, id := range claimed {
+		if !app.enrichq.Active(id) {
+			t.Errorf("doc %d claimed but not active", id)
+		}
+		if s := app.taggingStage(&Doc{ID: id, Status: StatusReady}); s.State != "working" {
+			t.Errorf("doc %d stage = %q, want working", id, s.State)
+		}
+	}
+	// The one nobody took is queued, not working.
+	if s := app.taggingStage(&Doc{ID: 5, Status: StatusReady}); s.State != "pending" {
+		t.Errorf("unclaimed doc stage = %q, want pending", s.State)
+	}
+
+	// Finishing one must not release the others.
+	app.enrichq.clearActive(claimed[0])
+	if app.enrichq.Active(claimed[0]) {
+		t.Error("finished document still active")
+	}
+	for _, id := range claimed[1:] {
+		if !app.enrichq.Active(id) {
+			t.Errorf("doc %d stopped being active when a sibling finished", id)
+		}
+	}
+}
+
+// next() is the one place four workers touch the same slice, and handing the
+// same document to two of them would pay for it twice.
+func TestEnrichQueueNextIsExclusive(t *testing.T) {
+	app := &App{}
+	q := NewEnrichQueue(app)
+	const n = 200
+	for id := 1; id <= n; id++ {
+		q.Add(id)
+	}
+
+	var mu sync.Mutex
+	seen := map[int]int{}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				id, ok := q.next()
+				if !ok {
+					return
+				}
+				mu.Lock()
+				seen[id]++
+				mu.Unlock()
+				q.clearActive(id)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if len(seen) != n {
+		t.Errorf("saw %d distinct documents, want %d", len(seen), n)
+	}
+	for id, times := range seen {
+		if times != 1 {
+			t.Errorf("doc %d handed out %d times, want 1", id, times)
+		}
 	}
 }
 

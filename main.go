@@ -28,8 +28,11 @@ type Config struct {
 	TypesenseKey string
 	Collection   string
 	Workers      int
-	LLMModel     string
-	LLMEnabled   bool
+	// EnrichWorkers is how many model calls may be outstanding at once. See the
+	// flag for why it is not Workers.
+	EnrichWorkers int
+	LLMModel      string
+	LLMEnabled    bool
 	// KeyFile is read when OPENAI_API_KEY is unset. A file keeps the key out
 	// of shell history, out of the process listing, and out of any unit file
 	// or script that might get committed. Empty means the usual places, which
@@ -87,6 +90,11 @@ func main() {
 	flag.StringVar(&cfg.TypesenseKey, "typesense-key", cmp.Or(os.Getenv("TYPESENSE_API_KEY"), "docovia-dev-key"), "Typesense API key")
 	flag.StringVar(&cfg.Collection, "collection", "documents", "Typesense collection name; give a second instance its own")
 	flag.IntVar(&cfg.Workers, "workers", defaultWorkers(), "ingest workers")
+	// Its own number, deliberately unrelated to -workers. That one is sized to
+	// the cores because every ingest worker spawns ocrmypdf; a model call is
+	// latency and almost no local work, so the right figure here is whatever
+	// the API's request allowance will bear.
+	flag.IntVar(&cfg.EnrichWorkers, "enrich-workers", 4, "concurrent model calls")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
 	// Empty rather than a default, because there is more than one default and
@@ -196,7 +204,7 @@ func run(cfg Config) error {
 	if pending, _, _ := app.enrichq.Stats(); pending > 0 {
 		logf("%d document(s) awaiting metadata", pending)
 	}
-	go app.enrichq.Run(ctx)
+	go app.enrichq.Run(ctx, cfg.EnrichWorkers)
 	go app.sweepTrash(ctx)
 
 	mux := http.NewServeMux()

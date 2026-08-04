@@ -446,13 +446,18 @@ type EnrichQueue struct {
 	mu      sync.Mutex
 	pending []int
 	queued  map[int]bool
-	active  int // id currently being enriched, 0 when idle
-	done    int
-	failed  int
+	// active is every id being enriched right now, not one. It was an int
+	// while a single goroutine drained this, which is the only place the old
+	// design assumed that — and the field the page reads to say "Working…", so
+	// with several in flight it would have named one of them and called the
+	// rest queued.
+	active map[int]bool
+	done   int
+	failed int
 }
 
 func NewEnrichQueue(app *App) *EnrichQueue {
-	return &EnrichQueue{app: app, queued: map[int]bool{}}
+	return &EnrichQueue{app: app, queued: map[int]bool{}, active: map[int]bool{}}
 }
 
 func (q *EnrichQueue) Add(id int) { q.add(id, false) }
@@ -482,14 +487,14 @@ func (q *EnrichQueue) next() (int, bool) {
 	delete(q.queued, id)
 	// Stays claimed while in flight: a caller polling for the result must not
 	// see a gap between "waiting" and "done" and read it as failure.
-	q.active = id
+	q.active[id] = true
 	return id, true
 }
 
-func (q *EnrichQueue) clearActive() {
+func (q *EnrichQueue) clearActive(id int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.active = 0
+	delete(q.active, id)
 }
 
 // requeue puts a document back at the front, for when nothing was wrong with
@@ -501,7 +506,7 @@ func (q *EnrichQueue) requeue(id int) { q.add(id, true) }
 func (q *EnrichQueue) Has(id int) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.queued[id] || q.active == id
+	return q.queued[id] || q.active[id]
 }
 
 // Active is the narrower question: not "is something going to happen to this
@@ -512,7 +517,7 @@ func (q *EnrichQueue) Has(id int) bool {
 func (q *EnrichQueue) Active(id int) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.active == id
+	return q.active[id]
 }
 
 func (q *EnrichQueue) Stats() (pending, done, failed int) {
@@ -523,13 +528,42 @@ func (q *EnrichQueue) Stats() (pending, done, failed int) {
 
 // Run drains the queue for the life of the process, pausing whenever the
 // budget says a call would be rejected rather than spending one to find out.
-func (q *EnrichQueue) Run(ctx context.Context) {
+//
+// Several at a time, because a model call is latency and almost no local work:
+// one at a time left a queue of twenty-two documents taking three minutes with
+// nearly five hundred requests of allowance unused, and the ingest pool cannot
+// help — it is sized to the cores because every one of its workers spawns
+// ocrmypdf, which is the opposite problem.
+//
+// Nothing paces the workers apart from the budget. A fixed sleep between calls
+// was a second, blinder rate limiter guessing at what the response headers
+// state outright, and with more than one worker it did not even do that
+// consistently.
+func (q *EnrichQueue) Run(ctx context.Context, workers int) {
 	if q.app.enricher == nil {
 		return
 	}
+	if workers < 1 {
+		workers = 1
+	}
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Only the first worker narrates. A rate limit blocks all of them
+			// at once, and four copies of the same pause is not four times the
+			// information.
+			q.work(ctx, i == 0)
+		}()
+	}
+	wg.Wait()
+}
+
+// work is one worker's whole life: wait for the budget, take a document, do it.
+func (q *EnrichQueue) work(ctx context.Context, narrate bool) {
 	const (
 		idle   = 5 * time.Second
-		pace   = 250 * time.Millisecond
 		maxNap = 5 * time.Minute
 	)
 
@@ -540,7 +574,9 @@ func (q *EnrichQueue) Run(ctx context.Context) {
 
 		hold, stopped := q.app.enricher.budget.Wait()
 		if stopped != "" {
-			logf("enrichment stopped: %s", stopped)
+			if narrate {
+				logf("enrichment stopped: %s", stopped)
+			}
 			return
 		}
 		if hold > 0 {
@@ -548,9 +584,11 @@ func (q *EnrichQueue) Run(ctx context.Context) {
 			if nap > maxNap {
 				nap = maxNap
 			}
-			pending, _, _ := q.Stats()
-			logf("enrichment paused %s for rate limit (%d document(s) waiting)",
-				nap.Round(time.Second), pending)
+			if narrate {
+				pending, _, _ := q.Stats()
+				logf("enrichment paused %s for rate limit (%d document(s) waiting)",
+					nap.Round(time.Second), pending)
+			}
 			if !sleepCtx(ctx, nap) {
 				return
 			}
@@ -565,10 +603,7 @@ func (q *EnrichQueue) Run(ctx context.Context) {
 			continue
 		}
 		q.enrichOne(ctx, id)
-		q.clearActive()
-		if !sleepCtx(ctx, pace) {
-			return
-		}
+		q.clearActive(id)
 	}
 }
 
