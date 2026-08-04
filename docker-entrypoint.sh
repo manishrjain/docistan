@@ -17,15 +17,28 @@
 set -uo pipefail
 
 TYPESENSE_DATA="${TYPESENSE_DATA:-/var/lib/typesense}"
-TYPESENSE_API_KEY="${TYPESENSE_API_KEY:?TYPESENSE_API_KEY must be set}"
+
+# Generated rather than required. This key guards a port on loopback inside one
+# container, shared by two processes that are born together and die together —
+# there is no second party to agree it with and nothing to coordinate, so making
+# an operator invent one only ever produced a value that had to be stored
+# somewhere. An externally supplied one still wins, which is what the dev
+# compose file relies on.
+: "${TYPESENSE_API_KEY:=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')}"
+export TYPESENSE_API_KEY
 
 mkdir -p "$TYPESENSE_DATA"
 
 # Loopback only, so the one way to the index is through docovia even if the
 # container's port is published carelessly.
+#
+# The key goes through the environment, not --api-key, because a container does
+# not have its own process table: `ps` on the host prints the full command line
+# of everything inside it, so an argument here is a secret published to every
+# user on the machine. Typesense reads TYPESENSE_API_KEY on its own, and
+# docovia's -typesense-key defaults to the same variable.
 typesense-server \
   --data-dir="$TYPESENSE_DATA" \
-  --api-key="$TYPESENSE_API_KEY" \
   --api-address=127.0.0.1 \
   --enable-cors=false &
 typesense=$!
@@ -35,7 +48,6 @@ typesense=$!
 # implementation of the same wait here could only disagree with it.
 docovia \
   -typesense-url http://127.0.0.1:8108 \
-  -typesense-key "$TYPESENSE_API_KEY" \
   "$@" &
 app=$!
 
