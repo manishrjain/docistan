@@ -532,6 +532,15 @@ document.addEventListener("DOMContentLoaded", () => {
         dateDisplay.classList.toggle("unset", !data.created_date);
       }
     }
+    // The summary too, which used to be the one thing here that only a reload
+    // could bring — and so the reason the whole page was fetched again at the
+    // end. Now that the reload happens earlier, when the document itself
+    // changes, this is what fills in afterwards.
+    const summary = document.querySelector(".doc-summary");
+    if (summary && typeof data.summary === "string" && data.summary) {
+      summary.textContent = data.summary;
+      summary.classList.remove("none");
+    }
   };
   }
 
@@ -555,36 +564,53 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Watches until nothing is outstanding: the pipeline has finished and the
   // model is neither queued nor running.
+  //
+  // The page is fetched again the moment the pipeline finishes, not when
+  // everything does. Those used to be the same moment; they are not any more,
+  // because the model can be several minutes behind on a busy queue — and a
+  // reader was made to wait all of it before seeing the PDF and the text that
+  // had been ready the whole time. What arrives with the model afterwards is a
+  // title, a summary, some tags and a date, and applyMeta writes all four in
+  // place, so nothing is left for a second reload to do.
   async function watch(timeoutMs = 300000) {
     const deadline = Date.now() + timeoutMs;
+    // Only a transition is worth reloading for. Landing on a page that is
+    // already ready and merely waiting on the model must not reload it — and
+    // must not do so every 1.2s forever.
+    let wasProcessing = false;
     while (Date.now() < deadline) {
       await sleep(1200);
       const data = await poll();
       if (!data) continue;
       applyStages(data.stages);
       applyMeta(data);
-      if (data.status !== "processing" && !data.queued) {
-        if (data.status === "ready") settle();
+      if (data.status === "processing") {
+        wasProcessing = true;
+        continue;
+      }
+      if (wasProcessing && data.status === "ready") {
+        // The document is a different document now: a viewer pointed at an
+        // archival PDF that did not exist when this page was drawn, a text
+        // section that was empty, a new page count and file size.
+        settle();
         return data;
       }
+      if (!data.queued) return data;
     }
     return null;
   }
 
-  // Processing has finished, and almost everything on this page is now a
-  // description of a document that no longer exists: a new title and summary,
-  // new tags, a different page count and file size, a text section that was
-  // empty and is now twelve thousand characters, and a viewer pointed at an
-  // archival PDF that did not exist when the page was drawn.
+  // The pipeline has finished, and much of this page is now a description of a
+  // document that no longer exists: a different page count and file size, a
+  // text section that was empty and is now twelve thousand characters, and a
+  // viewer pointed at an archival PDF that did not exist when the page was
+  // drawn. None of that can be patched in field by field, so the page is
+  // fetched again — once, here, and not again for the model.
   //
-  // The poll updates the timeline, the title and the tags in place, and for a
-  // while that seemed like enough — but it is a handful of the things that
-  // changed, and someone who reprocesses a document and sees the old summary
-  // sitting under a finished timeline has been told the work did nothing. So
-  // the whole page is fetched again, once, at the end.
-  //
-  // Live updates still earn their place while the work is running: that is when
-  // there is something to watch and nothing yet worth reloading for.
+  // It used to wait for the model as well, which was the same moment back when
+  // one document was enriched at a time behind whatever was ingesting. It is
+  // not the same moment now, and waiting for it meant sitting in front of a
+  // blank viewer while the finished PDF sat on disk.
   function settle() {
     // Except over an edit in progress. Autosave means a tag typed a moment ago
     // may still be in the air, and a reload would take it — so that page keeps
