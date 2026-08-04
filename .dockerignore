@@ -1,0 +1,12 @@
+# The build copies the source tree in; everything here would only invalidate
+# the cache or, worse, end up in a layer.
+.git
+.jj
+data
+docovia
+*.log
+
+# Secrets never belong in a build context — not even transiently, because a
+# layer that once held one keeps holding it.
+passwords
+*.secret

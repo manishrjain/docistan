@@ -513,10 +513,37 @@ func warnIfReachable(listen string) {
 			return
 		}
 	}
-	logf("WARNING: listening on %s, which is reachable from outside this machine.", listen)
+	logf("WARNING: listening on %s, which is reachable from outside this process.", listen)
 	logf("WARNING: this program has no authentication of its own. Anything that can reach")
-	logf("WARNING: this port can read, download, edit and delete every document. Bind")
-	logf("WARNING: 127.0.0.1 and put an authenticating proxy in front of it.")
+	logf("WARNING: this port can read, download, edit and delete every document.")
+	if inContainer() {
+		// Binding every interface is not a mistake in here — it is the only way
+		// the port can be published at all — so the advice has to be about the
+		// boundary that does exist rather than the one that does not.
+		logf("WARNING: publish it to 127.0.0.1 on the host and put an authenticating")
+		logf("WARNING: proxy in front, never straight to a public interface.")
+		return
+	}
+	logf("WARNING: bind 127.0.0.1 and put an authenticating proxy in front of it.")
+}
+
+// inContainer reports whether this process is running inside a container, which
+// changes what the warning above should tell someone to do rather than whether
+// to warn at all. The port is still reachable by whatever can route to it; it is
+// the place to fix that which moves, from the listen address to the published
+// one.
+//
+// The docker-created marker file, and cgroup membership for runtimes that do not
+// write one. Both are heuristics, and neither is load-bearing: guessing wrong
+// only prints the less useful of two true warnings.
+func inContainer() bool {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	b, err := os.ReadFile("/proc/1/cgroup")
+	return err == nil && (strings.Contains(string(b), "docker") ||
+		strings.Contains(string(b), "containerd") ||
+		strings.Contains(string(b), "kubepods"))
 }
 
 // resolvePasswordFile settles where the passwords are read from. The flag wins
