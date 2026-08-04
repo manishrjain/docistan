@@ -288,6 +288,72 @@ func TestOfficeToPDFRejectsBrokenContainer(t *testing.T) {
 	}
 }
 
+// The two spellings a model makes of a name, and nothing cleverer: matching
+// initials or a first name alone in code would start guessing, and the prompt
+// covers those.
+func TestOwnerTags(t *testing.T) {
+	if got := ownerTags(""); got != nil {
+		t.Errorf("ownerTags(\"\") = %v, want nil", got)
+	}
+	if got, want := ownerTags("Ana Lucia de Sousa"), []string{"ana-lucia-de-sousa", "analuciadesousa"}; !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	// A single-word name has one spelling, not the same one twice.
+	if got, want := ownerTags("Cher"), []string{"cher"}; !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// The prompt's owner rule changes shape depending on whether the archive can
+// say whose it is. With a name, the rule is exact and the name appears; with
+// none, only the generic heuristic does — and no stray "%!s" from a format
+// string that stopped matching its arguments.
+func TestEnrichPromptOwner(t *testing.T) {
+	named := enrichPrompt(EnrichInput{Filename: "a.pdf", Owner: "Ana Lucia de Sousa"})
+	for _, want := range []string{"The archive belongs to Ana Lucia de Sousa", "Never tag the owner", `The original filename is "a.pdf"`} {
+		if !strings.Contains(named, want) {
+			t.Errorf("prompt with owner missing %q", want)
+		}
+	}
+
+	anon := enrichPrompt(EnrichInput{Filename: "a.pdf"})
+	if strings.Contains(anon, "Ana") {
+		t.Error("ownerless prompt names an owner")
+	}
+	if !strings.Contains(anon, "Never tag the archive's owner") {
+		t.Error("ownerless prompt lost the generic owner rule")
+	}
+	for _, p := range []string{named, anon} {
+		if strings.Contains(p, "%!") {
+			t.Errorf("prompt has a format-verb artifact: %q", p)
+		}
+	}
+}
+
+// Current tags and title are offered back with their preservation rules only
+// when they exist — a document with neither should not be told to preserve
+// anything.
+func TestEnrichPromptCurrentState(t *testing.T) {
+	p := enrichPrompt(EnrichInput{
+		Filename:     "scan.pdf",
+		KnownTags:    []string{"tax", "medical"},
+		CurrentTags:  []string{"visa", "sunandita"},
+		CurrentTitle: "Citizenship Application",
+	})
+	for _, want := range []string{"tax, medical", "visa, sunandita", `currently titled "Citizenship Application"`, "breaks a rule above"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+
+	bare := enrichPrompt(EnrichInput{Filename: "scan.pdf"})
+	for _, absent := range []string{"already tagged", "currently titled", "Reuse these existing tags"} {
+		if strings.Contains(bare, absent) {
+			t.Errorf("bare prompt should not contain %q", absent)
+		}
+	}
+}
+
 // A title is free text from a model or a person, and it becomes a filename on
 // someone's disk. These are the shapes that break that.
 func TestDownloadName(t *testing.T) {

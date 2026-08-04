@@ -41,6 +41,13 @@ type EnrichInput struct {
 	// document has never been titled by anything but its own filename, which
 	// the prompt already knows about and should feel free to improve on.
 	CurrentTitle string
+	// Owner is who the archive belongs to, and the model cannot do without it:
+	// from a single document there is no telling the owner's passport
+	// application, where tagging the applicant is noise, from a spouse's, where
+	// the applicant's name is exactly the tag that sets their documents apart.
+	// Both look like "person X's application". Empty falls back to a heuristic
+	// that gets the first case right and the second wrong.
+	Owner string
 }
 
 // textCap bounds what we send. Dates and totals cluster at the start and end
@@ -50,9 +57,9 @@ const (
 	headCap = 32000
 	tailCap = 4000
 	// Twelve rather than five, now that the schema asks for a form number as
-	// well as the kind of document and who it concerns. Tags are the only
-	// classification here, so a W-2 that is genuinely a tax document, an
-	// employer's and a person's has use for all of those, and the form number
+	// well as the kind of document, its subject and its other party. Tags are
+	// the only classification here, so a W-2 that is genuinely a tax document,
+	// an employer's and a form has use for all of those, and the form number
 	// should not have to displace one to fit. A ceiling this high is an
 	// invitation to pad, so the schema asks for only as many as apply.
 	maxTags = 12
@@ -242,16 +249,16 @@ func metaSchema(maxTags int) map[string]any {
 		"properties": map[string]any{
 			"title": map[string]any{
 				"type":        "string",
-				"description": "Short human-readable title, e.g. 'Northwind Electricity Statement'. No file extension.",
+				"description": "Short human-readable title naming who it is from and what it is, e.g. 'Northwind Electricity Statement'. When it is one of a recurring series — a monthly statement, an annual tax form — include the period ('Northwind Electricity Statement March 2026'), or twelve of them end up sharing one name. No file extension.",
 			},
 			"summary": map[string]any{
 				"type":        "string",
-				"description": "One or two plain sentences saying what this document is and what it actually says — amounts, dates, parties, the decision or obligation it records. No preamble like 'This document is'.",
+				"description": "One or two plain sentences saying what this document is and what it actually says — the parties, amounts, dates, reference numbers, and the decision or obligation it records. The summary is searched, so specifics beat categories: 'renews the Foster St lease for twelve months at $2,400' can be found again, 'a lease renewal document' cannot. No preamble like 'This document is'.",
 			},
 			"tags": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": fmt.Sprintf("1-%d short lowercase tags: as many as genuinely apply and no more, so a one-page receipt comes back with two or three rather than filling the allowance. Tags are the only classification, so include both the kind of document (invoice, statement, tax) and who or what it concerns (northwind, car, medical). A document printed on a numbered form also carries that form's own designation, lowercased and closed up with no hyphens or spaces however the form prints it — w2, 1099int, form16 — whoever issues it, tax authority or not.", maxTags),
+				"description": fmt.Sprintf("1-%d short lowercase tags: as many as genuinely apply and no more, so a one-page receipt comes back with two or three rather than filling the allowance. Cover what the document is, what it is about, and the other party to it where there is one — never the archive's owner, and never a place that is only part of an address. A document printed on a numbered form also carries that form's own designation, lowercased and closed up with no hyphens or spaces however the form prints it — w2, 1099int, form16 — whoever issues it, tax authority or not.", maxTags),
 			},
 			"created_date": map[string]any{
 				"type":        "string",
@@ -266,26 +273,38 @@ func metaSchema(maxTags int) map[string]any {
 // to a process-wide total.
 type Usage struct{ In, Out int64 }
 
-// Enrich returns usage on every path where the request reached the model,
-// including one whose answer we then fail to parse — that response was
-// billed, so the document should carry the cost.
-func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usage, error) {
-	var meta Meta
-	var used Usage
-
-	if hold, stopped := e.budget.Wait(); hold != 0 || stopped != "" {
-		return meta, used, ErrRateLimited
-	}
-
-	text := strings.TrimSpace(in.Text)
-	if text == "" {
-		return meta, used, errors.New("no text to work from")
-	}
-	text = capText(text)
-
+// enrichPrompt is the system prompt for one document, apart from Enrich so its
+// decisions are testable without a call to the model.
+//
+// The shape it teaches: a tag earns its place by narrowing a search. The two
+// failures the archive actually produced were both violations of that — the
+// owner's own name on a third of the documents, which narrows nothing in an
+// archive where everything is theirs, and "sydney" on a citizenship
+// application because the address block mentions it, when the document is
+// about citizenship and a country. Every rule below is one of those failures
+// stated the other way round.
+func enrichPrompt(in EnrichInput) string {
 	var sb strings.Builder
-	sb.WriteString("You file documents for a personal archive. Extract metadata from the document text.\n")
-	sb.WriteString("Tags are the only classification in this system, so choose them carefully.\n")
+	sb.WriteString("You file documents for one person's private archive. Extract metadata from the document text.\n")
+	sb.WriteString("Tags are the only classification in this system, and a tag earns its place by narrowing ")
+	sb.WriteString("a search: the owner looking for this document years from now, among thousands that are ")
+	sb.WriteString("all theirs. Three kinds of tag do that — what the document is (statement, application, ")
+	sb.WriteString("receipt, tax), what it is about (citizenship, insurance, car, medical), and the other ")
+	sb.WriteString("party to it (northwind, ato, irs). Prefer a tag that could group several documents over ")
+	sb.WriteString("one so specific it will only ever match this one.\n")
+	if in.Owner != "" {
+		fmt.Fprintf(&sb, "The archive belongs to %s. Never tag the owner: their name, in any form or ", in.Owner)
+		sb.WriteString("spelling, is on nearly every document here, so it finds everything and distinguishes ")
+		sb.WriteString("nothing. A document that is really someone else's — a spouse's application, a child's ")
+		sb.WriteString("report — takes that person's name, which is exactly what sets their documents apart ")
+		sb.WriteString("in this archive.\n")
+	} else {
+		sb.WriteString("Never tag the archive's owner: the account holder, applicant or addressee is on ")
+		sb.WriteString("nearly every document here, so their name finds everything and distinguishes nothing.\n")
+	}
+	sb.WriteString("A place is a tag when the document is about the place — a trip, an event held there, a ")
+	sb.WriteString("property — never because it appears in an address. A citizenship application is ")
+	sb.WriteString("citizenship and the country applied to, not the city the applicant happens to live in.\n")
 	if len(in.KnownTags) > 0 {
 		sb.WriteString("Reuse these existing tags whenever one fits, rather than inventing a near-duplicate: ")
 		sb.WriteString(strings.Join(in.KnownTags, ", "))
@@ -293,13 +312,15 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 	}
 	// Your answer replaces the tag list wholesale, so anything left out is
 	// removed. Say so plainly, and give the asymmetry: a tag someone chose is
-	// worth more than the tidiness of dropping it.
+	// worth more than the tidiness of dropping it. "Breaks a rule above" is the
+	// named escape hatch — without it, the model reads this paragraph as
+	// protecting the very tags the rules exist to remove.
 	if len(in.CurrentTags) > 0 {
 		sb.WriteString("This document is already tagged: ")
 		sb.WriteString(strings.Join(in.CurrentTags, ", "))
-		sb.WriteString(".\nReturn those tags again unless one is clearly wrong for this document, ")
-		sb.WriteString("and add any that are missing. Your list replaces the current one, so a tag ")
-		sb.WriteString("you leave out is deleted; dropping a tag someone chose is worse than keeping ")
+		sb.WriteString(".\nReturn those tags again unless one is clearly wrong for this document or breaks ")
+		sb.WriteString("a rule above, and add any that are missing. Your list replaces the current one, so ")
+		sb.WriteString("a tag you leave out is deleted; dropping a tag someone chose is worse than keeping ")
 		sb.WriteString("one that is merely imprecise.\n")
 	}
 	// Same danger as the tags, and it went unsaid for longer: the title comes
@@ -320,6 +341,25 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 		sb.WriteString("of phrasing.\n")
 	}
 	fmt.Fprintf(&sb, "The original filename is %q; use it only if the text is uninformative.\n", in.Filename)
+	return sb.String()
+}
+
+// Enrich returns usage on every path where the request reached the model,
+// including one whose answer we then fail to parse — that response was
+// billed, so the document should carry the cost.
+func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usage, error) {
+	var meta Meta
+	var used Usage
+
+	if hold, stopped := e.budget.Wait(); hold != 0 || stopped != "" {
+		return meta, used, ErrRateLimited
+	}
+
+	text := strings.TrimSpace(in.Text)
+	if text == "" {
+		return meta, used, errors.New("no text to work from")
+	}
+	text = capText(text)
 
 	// Rare now the cap is twelve, but a document that arrived with more — hand
 	// tagged, or tagged when the ceiling was lower — would otherwise lose one to
@@ -330,9 +370,10 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 	}
 
 	resp, err := e.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Model: e.model,
+		Model:           e.model,
+		ReasoningEffort: shared.ReasoningEffortHigh,
 		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.SystemMessage(sb.String()),
+			openai.SystemMessage(enrichPrompt(in)),
 			openai.UserMessage(text),
 		},
 		ResponseFormat: openai.ChatCompletionNewParamsResponseFormatUnion{
@@ -557,13 +598,21 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	// The vocabulary is a facet count of the index, which now carries the
 	// reserved names as well — so the list of tags already in use has to be
 	// filtered before it becomes the list of tags on offer. A model shown
-	// "trash" as an existing tag will eventually use it.
+	// "trash" as an existing tag will eventually use it — and the same goes
+	// for the owner's name, which past tagging left all over the vocabulary:
+	// offering it back as an established tag argues against the prompt's own
+	// rule.
+	owner := ownerTags(q.app.cfg.Owner)
 	meta, used, err := q.app.enricher.Enrich(ctx, EnrichInput{
-		Filename: doc.OriginalName, Text: doc.Content, KnownTags: withoutReserved(known),
+		Filename: doc.OriginalName, Text: doc.Content,
+		KnownTags: withoutTags(withoutReserved(known), owner...),
 		// needs-review is ours, not a description of the document; offering it
-		// back would invite the model to keep it forever.
-		CurrentTags:  withoutTags(doc.Tags, TagNeedsReview),
+		// back would invite the model to keep it forever. The owner's name is
+		// filtered for the opposite reason: shown as an existing tag, it reads
+		// as one somebody chose and the prompt's preservation rule defends it.
+		CurrentTags:  withoutTags(doc.Tags, append([]string{TagNeedsReview}, owner...)...),
 		CurrentTitle: realTitle(doc),
+		Owner:        q.app.cfg.Owner,
 	})
 	// Whatever the outcome, tokens the model actually billed belong to this
 	// document — a failed parse still cost money.
@@ -595,10 +644,11 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	if meta.CreatedDate != "" {
 		doc.CreatedDate = meta.CreatedDate
 	}
-	// The model is never shown a reserved name, but what it returns is not a
-	// promise. Filtered before the length is tested, so a reply made entirely of
-	// names it may not use leaves the tags it had rather than emptying them.
-	if tags := withoutReserved(meta.Tags); len(tags) > 0 {
+	// The model is never shown a reserved name or the owner's, but what it
+	// returns is not a promise. Filtered before the length is tested, so a
+	// reply made entirely of names it may not use leaves the tags it had
+	// rather than emptying them.
+	if tags := withoutTags(withoutReserved(meta.Tags), owner...); len(tags) > 0 {
 		doc.Tags = tags
 	}
 	doc.Enriched = true
@@ -653,6 +703,23 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-time.After(d):
 		return true
 	}
+}
+
+// ownerTags is the owner's name as the tags a model would make of it, so the
+// two obvious spellings can be stripped mechanically wherever tags flow: the
+// vocabulary on offer, the current tags shown back, and the answer. The prompt
+// handles other forms — initials, first name alone — where matching in code
+// would start guessing; this handles the certainty that the exact ones never
+// get through, whatever the model was thinking that day.
+func ownerTags(owner string) []string {
+	fields := strings.Fields(strings.ToLower(owner))
+	if len(fields) == 0 {
+		return nil
+	}
+	if len(fields) == 1 {
+		return fields
+	}
+	return []string{strings.Join(fields, "-"), strings.Join(fields, "")}
 }
 
 // realTitle is the document's title if it has one, and empty if what it is
