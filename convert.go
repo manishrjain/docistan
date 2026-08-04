@@ -21,6 +21,10 @@ import (
 const (
 	cmdTimeout = 120 * time.Second
 	ocrTimeout = 600 * time.Second
+	// Longer than cmdTimeout because every conversion pays a cold start: a
+	// private profile means there is never a warm LibreOffice to reuse, and a
+	// presentation full of images is slow after that.
+	officeTimeout = 300 * time.Second
 )
 
 // fileKind is how an extension becomes a PDF. The taxonomy lives in one table
@@ -32,6 +36,7 @@ const (
 	kindPDF fileKind = iota
 	kindImage
 	kindText
+	kindOffice
 )
 
 // supportedExts is everything we accept. Anything else is rejected at intake
@@ -46,6 +51,21 @@ var supportedExts = map[string]fileKind{
 	".webp": kindImage,
 	".txt":  kindText,
 	".md":   kindText,
+
+	// The mainstream office formats rather than the hundred-odd import filters
+	// LibreOffice ships. Every entry here is a promise that a document of that
+	// type comes out readable, and the long tail — Lotus 1-2-3, StarWriter,
+	// WordPerfect — is a promise nobody can check. Adding one is this line.
+	".doc":  kindOffice,
+	".docx": kindOffice,
+	".odt":  kindOffice,
+	".rtf":  kindOffice,
+	".xls":  kindOffice,
+	".xlsx": kindOffice,
+	".ods":  kindOffice,
+	".ppt":  kindOffice,
+	".pptx": kindOffice,
+	".odp":  kindOffice,
 }
 
 // kindOf accepts any casing, since an extension reaching here came off a
@@ -63,6 +83,26 @@ func isSupportedExt(ext string) bool {
 func isTextExt(ext string) bool {
 	k, ok := kindOf(ext)
 	return ok && k == kindText
+}
+
+// renderedHere reports whether normalize built this PDF rather than passing
+// through one that arrived that way.
+//
+// It decides whether text density is evidence. A PDF from outside can be a
+// scan carrying a page number on every page, which is the whole reason
+// HasTextLayer measures characters per page instead of asking whether there
+// are any. Nothing we render ourselves can be that: fpdf and soffice write the
+// text they were handed, so any text in their output is the document's own and
+// a short memo is not a scan for being short.
+//
+// The pipeline asked this as OriginalExt == ".pdf", which was the same
+// question while PDFs were the only input that could go either way. It
+// mislabelled the rest — every .txt in the archive is recorded as
+// ocr_source: tesseract, having had nothing recognised — and office documents
+// would have joined them.
+func renderedHere(ext string) bool {
+	k, ok := kindOf(ext)
+	return ok && k != kindPDF
 }
 
 // acceptedExts is the file picker's accept list, taken from the same table the
@@ -224,8 +264,56 @@ func ToPDF(ctx context.Context, src, ext, dst string) error {
 		return err
 	case kindText:
 		return textToPDF(src, dst)
+	case kindOffice:
+		return officeToPDF(ctx, src, dst)
 	}
 	return copyFile(src, dst)
+}
+
+// officeToPDF converts a word-processor, spreadsheet or presentation file by
+// driving LibreOffice headlessly.
+//
+// Three things about soffice make this longer than the one command it looks
+// like. It keeps its user profile in a single directory and treats a second
+// process finding that directory in use as a request to hand the work to the
+// first, so concurrent workers would serialise or fail outright — a private
+// profile per conversion is the documented way to get independent instances.
+// It names its output after the input and drops it in --outdir, so there is no
+// way to write straight to dst. And it exits 0 having produced nothing when an
+// import filter gives up, so the file is the result and the status is not.
+func officeToPDF(ctx context.Context, src, dst string) error {
+	profile, err := os.MkdirTemp("", "docovia-lo-profile-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(profile)
+
+	outDir, err := os.MkdirTemp("", "docovia-lo-out-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(outDir)
+
+	if _, err := runCmd(ctx, officeTimeout, "soffice",
+		"-env:UserInstallation=file://"+profile,
+		"--headless", "--norestore", "--nolockcheck",
+		"--convert-to", "pdf",
+		"--outdir", outDir, src); err != nil {
+		return err
+	}
+
+	// The directory was made empty a moment ago, so whatever is in it now came
+	// from this conversion and nothing else.
+	produced, err := filepath.Glob(filepath.Join(outDir, "*.pdf"))
+	if err != nil {
+		return err
+	}
+	if len(produced) != 1 {
+		return fmt.Errorf("soffice produced %d PDFs, want 1 — the import filter probably refused the file", len(produced))
+	}
+	// Copied rather than renamed: the temp directory and the archive are rarely
+	// on the same filesystem.
+	return copyFile(produced[0], dst)
 }
 
 // textToPDF renders plain text so text files get the same viewer, thumbnail

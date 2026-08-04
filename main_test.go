@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -145,6 +146,145 @@ func TestKeyFilesOrder(t *testing.T) {
 	}
 	if got := keyFiles("/tmp/mine"); !slices.Equal(got, []string{"/tmp/mine"}) {
 		t.Errorf("keyFiles(%q) = %v, want just it", "/tmp/mine", got)
+	}
+}
+
+// Only a PDF arrives already made; everything else normalize renders itself,
+// and that is what decides whether text density is evidence. Getting this
+// wrong is silent: the document still ingests and is still searchable, it is
+// just recorded as having been OCR'd when nothing was recognised.
+func TestRenderedHere(t *testing.T) {
+	for _, tc := range []struct {
+		ext  string
+		want bool
+	}{
+		{".pdf", false}, // arrives as a PDF; density is the only evidence
+		{".PDF", false},
+		{".txt", true},
+		{".md", true},
+		{".doc", true},
+		{".docx", true},
+		{".xlsx", true},
+		{".odp", true},
+		{".RTF", true}, // casing comes off a filename someone else chose
+		{".jpg", true}, // rendered by magick, though it renders no text
+		{".exe", false},
+	} {
+		if got := renderedHere(tc.ext); got != tc.want {
+			t.Errorf("renderedHere(%q) = %v, want %v", tc.ext, got, tc.want)
+		}
+	}
+}
+
+// The office formats have to be reachable through the same table everything
+// else goes through, or the upload picker and the intake check disagree about
+// what may be sent.
+func TestOfficeExtensionsAreAccepted(t *testing.T) {
+	accepted := acceptedExts()
+	for _, ext := range []string{".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods", ".ppt", ".pptx", ".odp"} {
+		if !isSupportedExt(ext) {
+			t.Errorf("%s is not supported", ext)
+		}
+		if !strings.Contains(accepted, ext) {
+			t.Errorf("%s missing from the upload accept list", ext)
+		}
+		if isTextExt(ext) {
+			t.Errorf("%s should not take the plain-text path", ext)
+		}
+	}
+}
+
+// Converting through LibreOffice, on the real thing. RTF is the fixture
+// because it is the one office format that is plain text, so the test needs no
+// binary blob checked in. Skipped where soffice is not installed, which is
+// every machine that is not the container.
+func TestOfficeToPDF(t *testing.T) {
+	if _, err := exec.LookPath("soffice"); err != nil {
+		t.Skip("soffice not installed")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "memo.rtf")
+	if err := os.WriteFile(src, []byte(`{\rtf1\ansi Quarterly memo about the Acme contract.\par}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "out.pdf")
+	if err := officeToPDF(t.Context(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+	// A PDF that exists but has no text layer would defeat the point, so the
+	// check is that the words came through, not that a file appeared.
+	text, err := ExtractText(t.Context(), dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "Acme contract") {
+		t.Errorf("converted PDF text = %q, want it to contain the memo's words", text)
+	}
+}
+
+// The reason officeToPDF makes a profile per conversion, which is otherwise
+// just an odd-looking flag. Measured on this machine with six at once: the
+// default profile converted three, one shared profile converted four, a
+// private profile each converted six. Workers default to half the core count,
+// so a batch of office documents hits this immediately — and it degrades by
+// losing documents rather than by being slow.
+func TestOfficeToPDFConcurrent(t *testing.T) {
+	if _, err := exec.LookPath("soffice"); err != nil {
+		t.Skip("soffice not installed")
+	}
+	if testing.Short() {
+		t.Skip("runs a handful of real LibreOffice conversions")
+	}
+	dir := t.TempDir()
+	const n = 6
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := range n {
+		src := filepath.Join(dir, fmt.Sprintf("in%d.rtf", i))
+		body := fmt.Sprintf(`{\rtf1\ansi Document number %d.\par}`, i)
+		if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = officeToPDF(t.Context(), src, filepath.Join(dir, fmt.Sprintf("out%d.pdf", i)))
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("conversion %d: %v", i, err)
+		}
+	}
+}
+
+// A broken file has to fail rather than leave an empty archive entry behind.
+//
+// It takes a real container header to get there. LibreOffice identifies by
+// content rather than by extension and falls back to its text filter for
+// anything it cannot place, so plain text named .docx converts happily, and
+// even 4KB of /dev/urandom comes out as a PDF full of mojibake — the extension
+// allowlist is the only thing standing between junk and an archived document.
+// What does fail is a file that claims a format it then is not: the PK header
+// below commits it to being a zip, and it is not one.
+func TestOfficeToPDFRejectsBrokenContainer(t *testing.T) {
+	if _, err := exec.LookPath("soffice"); err != nil {
+		t.Skip("soffice not installed")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "broken.docx")
+	if err := os.WriteFile(src, []byte("PK\x03\x04truncated-and-not-a-zip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "out.pdf")
+	if err := officeToPDF(t.Context(), src, dst); err == nil {
+		t.Error("converting a broken container succeeded, want an error")
+	}
+	if _, err := os.Stat(dst); err == nil {
+		t.Error("a destination file was left behind by a failed conversion")
 	}
 }
 
@@ -298,7 +438,10 @@ func TestExtensionTaxonomy(t *testing.T) {
 		{".TIFF", true, kindImage},
 		{".md", true, kindText},
 		{".txt", true, kindText},
-		{".docx", false, 0},
+		{".docx", true, kindOffice},
+		{".DOC", true, kindOffice},
+		{".xlsx", true, kindOffice},
+		{".exe", false, 0},
 		{"", false, 0},
 	}
 	for _, c := range cases {
@@ -316,8 +459,9 @@ func TestExtensionTaxonomy(t *testing.T) {
 		}
 	}
 	// The picker offers exactly what the server accepts.
-	if got := acceptedExts(); got != ".jpeg,.jpg,.md,.pdf,.png,.tif,.tiff,.txt,.webp" {
-		t.Errorf("acceptedExts() = %q", got)
+	const want = ".doc,.docx,.jpeg,.jpg,.md,.odp,.ods,.odt,.pdf,.png,.ppt,.pptx,.rtf,.tif,.tiff,.txt,.webp,.xls,.xlsx"
+	if got := acceptedExts(); got != want {
+		t.Errorf("acceptedExts() = %q, want %q", got, want)
 	}
 }
 

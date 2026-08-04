@@ -533,13 +533,18 @@ func (p *Pipeline) stages(ctx context.Context, job *Job, doc *Doc) error {
 		// be OCR'd, which is cheap, and the archive's own count is still the
 		// one worth recording.
 		var pre string
-		if doc.OriginalExt == ".pdf" {
-			if text, err := ExtractText(ctx, normalized); err == nil {
-				pre = text
-			}
+		if text, err := ExtractText(ctx, normalized); err == nil {
+			pre = text
 		}
 		prePages := PageCount(ctx, normalized)
+		// Density answers this for a PDF that arrived from outside, where a
+		// thin text layer is the signature of a scan. It cannot answer it for
+		// one we rendered, where the text is there because we put it there —
+		// so for those, having any at all settles it.
 		hadText := HasTextLayer(pre, prePages)
+		if renderedHere(doc.OriginalExt) && strings.TrimSpace(pre) != "" {
+			hadText = true
+		}
 		doc.NativeText = hadText
 
 		p.setStage(job, "ocr")

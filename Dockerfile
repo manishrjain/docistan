@@ -49,6 +49,12 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       poppler-utils \
       qpdf \
       imagemagick \
+      libreoffice-writer \
+      libreoffice-calc \
+      libreoffice-impress \
+      fonts-liberation \
+      fonts-crosextra-carlito \
+      fonts-crosextra-caladea \
       ca-certificates \
       tzdata \
  && rm -rf /var/lib/apt/lists/*
@@ -63,6 +69,28 @@ RUN magick -size 200x80 canvas:white /tmp/probe.jpg \
  && test -s /tmp/probe.pdf \
  && rm -f /tmp/probe.jpg /tmp/probe.pdf \
  || (echo "ImageMagick refuses to write PDFs in this base image — check /etc/ImageMagick-*/policy.xml" >&2; exit 1)
+
+# The same argument for LibreOffice, which has more ways to be installed and
+# still not work: a missing import filter, a profile it cannot write, a Java
+# dependency it wanted after all. RTF is the fixture because it is the one
+# office format that can be written here as plain text, with no archive to build
+# and no binary blob to keep in the repository.
+RUN printf '%s' '{\rtf1\ansi Probe of the office conversion path.\par}' > /tmp/probe.rtf \
+ && soffice -env:UserInstallation=file:///tmp/lo-probe --headless --norestore \
+      --convert-to pdf --outdir /tmp /tmp/probe.rtf >/dev/null 2>&1 \
+ && test -s /tmp/probe.pdf \
+ && pdftotext /tmp/probe.pdf - | grep -q "office conversion path" \
+ && rm -rf /tmp/probe.rtf /tmp/probe.pdf /tmp/lo-probe \
+ || (echo "LibreOffice cannot convert office documents to PDF in this image" >&2; exit 1)
+
+# The metric-compatible substitutes are load-bearing rather than cosmetic. A
+# .doc naming Calibri or Cambria on a machine without them gets a fallback of a
+# different width, so lines re-wrap and the page count changes — and the derived
+# PDF stops being a faithful copy of what arrived, which is the only reason it
+# is kept. Carlito and Caladea match those two by metrics; Liberation matches
+# Arial, Times New Roman and Courier New.
+RUN fc-list | grep -qi carlito && fc-list | grep -qi caladea \
+ || (echo "metric-compatible substitute fonts are missing" >&2; exit 1)
 
 COPY --from=typesense /opt/typesense-server /usr/local/bin/typesense-server
 COPY --from=build /out/docovia /usr/local/bin/docovia
