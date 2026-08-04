@@ -72,16 +72,27 @@ RUN magick -size 200x80 canvas:white /tmp/probe.jpg \
 
 # The same argument for LibreOffice, which has more ways to be installed and
 # still not work: a missing import filter, a profile it cannot write, a Java
-# dependency it wanted after all. RTF is the fixture because it is the one
-# office format that can be written here as plain text, with no archive to build
-# and no binary blob to keep in the repository.
+# dependency it wanted after all. RTF and SYLK are the fixtures because they are
+# the two office formats that can be written here as plain text, with no archive
+# to build and no binary blob to keep in the repository.
+#
+# Both, because the modules install separately and a document only ever reaches
+# the one that reads its format. An image with Writer and no Calc passes a
+# Writer-only probe and then fails on the first spreadsheet somebody uploads —
+# which is not hypothetical: it is exactly what a .xlsx did on a development
+# machine that had libreoffice-writer and nothing else, months after the image
+# was built and far from here.
 RUN printf '%s' '{\rtf1\ansi Probe of the office conversion path.\par}' > /tmp/probe.rtf \
+ && printf 'ID;PSCALC3\nC;X1;Y1;K"Probe of the spreadsheet path"\nE\n' > /tmp/calcprobe.slk \
  && soffice -env:UserInstallation=file:///tmp/lo-probe --headless --norestore \
       --convert-to pdf --outdir /tmp /tmp/probe.rtf >/dev/null 2>&1 \
- && test -s /tmp/probe.pdf \
+ && soffice -env:UserInstallation=file:///tmp/lo-calc --headless --norestore \
+      --convert-to pdf --outdir /tmp /tmp/calcprobe.slk >/dev/null 2>&1 \
+ && test -s /tmp/probe.pdf && test -s /tmp/calcprobe.pdf \
  && pdftotext /tmp/probe.pdf - | grep -q "office conversion path" \
- && rm -rf /tmp/probe.rtf /tmp/probe.pdf /tmp/lo-probe \
- || (echo "LibreOffice cannot convert office documents to PDF in this image" >&2; exit 1)
+ && pdftotext /tmp/calcprobe.pdf - | grep -q "spreadsheet path" \
+ && rm -rf /tmp/probe.rtf /tmp/probe.pdf /tmp/calcprobe.slk /tmp/calcprobe.pdf /tmp/lo-probe /tmp/lo-calc \
+ || (echo "LibreOffice cannot convert office documents to PDF in this image — check that libreoffice-writer and libreoffice-calc are both installed" >&2; exit 1)
 
 # The metric-compatible substitutes are load-bearing rather than cosmetic. A
 # .doc naming Calibri or Cambria on a machine without them gets a fallback of a
