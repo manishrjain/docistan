@@ -41,13 +41,6 @@ type EnrichInput struct {
 	// document has never been titled by anything but its own filename, which
 	// the prompt already knows about and should feel free to improve on.
 	CurrentTitle string
-	// Owner is who the archive belongs to, and the model cannot do without it:
-	// from a single document there is no telling the owner's passport
-	// application, where tagging the applicant is noise, from a spouse's, where
-	// the applicant's name is exactly the tag that sets their documents apart.
-	// Both look like "person X's application". Empty falls back to a heuristic
-	// that gets the first case right and the second wrong.
-	Owner string
 }
 
 // textCap bounds what we send. Dates and totals cluster at the start and end
@@ -258,7 +251,7 @@ func metaSchema(maxTags int) map[string]any {
 			"tags": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": fmt.Sprintf("1-%d short lowercase tags: as many as genuinely apply and no more, so a one-page receipt comes back with two or three rather than filling the allowance. Cover what the document is, what it is about, and the other party to it where there is one — never the archive's owner, and never a place that is only part of an address. A document printed on a numbered form also carries that form's own designation, lowercased and closed up with no hyphens or spaces however the form prints it — w2, 1099int, form16 — whoever issues it, tax authority or not.", maxTags),
+				"description": fmt.Sprintf("1-%d short lowercase tags: as many as genuinely apply and no more, so a one-page receipt comes back with two or three rather than filling the allowance. Cover what the document is, what it is about, and the other party to it where there is one — never a place that is only part of an address. A document printed on a numbered form also carries that form's own designation, lowercased and closed up with no hyphens or spaces however the form prints it — w2, 1099int, form16 — whoever issues it, tax authority or not.", maxTags),
 			},
 			"created_date": map[string]any{
 				"type":        "string",
@@ -278,30 +271,20 @@ type Usage struct{ In, Out int64 }
 //
 // The shape it teaches: a tag earns its place by narrowing a search. The two
 // failures the archive actually produced were both violations of that — the
-// owner's own name on a third of the documents, which narrows nothing in an
-// archive where everything is theirs, and "sydney" on a citizenship
-// application because the address block mentions it, when the document is
-// about citizenship and a country. Every rule below is one of those failures
-// stated the other way round.
+// addressee's own name spent a third of the archive's tags saying nothing,
+// and "sydney" on a citizenship application because the address block
+// mentions it, when the document is about citizenship and a country. Every
+// rule below is one of those failures stated the other way round.
 func enrichPrompt(in EnrichInput) string {
 	var sb strings.Builder
-	sb.WriteString("You file documents for one person's private archive. Extract metadata from the document text.\n")
+	sb.WriteString("You file documents for a family's private archive. Extract metadata from the document text.\n")
 	sb.WriteString("Tags are the only classification in this system, and a tag earns its place by narrowing ")
-	sb.WriteString("a search: the owner looking for this document years from now, among thousands that are ")
-	sb.WriteString("all theirs. Three kinds of tag do that — what the document is (statement, application, ")
+	sb.WriteString("a search: someone in the family looking for this document years from now, among ")
+	sb.WriteString("thousands of their own. Three kinds of tag do that — what the document is (statement, application, ")
 	sb.WriteString("receipt, tax), what it is about (citizenship, insurance, car, medical), and the other ")
 	sb.WriteString("party to it (northwind, ato, irs). Prefer a tag that could group several documents over ")
 	sb.WriteString("one so specific it will only ever match this one.\n")
-	if in.Owner != "" {
-		fmt.Fprintf(&sb, "The archive belongs to %s. Never tag the owner: their name, in any form or ", in.Owner)
-		sb.WriteString("spelling, is on nearly every document here, so it finds everything and distinguishes ")
-		sb.WriteString("nothing. A document that is really someone else's — a spouse's application, a child's ")
-		sb.WriteString("report — takes that person's name, which is exactly what sets their documents apart ")
-		sb.WriteString("in this archive.\n")
-	} else {
-		sb.WriteString("Never tag the archive's owner: the account holder, applicant or addressee is on ")
-		sb.WriteString("nearly every document here, so their name finds everything and distinguishes nothing.\n")
-	}
+	sb.WriteString("A family member's name is a tag when it says whose document this is; keep it a first name, and never tag a person only because they are the addressee or account holder printed on everything they receive.\n")
 	sb.WriteString("A place is a tag when the document is about the place — a trip, an event held there, a ")
 	sb.WriteString("property — never because it appears in an address. A citizenship application is ")
 	sb.WriteString("citizenship and the country applied to, not the city the applicant happens to live in.\n")
@@ -598,21 +581,14 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	// The vocabulary is a facet count of the index, which now carries the
 	// reserved names as well — so the list of tags already in use has to be
 	// filtered before it becomes the list of tags on offer. A model shown
-	// "trash" as an existing tag will eventually use it — and the same goes
-	// for the owner's name, which past tagging left all over the vocabulary:
-	// offering it back as an established tag argues against the prompt's own
-	// rule.
-	owner := ownerTags(q.app.cfg.Owner)
+	// "trash" as an existing tag will eventually use it.
 	meta, used, err := q.app.enricher.Enrich(ctx, EnrichInput{
 		Filename: doc.OriginalName, Text: doc.Content,
-		KnownTags: withoutTags(withoutReserved(known), owner...),
+		KnownTags: withoutReserved(known),
 		// needs-review is ours, not a description of the document; offering it
-		// back would invite the model to keep it forever. The owner's name is
-		// filtered for the opposite reason: shown as an existing tag, it reads
-		// as one somebody chose and the prompt's preservation rule defends it.
-		CurrentTags:  withoutTags(doc.Tags, append([]string{TagNeedsReview}, owner...)...),
+		// back would invite the model to keep it forever.
+		CurrentTags:  withoutTags(doc.Tags, TagNeedsReview),
 		CurrentTitle: realTitle(doc),
-		Owner:        q.app.cfg.Owner,
 	})
 	// Whatever the outcome, tokens the model actually billed belong to this
 	// document — a failed parse still cost money.
@@ -644,11 +620,10 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	if meta.CreatedDate != "" {
 		doc.CreatedDate = meta.CreatedDate
 	}
-	// The model is never shown a reserved name or the owner's, but what it
-	// returns is not a promise. Filtered before the length is tested, so a
-	// reply made entirely of names it may not use leaves the tags it had
-	// rather than emptying them.
-	if tags := withoutTags(withoutReserved(meta.Tags), owner...); len(tags) > 0 {
+	// The model is never shown a reserved name, but what it returns is not a
+	// promise. Filtered before the length is tested, so a reply made entirely
+	// of names it may not use leaves the tags it had rather than emptying them.
+	if tags := withoutReserved(meta.Tags); len(tags) > 0 {
 		doc.Tags = tags
 	}
 	doc.Enriched = true
@@ -703,23 +678,6 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-time.After(d):
 		return true
 	}
-}
-
-// ownerTags is the owner's name as the tags a model would make of it, so the
-// two obvious spellings can be stripped mechanically wherever tags flow: the
-// vocabulary on offer, the current tags shown back, and the answer. The prompt
-// handles other forms — initials, first name alone — where matching in code
-// would start guessing; this handles the certainty that the exact ones never
-// get through, whatever the model was thinking that day.
-func ownerTags(owner string) []string {
-	fields := strings.Fields(strings.ToLower(owner))
-	if len(fields) == 0 {
-		return nil
-	}
-	if len(fields) == 1 {
-		return fields
-	}
-	return []string{strings.Join(fields, "-"), strings.Join(fields, "")}
 }
 
 // realTitle is the document's title if it has one, and empty if what it is

@@ -30,13 +30,6 @@ type Config struct {
 	Workers      int
 	LLMModel     string
 	LLMEnabled   bool
-	// Owner is who the archive belongs to, used the other way round from what
-	// a name is usually for: the model is told never to spend a tag on it. In
-	// an archive where every document is the owner's, their name narrows no
-	// search — and without being told whose archive this is, the model cannot
-	// tell the owner's passport application, where the applicant's name is
-	// noise, from a spouse's, where it is the one tag that matters.
-	Owner string
 	// KeyFile is read when OPENAI_API_KEY is unset. A file keeps the key out
 	// of shell history, out of the process listing, and out of any unit file
 	// or script that might get committed. Empty means the usual places, which
@@ -96,8 +89,6 @@ func main() {
 	flag.IntVar(&cfg.Workers, "workers", defaultWorkers(), "ingest workers")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
-	flag.StringVar(&cfg.Owner, "owner", os.Getenv("DOCOVIA_OWNER"),
-		"the archive owner's name; the model is told never to waste a tag on it")
 	// Empty rather than a default, because there is more than one default and
 	// flag can only print a string. keyFiles holds the list; the help text has
 	// to state it here.
