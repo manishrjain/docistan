@@ -554,6 +554,67 @@ func TestEnrichQueueTracksSeveralInFlight(t *testing.T) {
 	}
 }
 
+// The sharp edge of holding both states in one map: a rate-limited call puts
+// the document back to waiting from inside enrichOne, and the worker's
+// clearActive runs immediately afterwards. If that deleted whatever was under
+// the key, the retry would be dropped — silently, and only when the budget ran
+// out, which is the hardest moment to notice anything.
+func TestEnrichQueueRequeueSurvivesRelease(t *testing.T) {
+	q := NewEnrichQueue(&App{})
+	q.Add(7)
+
+	id, ok := q.next()
+	if !ok || id != 7 {
+		t.Fatalf("next() = %d, %v", id, ok)
+	}
+	if !q.Active(7) {
+		t.Fatal("claimed document is not active")
+	}
+
+	// What enrichOne does on ErrRateLimited, then what work() does after it.
+	q.requeue(7)
+	q.clearActive(7)
+
+	if !q.Has(7) {
+		t.Fatal("the rate-limited document was dropped from the queue")
+	}
+	if q.Active(7) {
+		t.Error("still active after being released")
+	}
+	if pending, _, _ := q.Stats(); pending != 1 {
+		t.Errorf("pending = %d, want 1", pending)
+	}
+	if got, ok := q.next(); !ok || got != 7 {
+		t.Errorf("next() = %d, %v — the requeued document is not claimable", got, ok)
+	}
+
+	// The ordinary path still releases: claimed, finished, gone.
+	q.clearActive(7)
+	if q.Has(7) {
+		t.Error("a finished document is still in the queue")
+	}
+}
+
+// Add must not queue a second call for a document a worker already holds —
+// that is money spent twice on the same answer.
+func TestEnrichQueueAddIgnoresInFlight(t *testing.T) {
+	q := NewEnrichQueue(&App{})
+	q.Add(3)
+	q.next()
+
+	q.Add(3) // Re-tag pressed while the call is out
+	if !q.Active(3) {
+		t.Error("Add demoted an in-flight document back to waiting")
+	}
+	if pending, _, _ := q.Stats(); pending != 0 {
+		t.Errorf("pending = %d, want 0 — Add queued a duplicate", pending)
+	}
+	q.clearActive(3)
+	if q.Has(3) {
+		t.Error("a duplicate Add left the document queued after it finished")
+	}
+}
+
 // next() is the one place four workers touch the same slice, and handing the
 // same document to two of them would pay for it twice.
 func TestEnrichQueueNextIsExclusive(t *testing.T) {

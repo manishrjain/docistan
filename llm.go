@@ -440,72 +440,99 @@ func cleanMeta(m Meta, maxTags int) Meta {
 // EnrichQueue holds documents waiting on the model. Ingestion never blocks on
 // it: a document is fully usable — searchable, readable, thumbnailed — as soon
 // as the local tools finish, and metadata arrives whenever the budget allows.
+// enrichState is how far along one document is. Numbered from one so that the
+// zero a missing key returns is not a state a document can be in: absent and
+// waiting are different answers, and a map of enums gives both for free.
+type enrichState uint8
+
+const (
+	enrichWaiting enrichState = iota + 1
+	enrichActive
+)
+
 type EnrichQueue struct {
 	app *App
 
 	mu sync.Mutex
-	// pending is a set, not a list, because the order does not matter: every
-	// document in here is going to be enriched, and which one goes first
-	// decides nothing. It used to be a slice for the order and a map beside it
-	// for the lookups, which is one queue kept twice and an invariant to hold
-	// between them — for an ordering nobody needed.
-	pending map[int]bool
-	// active is every id being enriched right now, not one. It was an int
-	// while a single goroutine drained this, which is the only place the old
-	// design assumed that — and the field the page reads to say "Working…", so
-	// with several in flight it would have named one of them and called the
-	// rest queued.
-	active map[int]bool
-	done   int
-	failed int
+	// pending is every document the model still owes something, and what is
+	// happening to it. One map rather than a set of waiting ones beside a set
+	// of running ones: those were two structures answering one question
+	// between them, and every reader had to consult both to find out anything.
+	//
+	// Not a list, either. The order does not matter — every document in here
+	// is going to be enriched and which goes first decides nothing — so a
+	// worker takes whichever the map offers, which cannot starve anyone
+	// because claiming it changes its state.
+	pending map[int]enrichState
+	done    int
+	failed  int
 }
 
 func NewEnrichQueue(app *App) *EnrichQueue {
-	return &EnrichQueue{app: app, pending: map[int]bool{}, active: map[int]bool{}}
+	return &EnrichQueue{app: app, pending: map[int]enrichState{}}
 }
 
-// Add is idempotent by the nature of a set, so asking twice for a document
-// already waiting costs nothing and changes nothing.
+// Add asks for a document to be enriched. Asking twice for one already waiting
+// costs nothing and changes nothing; asking for one a worker already has is
+// refused, because the call is out and a second would pay twice for the same
+// answer.
 func (q *EnrichQueue) Add(id int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.pending[id] = true
+	if q.pending[id] == enrichActive {
+		return
+	}
+	q.pending[id] = enrichWaiting
 }
 
-// next claims a document for this worker. Whichever one the map hands over
+// next claims a document for this worker. Whichever waiting one the map offers
 // first will do — they are all going to be done, and a worker taking an
-// arbitrary one cannot starve another, because taking it removes it.
+// arbitrary one cannot starve another, because claiming it stops it being
+// offered again.
 func (q *EnrichQueue) next() (int, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for id := range q.pending {
-		delete(q.pending, id)
-		// Stays claimed while in flight: a caller polling for the result must
-		// not see a gap between "waiting" and "done" and read it as failure.
-		q.active[id] = true
+	for id, state := range q.pending {
+		if state != enrichWaiting {
+			continue
+		}
+		// Claimed rather than removed: a caller polling for the result must not
+		// see a gap between "waiting" and "done" and read it as failure.
+		q.pending[id] = enrichActive
 		return id, true
 	}
 	return 0, false
 }
 
+// clearActive releases a document its worker has finished with — unless it is
+// no longer the worker's to release. A rate-limited call requeues the document
+// from inside enrichOne and this runs immediately afterwards, so deleting
+// whatever is under the key would throw away the retry that was just asked
+// for, silently, and only when the budget ran out.
 func (q *EnrichQueue) clearActive(id int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	delete(q.active, id)
+	if q.pending[id] == enrichActive {
+		delete(q.pending, id)
+	}
 }
 
-// requeue puts a document back, for when nothing was wrong with it and the
-// budget simply ran out. It is Add under a name that says why: there is no
-// front to go to any more, and none is wanted — a document the budget refused
-// is not more urgent than the rest, it is in exactly the same position.
-func (q *EnrichQueue) requeue(id int) { q.Add(id) }
+// requeue puts a document back to waiting, for when nothing was wrong with it
+// and the budget simply ran out. It sets the state rather than going through
+// Add, which would refuse it: the worker still holds this document, and being
+// held is the very thing being undone.
+func (q *EnrichQueue) requeue(id int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.pending[id] = enrichWaiting
+}
 
 // Has reports whether a document is waiting or currently being enriched, so
 // its page can say "in progress" rather than leaving the user guessing.
 func (q *EnrichQueue) Has(id int) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.pending[id] || q.active[id]
+	return q.pending[id] != 0
 }
 
 // Active is the narrower question: not "is something going to happen to this
@@ -516,13 +543,20 @@ func (q *EnrichQueue) Has(id int) bool {
 func (q *EnrichQueue) Active(id int) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.active[id]
+	return q.pending[id] == enrichActive
 }
 
 func (q *EnrichQueue) Stats() (pending, done, failed int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return len(q.pending), q.done, q.failed
+	// Counted rather than len(): the map holds the running ones too, and
+	// "pending" on the status page means still to come.
+	for _, state := range q.pending {
+		if state == enrichWaiting {
+			pending++
+		}
+	}
+	return pending, q.done, q.failed
 }
 
 // Run drains the queue for the life of the process, pausing whenever the
