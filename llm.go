@@ -443,9 +443,13 @@ func cleanMeta(m Meta, maxTags int) Meta {
 type EnrichQueue struct {
 	app *App
 
-	mu      sync.Mutex
-	pending []int
-	queued  map[int]bool
+	mu sync.Mutex
+	// pending is a set, not a list, because the order does not matter: every
+	// document in here is going to be enriched, and which one goes first
+	// decides nothing. It used to be a slice for the order and a map beside it
+	// for the lookups, which is one queue kept twice and an invariant to hold
+	// between them — for an ordering nobody needed.
+	pending map[int]bool
 	// active is every id being enriched right now, not one. It was an int
 	// while a single goroutine drained this, which is the only place the old
 	// design assumed that — and the field the page reads to say "Working…", so
@@ -457,38 +461,31 @@ type EnrichQueue struct {
 }
 
 func NewEnrichQueue(app *App) *EnrichQueue {
-	return &EnrichQueue{app: app, queued: map[int]bool{}, active: map[int]bool{}}
+	return &EnrichQueue{app: app, pending: map[int]bool{}, active: map[int]bool{}}
 }
 
-func (q *EnrichQueue) Add(id int) { q.add(id, false) }
-
-func (q *EnrichQueue) add(id int, front bool) {
+// Add is idempotent by the nature of a set, so asking twice for a document
+// already waiting costs nothing and changes nothing.
+func (q *EnrichQueue) Add(id int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.queued[id] {
-		return
-	}
-	q.queued[id] = true
-	if front {
-		q.pending = append([]int{id}, q.pending...)
-		return
-	}
-	q.pending = append(q.pending, id)
+	q.pending[id] = true
 }
 
+// next claims a document for this worker. Whichever one the map hands over
+// first will do — they are all going to be done, and a worker taking an
+// arbitrary one cannot starve another, because taking it removes it.
 func (q *EnrichQueue) next() (int, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.pending) == 0 {
-		return 0, false
+	for id := range q.pending {
+		delete(q.pending, id)
+		// Stays claimed while in flight: a caller polling for the result must
+		// not see a gap between "waiting" and "done" and read it as failure.
+		q.active[id] = true
+		return id, true
 	}
-	id := q.pending[0]
-	q.pending = q.pending[1:]
-	delete(q.queued, id)
-	// Stays claimed while in flight: a caller polling for the result must not
-	// see a gap between "waiting" and "done" and read it as failure.
-	q.active[id] = true
-	return id, true
+	return 0, false
 }
 
 func (q *EnrichQueue) clearActive(id int) {
@@ -497,16 +494,18 @@ func (q *EnrichQueue) clearActive(id int) {
 	delete(q.active, id)
 }
 
-// requeue puts a document back at the front, for when nothing was wrong with
-// it and the budget simply ran out.
-func (q *EnrichQueue) requeue(id int) { q.add(id, true) }
+// requeue puts a document back, for when nothing was wrong with it and the
+// budget simply ran out. It is Add under a name that says why: there is no
+// front to go to any more, and none is wanted — a document the budget refused
+// is not more urgent than the rest, it is in exactly the same position.
+func (q *EnrichQueue) requeue(id int) { q.Add(id) }
 
 // Has reports whether a document is waiting or currently being enriched, so
 // its page can say "in progress" rather than leaving the user guessing.
 func (q *EnrichQueue) Has(id int) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.queued[id] || q.active[id]
+	return q.pending[id] || q.active[id]
 }
 
 // Active is the narrower question: not "is something going to happen to this

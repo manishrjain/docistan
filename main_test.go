@@ -526,9 +526,20 @@ func TestEnrichQueueTracksSeveralInFlight(t *testing.T) {
 			t.Errorf("doc %d stage = %q, want working", id, s.State)
 		}
 	}
-	// The one nobody took is queued, not working.
-	if s := app.taggingStage(&Doc{ID: 5, Status: StatusReady}); s.State != "pending" {
-		t.Errorf("unclaimed doc stage = %q, want pending", s.State)
+	// Whichever one nobody took is queued, not working. Which one that is, is
+	// deliberately not knowable: the queue is a set and hands out an arbitrary
+	// member, so the test asks who is left rather than assuming.
+	left := 0
+	for _, id := range []int{1, 2, 3, 4, 5} {
+		if !slices.Contains(claimed, id) {
+			left = id
+		}
+	}
+	if left == 0 {
+		t.Fatal("all five were claimed by four workers")
+	}
+	if s := app.taggingStage(&Doc{ID: left, Status: StatusReady}); s.State != "pending" {
+		t.Errorf("unclaimed doc %d stage = %q, want pending", left, s.State)
 	}
 
 	// Finishing one must not release the others.
