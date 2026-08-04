@@ -75,7 +75,7 @@ ARG UID=1000
 ARG GID=1000
 RUN groupadd -g "${GID}" docovia \
  && useradd -u "${UID}" -g "${GID}" -m -s /usr/sbin/nologin docovia \
- && mkdir -p /data /var/lib/typesense \
+ && mkdir -p /data /var/lib/typesense /etc/docovia \
  && chown -R "${UID}:${GID}" /data /var/lib/typesense \
  && chmod +x /usr/local/bin/docker-entrypoint
 
@@ -85,6 +85,15 @@ WORKDIR /data
 # The archive. Everything durable is in here and nothing durable is anywhere
 # else, which is what makes the backup one directory.
 VOLUME ["/data"]
+
+# The OpenAI key is looked for here when OPENAI_API_KEY is unset, so mounting it
+# is the whole configuration:
+#
+#   -v ~/.openai.secret:/etc/docovia/openai.secret:ro
+#
+# A read-only mount rather than an environment variable, because a variable set
+# at `docker run` is written into the container's config on disk and stays
+# visible to `docker inspect` for as long as the container exists.
 
 # 0.0.0.0 because a container's boundary is its published port, not its listen
 # address — publish it to 127.0.0.1 on the host and authenticate in front.

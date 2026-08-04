@@ -31,7 +31,8 @@ type Config struct {
 	LLMEnabled   bool
 	// KeyFile is read when OPENAI_API_KEY is unset. A file keeps the key out
 	// of shell history, out of the process listing, and out of any unit file
-	// or script that might get committed.
+	// or script that might get committed. Empty means the usual places, which
+	// keyFiles lists; a value here overrides them rather than adding to them.
 	KeyFile string
 	// PasswordFile holds the passwords for encrypted PDFs, one per line. Same
 	// reasoning as KeyFile and more of it: these are bank passwords, so a flag
@@ -87,8 +88,12 @@ func main() {
 	flag.IntVar(&cfg.Workers, "workers", 2, "ingest workers")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
-	flag.StringVar(&cfg.KeyFile, "openai-key-file", defaultKeyFile(),
-		"file holding the OpenAI API key, read when OPENAI_API_KEY is unset")
+	// Empty rather than a default, because there is more than one default and
+	// flag can only print a string. keyFiles holds the list; the help text has
+	// to state it here.
+	flag.StringVar(&cfg.KeyFile, "openai-key-file", "",
+		"file holding the OpenAI API key, read when OPENAI_API_KEY is unset "+
+			"(default ~/.openai.secret, then "+systemKeyFile+")")
 	// Empty rather than a default, because the default is <data>/passwords and
 	// -data is not parsed yet. resolvePasswordFile settles it once both are
 	// known; the help text has to state the default itself, since there is no
@@ -136,7 +141,8 @@ func run(cfg Config) error {
 	}
 
 	if cfg.LLMEnabled {
-		if key, source := openAIKey(cfg.KeyFile); key != "" {
+		candidates := keyFiles(cfg.KeyFile)
+		if key, source := openAIKey(candidates...); key != "" {
 			app.enricher = NewOpenAIEnricher(cfg.LLMModel, key)
 			logf("metadata enrichment on, model %s (key from %s)", cfg.LLMModel, source)
 			// Prices live in a table in code, so a model it has never heard of
@@ -146,7 +152,10 @@ func run(cfg Config) error {
 				logf("no price known for model %s: documents will still be tagged, but costs will not be shown", cfg.LLMModel)
 			}
 		} else {
-			logf("no OpenAI key in OPENAI_API_KEY or %s: documents will keep filename-derived titles and no tags", cfg.KeyFile)
+			// Every place actually looked in, so this reads as instructions
+			// rather than as a report that something is missing.
+			logf("no OpenAI key in OPENAI_API_KEY or %s: documents will keep filename-derived titles and no tags",
+				strings.Join(candidates, " or "))
 		}
 	}
 
@@ -477,12 +486,29 @@ func defaultDataDir() string {
 	return filepath.Join(home, "docovia-data")
 }
 
-func defaultKeyFile() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+// systemKeyFile is where the key lives when there is no home directory worth
+// the name — which is the normal case in a container, where HOME points at an
+// empty directory that no one ever puts anything in. Mounting the key here
+// means the image needs no flag to find it.
+const systemKeyFile = "/etc/docovia/openai.secret"
+
+// keyFiles is where the key is looked for, in order. An explicit path replaces
+// the list rather than extending it: someone who names a file is answering the
+// question, and quietly reading a different one after theirs turned out to be
+// empty would be the wrong kind of helpful.
+//
+// The home file wins over the system file for the same reason it does in every
+// other tool that reads both — a machine-wide key is the fallback for whoever
+// has not set their own, not an override of it.
+func keyFiles(flagValue string) []string {
+	if flagValue != "" {
+		return []string{flagValue}
 	}
-	return filepath.Join(home, ".openai.secret")
+	var paths []string
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".openai.secret"))
+	}
+	return append(paths, systemKeyFile)
 }
 
 // warnIfReachable says so when this process is listening somewhere other than
@@ -687,21 +713,33 @@ func (a *App) rememberPassword(pw string) error {
 // openAIKey finds the key, preferring the environment so a one-off run can
 // override the file. It returns where the key came from as well, because
 // "which key is this actually using" is otherwise guesswork.
-func openAIKey(path string) (key, source string) {
+func openAIKey(paths ...string) (key, source string) {
 	if v := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); v != "" {
 		return v, "OPENAI_API_KEY"
 	}
-	if path == "" {
-		return "", ""
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if key, ok := keyFromFile(path); ok {
+			return key, path
+		}
 	}
+	return "", ""
+}
+
+// keyFromFile reads one candidate. A file that is absent, empty, or nothing but
+// comments is not an answer, so it reports failure and lets the next one try.
+func keyFromFile(path string) (string, bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		// A missing file is the ordinary case for someone using the
-		// environment; anything else is worth saying.
+		// A missing file is the ordinary case when several places are tried;
+		// anything else — a key sitting there unreadable, most of all — is
+		// worth saying, because it looks identical from the outside.
 		if !os.IsNotExist(err) {
 			logf("reading %s: %v", path, err)
 		}
-		return "", ""
+		return "", false
 	}
 
 	// Usually a bare key on one line, but a dotenv-style assignment, an
@@ -716,12 +754,12 @@ func openAIKey(path string) (key, source string) {
 		if name, value, ok := strings.Cut(line, "="); ok && strings.TrimSpace(name) == "OPENAI_API_KEY" {
 			line = strings.TrimSpace(value)
 		}
-		if key = strings.Trim(line, `"'`); key != "" {
+		if key := strings.Trim(line, `"'`); key != "" {
 			warnKeyPerms(path)
-			return key, path
+			return key, true
 		}
 	}
-	return "", ""
+	return "", false
 }
 
 // warnKeyPerms says so once when the key file is readable by anyone else on

@@ -102,6 +102,52 @@ func TestOpenAIKeyMissingFile(t *testing.T) {
 	}
 }
 
+// The container mounts its key at the system path and passes no flag, so a
+// candidate that is absent — or present but useless — has to fall through to
+// the next one rather than end the search.
+func TestOpenAIKeyFallsThroughToTheNextPath(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	dir := t.TempDir()
+	system := filepath.Join(dir, "system")
+	if err := os.WriteFile(system, []byte("sk-system\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, []byte("# no key here\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		first string
+	}{
+		{"absent", filepath.Join(dir, "absent")},
+		{"empty", empty},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key, source := openAIKey(tc.first, system)
+			if key != "sk-system" || source != system {
+				t.Errorf("got (%q, %q), want (%q, %q)", key, source, "sk-system", system)
+			}
+		})
+	}
+}
+
+// A key in the home file is the one to use even when the machine also has a
+// system-wide one, and naming a file explicitly has to replace the search
+// rather than sit at the front of it.
+func TestKeyFilesOrder(t *testing.T) {
+	t.Setenv("HOME", "/home/somebody")
+	want := []string{"/home/somebody/.openai.secret", systemKeyFile}
+	if got := keyFiles(""); !slices.Equal(got, want) {
+		t.Errorf("keyFiles(\"\") = %v, want %v", got, want)
+	}
+	if got := keyFiles("/tmp/mine"); !slices.Equal(got, []string{"/tmp/mine"}) {
+		t.Errorf("keyFiles(%q) = %v, want just it", "/tmp/mine", got)
+	}
+}
+
 // A title is free text from a model or a person, and it becomes a filename on
 // someone's disk. These are the shapes that break that.
 func TestDownloadName(t *testing.T) {
