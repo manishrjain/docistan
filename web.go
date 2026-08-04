@@ -464,7 +464,10 @@ func readStage(doc *Doc) Stage {
 	// the sidecar until the new pass replaces it, so counting characters
 	// would report the step finished while it is still running.
 	if doc.Status == StatusProcessing {
-		s.State, s.Detail = "pending", "Working…"
+		// Running, not waiting: OCR is under way on this document right now.
+		// Both states pulse the same, so this only ever changed what the row
+		// means, which is the part that was wrong.
+		s.State, s.Detail = "working", "Working…"
 		return s
 	}
 	if chars == 0 {
@@ -534,6 +537,13 @@ func (a *App) taggingStage(doc *Doc) Stage {
 	case a.enricher == nil:
 		s.State = "skipped"
 		s.Detail = "no model configured — set OPENAI_API_KEY"
+	case a.enrichq != nil && a.enrichq.Active(doc.ID):
+		// The call is out. This is the one step on the page that takes seconds
+		// to tens of seconds, so it is also the one worth saying is running
+		// rather than waiting — and "working" is what the timeline's own
+		// vocabulary calls that, pulsing dot and all.
+		s.State = "working"
+		s.Detail = "Working…"
 	case a.enrichq != nil && a.enrichq.Has(doc.ID):
 		s.State = "pending"
 		s.Detail = "Queued"

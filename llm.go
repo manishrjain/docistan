@@ -504,6 +504,17 @@ func (q *EnrichQueue) Has(id int) bool {
 	return q.queued[id] || q.active == id
 }
 
+// Active is the narrower question: not "is something going to happen to this
+// document" but "is it happening now". Has answers both at once, which left a
+// document being sent to the model reading "Queued" — true when it was written
+// and wrong by the time anyone saw it, since the call it describes was already
+// in flight and is the slowest thing on the page.
+func (q *EnrichQueue) Active(id int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.active == id
+}
+
 func (q *EnrichQueue) Stats() (pending, done, failed int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()

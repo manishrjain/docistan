@@ -419,6 +419,49 @@ func TestIntakeStageSigned(t *testing.T) {
 	}
 }
 
+// "Queued" and "Working…" are different claims, and the model call is the one
+// step slow enough for the difference to be visible. The timeline already had a
+// working state, with its own pulse and its own place in the selector that
+// starts the page polling — nothing in Go ever set it.
+func TestTaggingStageDistinguishesQueuedFromRunning(t *testing.T) {
+	app := &App{cfg: Config{LLMModel: "gpt-5.6-luna"}, enricher: &OpenAIEnricher{}}
+	app.enrichq = NewEnrichQueue(app)
+	doc := &Doc{ID: 7, Status: StatusReady}
+
+	// Waiting its turn.
+	app.enrichq.Add(doc.ID)
+	if s := app.taggingStage(doc); s.State != "pending" || s.Detail != "Queued" {
+		t.Errorf("queued: got (%q, %q), want (pending, Queued)", s.State, s.Detail)
+	}
+
+	// next() claims it, which is what the worker does before the call goes out.
+	if id, ok := app.enrichq.next(); !ok || id != doc.ID {
+		t.Fatalf("next() = %d, %v", id, ok)
+	}
+	s := app.taggingStage(doc)
+	if s.State != "working" || s.Detail != "Working…" {
+		t.Errorf("in flight: got (%q, %q), want (working, Working…)", s.State, s.Detail)
+	}
+
+	// Still outstanding as far as the watching page is concerned, or it would
+	// stop polling with the call still out.
+	if !app.enrichq.Has(doc.ID) {
+		t.Error("Has() went false while the call was in flight")
+	}
+
+	app.enrichq.clearActive()
+	if app.enrichq.Active(doc.ID) {
+		t.Error("Active() still true after the call finished")
+	}
+}
+
+// The OCR stage was making the same claim: pending, while ocrmypdf was running.
+func TestReadStageWorkingWhileProcessing(t *testing.T) {
+	if s := readStage(&Doc{Status: StatusProcessing}); s.State != "working" {
+		t.Errorf("State = %q, want working", s.State)
+	}
+}
+
 // A title is free text from a model or a person, and it becomes a filename on
 // someone's disk. These are the shapes that break that.
 func TestDownloadName(t *testing.T) {
