@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -85,7 +86,7 @@ func main() {
 	flag.StringVar(&cfg.TypesenseURL, "typesense-url", "http://localhost:8108", "Typesense URL")
 	flag.StringVar(&cfg.TypesenseKey, "typesense-key", cmp.Or(os.Getenv("TYPESENSE_API_KEY"), "docovia-dev-key"), "Typesense API key")
 	flag.StringVar(&cfg.Collection, "collection", "documents", "Typesense collection name; give a second instance its own")
-	flag.IntVar(&cfg.Workers, "workers", 2, "ingest workers")
+	flag.IntVar(&cfg.Workers, "workers", defaultWorkers(), "ingest workers")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
 	// Empty rather than a default, because there is more than one default and
@@ -484,6 +485,20 @@ func defaultDataDir() string {
 		return "./data"
 	}
 	return filepath.Join(home, "docovia-data")
+}
+
+// defaultWorkers scales with the machine, because OCR is the slow stage and it
+// is CPU-bound: two workers left a 32-core desktop idle through a backfill that
+// takes hours. The floor of eight is for the other direction — on a small box
+// the pipeline still spends much of its time waiting on Ghostscript and
+// Tesseract subprocesses rather than on this program's own goroutines.
+//
+// Each worker's ocrmypdf runs with --jobs 2, so the real thread count is about
+// twice this. That is deliberate oversubscription: OCR is throughput work, not
+// latency work, and the kernel schedules it better than a conservative guess
+// here would.
+func defaultWorkers() int {
+	return max(8, runtime.NumCPU())
 }
 
 // systemKeyFile is where the key lives when there is no home directory worth
