@@ -543,7 +543,7 @@ func newHit(doc *Doc, h api.SearchResultHit) Hit {
 	}
 	hit.Summary = marked["summary"]
 	if hit.Summary == "" {
-		hit.Summary = template.HTML(template.HTMLEscapeString(clip(doc.Summary, 240)))
+		hit.Summary = template.HTML(template.HTMLEscapeString(clip(doc.Summary, summaryLimit)))
 	}
 	hit.Snippet = marked["content"]
 	return hit
@@ -558,6 +558,15 @@ func renderMarks(snippet string) template.HTML {
 	safe = strings.ReplaceAll(safe, template.HTMLEscapeString(hlEnd), "</mark>")
 	return template.HTML(safe)
 }
+
+// summaryLimit is a guard against a model that ignores its instructions, not a
+// house style. At 240 it was neither: the schema asks for one or two sentences
+// naming parties, amounts and reference numbers, and every summary in the
+// archive ran past it — 259, 351, 395, 431, 449 characters — so every row on
+// the index ended in an ellipsis, mid-word. The longest a well-behaved answer
+// has produced is 449, and this is set well clear of that so it only ever fires
+// on something genuinely runaway.
+const summaryLimit = 800
 
 func clip(s string, n int) string {
 	r := []rune(s)

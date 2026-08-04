@@ -907,11 +907,14 @@ button.pill-plain {
 /* A failed row carries the reason where a summary or a snippet would have
    gone — it has neither — so it reads in the same voice, in the accent the
    FAILED badge above it already uses. */
+/* No measure of its own. 72ch was one, from when a row was the full width of
+   the page and a line of text would otherwise have run the whole way across
+   it; in a two-column grid the column is already the measure, and the cap only
+   held the text to little more than half the card it sits in. */
 .row .snippet,
 .row .summary,
 .row .fail-reason {
   margin: 0 0 var(--space-3);
-  max-width: 72ch;
   color: var(--color-neutral-800);
   text-wrap: pretty;
 }
