@@ -246,7 +246,7 @@ func metaSchema(maxTags int) map[string]any {
 			},
 			"summary": map[string]any{
 				"type":        "string",
-				"description": "One or two plain sentences saying what this document is and what it actually says — the parties, amounts, dates, reference numbers, and the decision or obligation it records. The summary is searched, so specifics beat categories: 'renews the Foster St lease for twelve months at $2,400' can be found again, 'a lease renewal document' cannot. No preamble like 'This document is'.",
+				"description": "One or two plain sentences saying what this document records: the parties, amounts, dates, reference numbers, and the decision or obligation it captures. The title is shown directly above this, so do not restate it — begin with what the title does not already say. This text is searched, and a match is shown as a short excerpt of it, so keep specifics spread throughout rather than opening with a general description: 'renews the Foster St lease for twelve months at $2,400' can be found again, 'a lease renewal document' cannot. A blank or unsigned form is summarised as blank and by what it is for, never by listing the empty fields it contains as though they were its contents. Where the text is unclear or says something impossible, report what it appears to say and call it unclear rather than settling it silently. No preamble like 'This document is'.",
 			},
 			"tags": map[string]any{
 				"type":        "array",
