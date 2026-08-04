@@ -282,6 +282,78 @@ func TestExtensionTaxonomy(t *testing.T) {
 const pageStamps = "Page 1 of 8\n\nPage 2 of 8\n\nPage 3 of 8\n\nPage 4 of 8\n\n" +
 	"Page 5 of 8\n\nPage 6 of 8\n\nPage 7 of 8\n\nPage 8 of 8\n\n"
 
+// An authenticating proxy answers who is asking and never whether they meant
+// to ask, so the archive still has to refuse a request some other site made on
+// a signed-in reader's behalf.
+func TestCrossSiteWritesAreRefused(t *testing.T) {
+	const public = "https://docs.example.com"
+	cases := []struct {
+		name    string
+		method  string
+		headers map[string]string
+		allow   bool
+	}{
+		{"a form on our own page", "POST", map[string]string{"Sec-Fetch-Site": "same-origin"}, true},
+		{"typed in, or a bookmark", "POST", map[string]string{"Sec-Fetch-Site": "none"}, true},
+		{"a form on someone else's page", "POST", map[string]string{"Sec-Fetch-Site": "cross-site"}, false},
+		// One host. A neighbouring subdomain is somebody else as far as this is
+		// concerned, and saying so costs nothing here.
+		{"a neighbouring subdomain", "POST", map[string]string{"Sec-Fetch-Site": "same-site"}, false},
+		// Reading is not refused: the proxy has already decided who may read,
+		// and a cross-site GET carries no authority a page did not already have.
+		{"reading, from anywhere", "GET", map[string]string{"Sec-Fetch-Site": "cross-site"}, true},
+		// Older browsers, falling back to Origin.
+		{"old browser, our origin", "POST", map[string]string{"Origin": public}, true},
+		{"old browser, elsewhere", "POST", map[string]string{"Origin": "https://evil.example"}, false},
+		{"old browser, trailing slash", "POST", map[string]string{"Origin": public + "/"}, true},
+		// curl, a script, a health check. Allowed deliberately: the attack is a
+		// request forged inside somebody's browser, and no browser can be made
+		// to send neither header.
+		{"not a browser at all", "POST", nil, true},
+	}
+	for _, c := range cases {
+		reached := false
+		h := guard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }), public)
+		req := httptest.NewRequest(c.method, "/doc/5/delete", nil)
+		for k, v := range c.headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if reached != c.allow {
+			t.Errorf("%s: handler reached = %v, want %v", c.name, reached, c.allow)
+		}
+		if !c.allow && rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status %d, want %d", c.name, rec.Code, http.StatusForbidden)
+		}
+	}
+}
+
+// With no -public-origin there is nothing to compare an Origin against, and
+// guessing from the Host header would reject every real request the moment a
+// proxy is in front. Sec-Fetch-Site still does the work.
+func TestWithoutAPublicOriginTheHeaderStillDecides(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		hdr   map[string]string
+		allow bool
+	}{
+		{"still refused on the modern header", map[string]string{"Sec-Fetch-Site": "cross-site"}, false},
+		{"an origin alone cannot be judged", map[string]string{"Origin": "https://evil.example"}, true},
+	} {
+		reached := false
+		h := guard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }), "")
+		req := httptest.NewRequest("POST", "/upload", nil)
+		for k, v := range c.hdr {
+			req.Header.Set(k, v)
+		}
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		if reached != c.allow {
+			t.Errorf("%s: handler reached = %v, want %v", c.name, reached, c.allow)
+		}
+	}
+}
+
 // A title the model is asked to preserve has to be one somebody meant. The
 // pipeline titles an untitled document after its own filename so nothing shows
 // up blank, and defending that would preserve the very thing the model is being

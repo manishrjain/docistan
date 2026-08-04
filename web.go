@@ -276,6 +276,63 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 }
 
+// sameOrigin reports whether a state-changing request came from this site.
+//
+// An authenticating proxy answers who is making a request and never whether
+// they meant to make it. Once a browser holds a session for this archive, any
+// page anywhere can post to /doc/5/delete and the browser will attach that
+// session — the proxy sees a signed-in reader and waves it through. That was
+// not a risk while nothing here had any authority to forge; it arrives with the
+// login, not before it, which is why it belongs in the same change.
+//
+// Sec-Fetch-Site is the answer where it exists, and it needs no configuration:
+// the browser states the relationship itself and a page cannot lie about it.
+// same-site is refused along with cross-site — this archive is one host, so a
+// neighbouring subdomain has no business posting to it.
+//
+// Origin is the fallback for browsers too old to send it, and is only usable
+// with -public-origin: behind a proxy the request arrives with Host
+// 127.0.0.1:8080 while Origin names the real site, so comparing the two would
+// reject every genuine request.
+//
+// Neither header means this is not a browser — curl, a script, a health check.
+// That is allowed on purpose, and it is not the hole it looks like: forging a
+// request in someone else's browser is the whole attack, and no browser can be
+// made to leave both headers off.
+func sameOrigin(r *http.Request, public string) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "cross-site", "same-site":
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" || public == "" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSuffix(origin, "/"), strings.TrimSuffix(public, "/"))
+}
+
+// guard wraps the whole mux rather than the handlers that change things. The
+// list of those is twelve long today and every future one would have to
+// remember to join it; wrapping the router means a new route is covered by
+// existing code rather than by whoever writes it.
+func guard(next http.Handler, public string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			if !sameOrigin(r, public) {
+				// No detail: the page that sent this is not one of ours, and
+				// what it learns from the reply should be nothing.
+				http.Error(w, "cross-site request refused", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Stage is one step of processing as shown on a document page. The point is
 // to make it obvious what ran, what did not, and crucially which steps were
 // local and which involved the model.

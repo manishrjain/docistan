@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,6 +38,10 @@ type Config struct {
 	// or an environment variable would put them in the process listing for
 	// everyone on the machine to read.
 	PasswordFile string
+	// PublicOrigin is where this archive answers from as a browser sees it,
+	// which is not what the process itself can observe once a proxy is in
+	// front. Empty leaves the cross-site check resting on Sec-Fetch-Site alone.
+	PublicOrigin string
 	Dev          bool
 }
 
@@ -90,6 +95,11 @@ func main() {
 	// value here for flag to print.
 	flag.StringVar(&cfg.PasswordFile, "pdf-passwords", "",
 		"file holding passwords for encrypted PDFs, one per line (default <data>/passwords)")
+	// Only needed for browsers too old to send Sec-Fetch-Site, and only usable
+	// when set: behind a proxy the Host header names 127.0.0.1 while Origin
+	// names the site, so there is nothing here to compare against by default.
+	flag.StringVar(&cfg.PublicOrigin, "public-origin", "",
+		"the site's own origin, e.g. https://docs.example.com, for the cross-site check")
 	flag.BoolVar(&cfg.Dev, "dev", false, "reload templates from disk on each request")
 	flag.Parse()
 
@@ -181,7 +191,7 @@ func run(cfg Config) error {
 
 	mux := http.NewServeMux()
 	app.routes(mux)
-	srv := &http.Server{Addr: cfg.Listen, Handler: mux}
+	srv := &http.Server{Addr: cfg.Listen, Handler: guard(mux, cfg.PublicOrigin)}
 
 	go func() {
 		<-ctx.Done()
@@ -193,6 +203,7 @@ func run(cfg Config) error {
 		}
 	}()
 
+	warnIfReachable(cfg.Listen)
 	logf("listening on http://%s", cfg.Listen)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -472,6 +483,40 @@ func defaultKeyFile() string {
 		return ""
 	}
 	return filepath.Join(home, ".openai.secret")
+}
+
+// warnIfReachable says so when this process is listening somewhere other than
+// the loopback address.
+//
+// There is no authentication in this program. Deployed as intended it sits
+// behind a proxy that authenticates every request and forwards to 127.0.0.1,
+// and the entire security of that arrangement is the fact that nothing else can
+// reach this port — a listener on 0.0.0.0 does not weaken the proxy, it goes
+// around it, and everything in the archive is then served to anyone who asks.
+//
+// A warning rather than a refusal: binding a LAN address is a legitimate thing
+// to do on a trusted network, and this program should not decide that question
+// for the person running it. But it should never be the quiet default nobody
+// noticed.
+func warnIfReachable(listen string) {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return
+	}
+	// An empty host is the shorthand for every interface, which is the case
+	// worth the loudest warning and the easiest to type by accident.
+	if host != "" {
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return
+		}
+		if strings.EqualFold(host, "localhost") {
+			return
+		}
+	}
+	logf("WARNING: listening on %s, which is reachable from outside this machine.", listen)
+	logf("WARNING: this program has no authentication of its own. Anything that can reach")
+	logf("WARNING: this port can read, download, edit and delete every document. Bind")
+	logf("WARNING: 127.0.0.1 and put an authenticating proxy in front of it.")
 }
 
 // resolvePasswordFile settles where the passwords are read from. The flag wins
