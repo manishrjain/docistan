@@ -782,7 +782,13 @@ button.pill-plain {
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(620px, 1fr));
+  /* Two columns at most, and no breakpoint to say so. A track is never
+     narrower than half the row, so a third can never fit however wide the
+     window gets — on a 2560px desktop auto-fit alone was laying out four, and
+     a row of four is a spreadsheet, not a list of documents. The 620px floor
+     still decides when the second column is affordable, so the count follows
+     the container rather than the viewport. */
+  grid-template-columns: repeat(auto-fit, minmax(max(620px, 50%), 1fr));
 }
 
 .row {
