@@ -355,10 +355,17 @@
                thing a search could have matched is its filename. The reason is
                the useful thing to put in that space. It is clipped — the whole
                message is on the document page. */}}
+          {{/* Where the words landed, when there were words: the summary's
+               excerpt and the body's, both if the query hit both, since a term
+               can be in what the document is about and also somewhere
+               particular inside it. Only a row nothing matched in — no query,
+               or a hit that landed in the title or the tags — shows the whole
+               summary instead. */}}
           {{if $d.FailReason}}
             <p class="fail-reason">{{$d.FailReason}}</p>
-          {{else if .Snippet}}
-            <p class="snippet">{{.Snippet}}</p>
+          {{else if or .SummaryHit .Snippet}}
+            {{with .SummaryHit}}<p class="summary">{{.}}</p>{{end}}
+            {{with .Snippet}}<p class="snippet">{{.}}</p>{{end}}
           {{else if .Summary}}
             <p class="summary">{{.Summary}}</p>
           {{end}}

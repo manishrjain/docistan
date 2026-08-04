@@ -354,14 +354,22 @@ type Result struct {
 	Facets map[string][]FacetValue
 }
 
-// Hit carries per-field highlights. A match can land in the title, the
-// summary or the body, and the card should show where it actually landed
-// rather than always excerpting the body.
+// Hit carries per-field highlights. A match can land in the title, the summary
+// or the body, and often in more than one at once — so the excerpts are
+// separate fields rather than one field the row picks between. Showing only the
+// body's meant a word that appeared in both was reported from the raw OCR,
+// where the summary had said the same thing in a sentence; showing only the
+// summary's would lose where in the document the word actually is.
 type Hit struct {
-	Doc     *Doc
-	Title   template.HTML // the title, marked up if the match was there
-	Summary template.HTML // summary, marked up if matched, plain otherwise
-	Snippet template.HTML // body excerpt, only when the body matched
+	Doc   *Doc
+	Title template.HTML // the title, marked up if the match was there
+	// Summary is the whole summary, for a row nothing matched in — a list with
+	// no query, or a hit that landed only in the title or the tags.
+	Summary template.HTML
+	// SummaryHit and Snippet are excerpts, empty unless that field matched.
+	// Both can be set at once, and the row shows both.
+	SummaryHit template.HTML
+	Snippet    template.HTML
 }
 
 type FacetValue struct {
@@ -512,6 +520,11 @@ func (s *Search) query(ctx context.Context, q Query, perPage int, idsOnly bool) 
 		params.FacetBy = pointer.String("tags,status")
 		params.MaxFacetValues = pointer.Int(200)
 		params.HighlightFields = pointer.String("title,summary,content")
+		// The title comes back whole; a title is short enough that an excerpt
+		// of one is just a damaged title. The summary and the body stay
+		// excerpts, because during a search what a row is for is showing where
+		// the words landed.
+		params.HighlightFullFields = pointer.String("title")
 		params.HighlightStartTag = pointer.String(hlStart)
 		params.HighlightEndTag = pointer.String(hlEnd)
 		params.HighlightAffixNumTokens = pointer.Int(8)
@@ -541,11 +554,12 @@ func newHit(doc *Doc, h api.SearchResultHit) Hit {
 	if hit.Title == "" {
 		hit.Title = template.HTML(template.HTMLEscapeString(doc.Title))
 	}
-	hit.Summary = marked["summary"]
-	if hit.Summary == "" {
-		hit.Summary = template.HTML(template.HTMLEscapeString(clip(doc.Summary, summaryLimit)))
-	}
+	// The excerpts and the whole summary are both carried, because which one
+	// the row wants depends on whether anything matched at all — and that is a
+	// question about the row, not about the search.
+	hit.SummaryHit = marked["summary"]
 	hit.Snippet = marked["content"]
+	hit.Summary = template.HTML(template.HTMLEscapeString(clip(doc.Summary, summaryLimit)))
 	return hit
 }
 
