@@ -298,7 +298,7 @@ func TestEnrichPromptCurrentState(t *testing.T) {
 		CurrentTags:  []string{"visa", "sunandita"},
 		CurrentTitle: "Citizenship Application",
 	})
-	for _, want := range []string{"tax, medical", "visa, sunandita", `currently titled "Citizenship Application"`, "breaks a rule above"} {
+	for _, want := range []string{"tax, medical", "visa, sunandita", `currently titled "Citizenship Application"`, "Start from those"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
 		}

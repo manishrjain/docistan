@@ -251,7 +251,7 @@ func metaSchema(maxTags int) map[string]any {
 			"tags": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": fmt.Sprintf("1-%d short lowercase tags: as many as genuinely apply and no more, so a one-page receipt comes back with two or three rather than filling the allowance. Cover what the document is, what it is about, and the other party to it where there is one — never a place that is only part of an address. A document printed on a numbered form also carries that form's own designation, lowercased and closed up with no hyphens or spaces however the form prints it — w2, 1099int, form16 — whoever issues it, tax authority or not.", maxTags),
+				"description": fmt.Sprintf("1-%d short lowercase tags: as many as genuinely apply and no more, so a one-page receipt comes back with two or three rather than filling the allowance. Cover what the document is, what it is about, and the other party to it where there is one — never a place that is only part of an address. A document printed on a numbered form always carries that form's own designation as a tag, lowercased and closed up with no hyphens or spaces however the form prints it: a W-2 is w2, a W-2c is w2c, a 1099-INT is 1099int, a Form 16 is form16 — whoever issues the form, tax authority or not.", maxTags),
 			},
 			"created_date": map[string]any{
 				"type":        "string",
@@ -294,34 +294,34 @@ func enrichPrompt(in EnrichInput) string {
 		sb.WriteString(".\n")
 	}
 	// Your answer replaces the tag list wholesale, so anything left out is
-	// removed. Say so plainly, and give the asymmetry: a tag someone chose is
-	// worth more than the tidiness of dropping it. "Breaks a rule above" is the
-	// named escape hatch — without it, the model reads this paragraph as
-	// protecting the very tags the rules exist to remove.
+	// removed. The first version of this said "keep unless clearly wrong",
+	// which overshot: it defended mediocre tags as firmly as chosen ones. The
+	// line being walked is between churn and improvement, and the test that
+	// separates them is whether the change files the document better or only
+	// says the same thing differently.
 	if len(in.CurrentTags) > 0 {
 		sb.WriteString("This document is already tagged: ")
 		sb.WriteString(strings.Join(in.CurrentTags, ", "))
-		sb.WriteString(".\nReturn those tags again unless one is clearly wrong for this document or breaks ")
-		sb.WriteString("a rule above, and add any that are missing. Your list replaces the current one, so ")
-		sb.WriteString("a tag you leave out is deleted; dropping a tag someone chose is worse than keeping ")
-		sb.WriteString("one that is merely imprecise.\n")
+		sb.WriteString(".\nStart from those. Keep what fits, drop what is wrong or too vague to ever ")
+		sb.WriteString("search by, add what is missing — the rules above apply to old tags as much as ")
+		sb.WriteString("new ones. What you must not do is trade a tag for its synonym: a change has to ")
+		sb.WriteString("file the document better, not just differently.\n")
 	}
-	// Same danger as the tags, and it went unsaid for longer: the title comes
-	// back replaced whether or not there was anything wrong with it. Re-running
-	// the model on unchanged text produced "Ticket Receipt" one time and
-	// "Admission Tickets" the next — both fine, and the second one silently
-	// overwrote a title its owner may have chosen deliberately.
+	// Same danger as the tags: the title comes back replaced whether or not
+	// anything was wrong with it, and re-running the model on unchanged text
+	// once produced "Ticket Receipt" then "Admission Tickets" — churn with no
+	// information in it. The instruction names the test — improve, don't
+	// reword — and states the property it is after: run twice, same answer.
 	//
 	// Only when it is a real title. A document nobody has titled carries its own
 	// filename, and offering that back as something to preserve would defend the
 	// very thing this step exists to improve on.
 	if in.CurrentTitle != "" {
 		fmt.Fprintf(&sb, "This document is currently titled %q.\n", in.CurrentTitle)
-		sb.WriteString("Your answer replaces that title, so return it unchanged unless it is wrong ")
-		sb.WriteString("or genuinely uninformative — someone may have written it, and a title that ")
-		sb.WriteString("keeps changing is worse than one that is merely not how you would have put it. ")
-		sb.WriteString("Rewrite it when it names the wrong document, and leave it alone for the sake ")
-		sb.WriteString("of phrasing.\n")
+		sb.WriteString("Keep that title if it names the document well. Improve it if it is vague, ")
+		sb.WriteString("wrong, or missing what sets the document apart — its period, its issuer. ")
+		sb.WriteString("Do not reword a title that is already doing its job: asked twice, you ")
+		sb.WriteString("should give the same answer.\n")
 	}
 	fmt.Fprintf(&sb, "The original filename is %q; use it only if the text is uninformative.\n", in.Filename)
 	return sb.String()
