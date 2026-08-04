@@ -239,7 +239,17 @@ func DecryptPDF(ctx context.Context, src, dst string, passwords []string) (int, 
 	// pipeline would refuse into an ordinary readable one for the cost of a
 	// single qpdf run — before any real password is put at risk of being wrong.
 	for i, pw := range append([]string{""}, passwords...) {
-		_, err := runCmd(ctx, cmdTimeout, "qpdf", "--password="+pw, "--decrypt", src, dst)
+		// --warning-exit-0, because qpdf exits 3 for "warnings detected" and
+		// that is a success: the decrypted file is written and complete. A
+		// scanner that miswrites a stream length earns those warnings, qpdf
+		// recovers from them and says so, and without this the recovery was
+		// read as a failure — leaving a document that could not be unlocked by
+		// anyone, with the right password, for as long as it existed.
+		//
+		// Only here. `qpdf --requires-password` further up answers with its
+		// exit code rather than its output, and 3 is one of its answers.
+		_, err := runCmd(ctx, cmdTimeout, "qpdf", "--warning-exit-0",
+			"--password="+pw, "--decrypt", src, dst)
 		if err == nil {
 			return i, nil
 		}
@@ -502,7 +512,11 @@ func OCR(ctx context.Context, src, dst string, mode ocrMode, baseline string) (s
 		"-o", tmp, src); gsErr == nil {
 		return OCRNone, os.Rename(tmp, dst)
 	}
-	if _, qErr := runCmd(ctx, cmdTimeout, "qpdf", "--linearize", src, tmp); qErr == nil {
+	// --warning-exit-0 for the same reason as the decrypt: exit 3 means qpdf
+	// wrote the file and had something to say about the input. Treating that as
+	// a failure dropped a recoverable PDF to the byte copy on the next line,
+	// which is the one outcome in this chain that produces no PDF/A at all.
+	if _, qErr := runCmd(ctx, cmdTimeout, "qpdf", "--warning-exit-0", "--linearize", src, tmp); qErr == nil {
 		return OCRNone, os.Rename(tmp, dst)
 	}
 	return OCRNone, copyFile(src, dst)

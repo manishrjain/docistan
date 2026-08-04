@@ -15,8 +15,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -2793,6 +2795,60 @@ func testPDF(t *testing.T, dir, name, text string) string {
 // dependency — the code under test shells out to it for both the detection and
 // the decryption — so a machine that cannot build these fixtures cannot run the
 // program either, and skipping would report that as a pass.
+// A scanner that writes a wrong stream length produces a PDF qpdf can read,
+// complains about, and repairs — and then exits 3 to say it had complaints.
+// That is a success, but the pipeline read every non-zero exit as a failure, so
+// a document like this could not be unlocked by anyone, ever, with the correct
+// password in hand. The fixture is the shape that turned up in the archive:
+// "expected endstream", then "recovered stream length".
+func TestDecryptSurvivesQPDFWarnings(t *testing.T) {
+	dir := t.TempDir()
+	enc := encryptPDF(t, testPDF(t, dir, "src.pdf", "Locked and slightly broken"),
+		filepath.Join(dir, "enc.pdf"), "s3cret", "s3cret")
+
+	// Shrink the first stream's declared length, keeping the digit count so no
+	// byte offset moves — which is exactly how a truncated write presents.
+	raw, err := os.ReadFile(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`/Length (\d+)`).FindSubmatchIndex(raw)
+	if m == nil {
+		t.Skip("no /Length in the fixture; qpdf built it differently")
+	}
+	n, _ := strconv.Atoi(string(raw[m[2]:m[3]]))
+	if n <= 40 {
+		t.Skip("first stream too small to corrupt meaningfully")
+	}
+	bad := []byte(fmt.Sprintf("%0*d", m[3]-m[2], n-40))
+	broken := filepath.Join(dir, "broken.pdf")
+	if err := os.WriteFile(broken, append(append(append([]byte{}, raw[:m[2]]...), bad...), raw[m[3]:]...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The premise: without the flag this file really does exit non-zero.
+	if _, err := runCmd(t.Context(), cmdTimeout, "qpdf", "--password=s3cret",
+		"--decrypt", broken, filepath.Join(dir, "probe.pdf")); err == nil {
+		t.Skip("this qpdf does not warn on the corrupted fixture, so there is nothing to survive")
+	} else if code := exitCode(err); code != 3 {
+		t.Skipf("qpdf exited %d, not 3; the fixture is not producing warnings", code)
+	}
+
+	dst := filepath.Join(dir, "out.pdf")
+	at, err := DecryptPDF(t.Context(), broken, dst, []string{"s3cret"})
+	if err != nil {
+		t.Fatalf("DecryptPDF rejected a file qpdf decrypted successfully: %v", err)
+	}
+	if at != 1 {
+		t.Errorf("opened with candidate %d, want 1", at)
+	}
+	// It has to be a real PDF, not merely an exit code we chose to ignore.
+	text, err := ExtractText(t.Context(), dst)
+	if err != nil || !strings.Contains(text, "Locked and slightly broken") {
+		t.Errorf("decrypted output does not read back: %v / %q", err, text)
+	}
+}
+
 func encryptPDF(t *testing.T, src, dst, userPW, ownerPW string) string {
 	t.Helper()
 	_, err := runCmd(context.Background(), 30*time.Second, "qpdf", "--encrypt",
