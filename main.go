@@ -489,16 +489,23 @@ func defaultDataDir() string {
 
 // defaultWorkers scales with the machine, because OCR is the slow stage and it
 // is CPU-bound: two workers left a 32-core desktop idle through a backfill that
-// takes hours. The floor of eight is for the other direction — on a small box
-// the pipeline still spends much of its time waiting on Ghostscript and
-// Tesseract subprocesses rather than on this program's own goroutines.
+// takes hours.
 //
-// Each worker's ocrmypdf runs with --jobs 2, so the real thread count is about
-// twice this. That is deliberate oversubscription: OCR is throughput work, not
-// latency work, and the kernel schedules it better than a conservative guess
-// here would.
+// Half the cores rather than all of them, because a worker is not one thread.
+// Each runs ocrmypdf with --jobs 2, and ocrmypdf holds that as a budget rather
+// than a floor — it divides the jobs across concurrent pages and hands what is
+// left to Tesseract as OMP_THREAD_LIMIT, clamped so that pages times threads
+// stays inside it. So two is what a worker costs whether the document has one
+// page or eighty, and half the cores is what makes the total come out at the
+// core count instead of twice it.
+//
+// The floor of eight is for small machines, where the pipeline waits on
+// Ghostscript and Tesseract subprocesses more than it runs anything of its own.
+// It is a floor on parallelism, not on memory: eight concurrent ocrmypdf runs
+// want a few GB between them, so a small box that is also short of RAM is the
+// one case for setting -workers by hand.
 func defaultWorkers() int {
-	return max(8, runtime.NumCPU())
+	return max(8, runtime.NumCPU()/2)
 }
 
 // systemKeyFile is where the key lives when there is no home directory worth
