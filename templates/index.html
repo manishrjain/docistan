@@ -208,7 +208,27 @@
       {{/* Always in the layout so selecting something does not shove the
            results down; picker.js makes it invisible rather than absent. */}}
       <div class="picker-actions">
-        <span class="picked-count"></span>
+        <span class="picked-count" data-total="{{.Result.Found}}"></span>
+        {{/* Filing a stack of documents under one name, without opening any of
+             them. <details> is the popover — no script decides whether it is
+             open — and the two fields are named for their direction because
+             both are inside this one form and both post on every submit; a
+             second field called "tag" would be read instead of the one that
+             was typed into. */}}
+        <details class="bulk-tag">
+          <summary class="btn btn-secondary btn-sm">Add tag</summary>
+          <div class="bulk-pop">
+            <input type="text" name="tag-add" list="tag-vocab" placeholder="Search tags…" autocomplete="off">
+            <button type="submit" formaction="/docs/tags/add" class="btn btn-primary btn-sm">Add</button>
+          </div>
+        </details>
+        <details class="bulk-tag">
+          <summary class="btn btn-secondary btn-sm">Remove tag</summary>
+          <div class="bulk-pop">
+            <input type="text" name="tag-remove" list="tag-vocab" placeholder="Search tags…" autocomplete="off">
+            <button type="submit" formaction="/docs/tags/remove" class="btn btn-primary btn-sm">Remove</button>
+          </div>
+        </details>
         <button type="submit" class="btn btn-primary btn-sm">Download</button>
         {{/* The same form and the same checkboxes as Download; only the action
              differs, which formaction says without a second form or any
@@ -223,10 +243,6 @@
         {{else}}
           <button type="submit" formaction="/docs/action" name="action" value="trash"
                   class="btn btn-primary btn-sm">Move to trash</button>
-        {{end}}
-        {{if gt .Result.Pages 1}}
-          <button type="submit" name="scope" value="filtered" class="pill-plain"
-                  title="Every document matching these filters, not just this page">All {{commaNum .Result.Found}}</button>
         {{end}}
         <button type="button" class="pill-plain picker-clear">Clear</button>
       </div>
@@ -248,6 +264,26 @@
       {{end}}
     </div>
   </div>
+
+  {{/* "All of them" is a bigger act than "all of these", so it is offered as a
+       step past the select-all rather than as a button beside it — and only
+       when there is more than one page, since otherwise the two mean the same
+       thing. The checkbox is the whole mechanism: it is hidden, but a hidden
+       checkbox still posts its value, so scope=filtered rides along with
+       whichever action button is pressed and every bulk route reads it the
+       same way. Which of the two sentences shows is decided by CSS from the
+       checkbox itself, so it is right before any script has run. */}}
+  {{if gt .Result.Pages 1}}
+    <div class="scope-bar">
+      <label class="scope-label">
+        <input type="checkbox" class="pick-scope" name="scope" value="filtered">
+        <span class="scope-page">All <strong>{{len .Result.Hits}}</strong> on this page selected.
+          <em>Select all {{commaNum .Result.Found}} matching</em></span>
+        <span class="scope-all">All <strong>{{commaNum .Result.Found}}</strong> matching docs selected.
+          <em>Select only this page</em></span>
+      </label>
+    </div>
+  {{end}}
 
   {{if not .Result.Hits}}
     <div class="empty">
@@ -330,6 +366,15 @@
       </li>
     {{end}}
   </ul>
+
+  {{/* The vocabulary behind both tag boxes, once for the pair. A <datalist>
+       is type-to-filter search on its own — the browser narrows the list as
+       the reader types and still lets a new name through — so the search box
+       the design draws needs no script at all, and it stays a plain text field
+       that posts what is in it with scripting off. It rides in this block
+       because these are the tags of the current results, which is what a swap
+       replaces. */}}
+  <datalist id="tag-vocab">{{range .TagFacets}}<option value="{{.Value}}">{{end}}</datalist>
 
   {{if gt .Result.Pages 1}}
     <nav class="pager">

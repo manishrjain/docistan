@@ -256,6 +256,10 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /doc/{id}/trash", a.handleDocTrash)
 	mux.HandleFunc("POST /doc/{id}/restore", a.handleDocRestore)
 	mux.HandleFunc("POST /docs/action", a.handleDocsAction)
+	// One route for both directions: the two popovers post the same selection
+	// and differ only in which way the tag moves, so the verb is a path segment
+	// rather than two handlers that would have to be kept saying the same thing.
+	mux.HandleFunc("POST /docs/tags/{op}", a.handleDocsTags)
 	mux.HandleFunc("POST /doc/{id}/retry", a.handleDocRetry)
 	mux.HandleFunc("POST /doc/{id}/unlock", a.handleDocUnlock)
 	mux.HandleFunc("POST /doc/{id}/enrich", a.handleDocEnrich)
@@ -1424,15 +1428,22 @@ func (a *App) recordTrash(doc *Doc, trash bool) {
 
 // The bulk actions the index offers, as the form posts them.
 const (
-	actionTrash   = "trash"
-	actionRestore = "restore"
-	actionPurge   = "purge"
+	actionTrash     = "trash"
+	actionRestore   = "restore"
+	actionPurge     = "purge"
+	actionAddTag    = "addtag"
+	actionRemoveTag = "removetag"
 )
 
-// handleDocsAction applies one action to a posted selection. It shares the
-// index's existing form with Download — the buttons carry formaction and their
-// own action name — so a selection can be trashed, restored or destroyed
-// without JavaScript and without a second set of checkboxes.
+// handleDocsAction applies one action to a selection. It shares the index's
+// existing form with Download — the buttons carry formaction and their own
+// action name — so a selection can be trashed, restored or destroyed without
+// JavaScript and without a second set of checkboxes.
+//
+// The selection comes from selectionIDs rather than from the posted boxes
+// alone, so "select all N matching" means the same thing here as it does for
+// Download: it used to be a button that only the download route read, and
+// trashing after clicking it silently moved one page.
 func (a *App) handleDocsAction(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
@@ -1446,8 +1457,14 @@ func (a *App) handleDocsAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ids, err := a.selectionIDs(r.Context(), r.PostForm)
+	if err != nil {
+		http.Error(w, "search unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
 	var done int
-	for _, id := range postedIDs(r.PostForm) {
+	for _, id := range ids {
 		var err error
 		if action == actionPurge {
 			err = a.purge(r.Context(), id, "purged", purgeByHand)
@@ -1493,6 +1510,111 @@ func (a *App) setTrashedByID(ctx context.Context, id int, trash bool) error {
 	return nil
 }
 
+// handleDocsTags puts one tag on a selection or takes it off again, which is
+// the only way to file a stack of documents without opening each one.
+//
+// The two popovers live inside the index's one form — that is what lets them
+// post the same checkboxes as Download and the trash buttons — so both fields
+// are submitted on every request, whichever button was pressed. Two inputs both
+// named "tag" would therefore make PostFormValue return whichever came first in
+// the DOM rather than the one the reader typed into, and "Remove tag" would
+// remove whatever was left sitting in the Add box. The op is in the field name
+// for that reason: the request names the box it means.
+func (a *App) handleDocsTags(w http.ResponseWriter, r *http.Request) {
+	op := r.PathValue("op")
+	switch op {
+	case "add", "remove":
+	default:
+		http.Error(w, "unknown action", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Normalised exactly as the document page's tag box normalises what it is
+	// given, so "  Tax " and "tax" are one tag rather than two. One tag per
+	// request: splitTags would happily return a list, but the box is a single
+	// field and a comma in it is far more likely to be a typo than a request to
+	// file this stack under two names at once.
+	tags := splitTags(r.PostFormValue("tag-" + op))
+	if len(tags) == 0 {
+		http.Error(w, "no tag given", http.StatusBadRequest)
+		return
+	}
+	tag := tags[0]
+	// The same refusal the document page makes, for the same reason: these
+	// names are derived from a document's state, not stored on it, so one
+	// written onto a sidecar would either be ignored or, worse, be believed.
+	if isReserved(tag) {
+		http.Error(w, "that tag is reserved", http.StatusBadRequest)
+		return
+	}
+
+	ids, err := a.selectionIDs(r.Context(), r.PostForm)
+	if err != nil {
+		http.Error(w, "search unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if len(ids) == 0 {
+		http.Error(w, "nothing selected", http.StatusBadRequest)
+		return
+	}
+
+	action := actionAddTag
+	if op == "remove" {
+		action = actionRemoveTag
+	}
+
+	var done int
+	for _, id := range ids {
+		doc, err := a.store.Load(id)
+		if err != nil {
+			// One document that could not be read does not cancel the rest of
+			// the selection; the count reports what actually happened.
+			logf("%s %s: %v", action, docCode(id), err)
+			continue
+		}
+		// setTrashedByID's reasoning, for the same situation: a selection made
+		// before a purge — or before the sweeper ran — still posts the ids it
+		// saw, and a tombstone is not a document to file.
+		if doc.Gone() {
+			logf("%s %s: %v", action, docCode(id), errGone)
+			continue
+		}
+
+		before := *doc
+		if op == "add" {
+			if slices.Contains(doc.Tags, tag) {
+				continue
+			}
+			// A fresh slice rather than an append onto the loaded one, so
+			// before's copy of the list keeps saying what it said.
+			doc.Tags = append(slices.Clone(doc.Tags), tag)
+		} else {
+			if !slices.Contains(doc.Tags, tag) {
+				continue
+			}
+			doc.Tags = withoutTags(doc.Tags, tag)
+		}
+
+		if err := a.persist(r.Context(), doc); err != nil {
+			logf("%s %s: %v", action, docCode(id), err)
+			continue
+		}
+		// Journalled as the edit it is, through the same line the document
+		// page's save writes: "tags: +tax" reads the same whether one person
+		// typed it into one document or into forty at once.
+		a.record("edited", doc.ID, "", editDetail(&before, doc))
+		done++
+	}
+	// Back to the listing the selection was made in, filters and view intact.
+	// Page one, because a tag that is also a filter has just moved documents in
+	// or out of these results.
+	http.Redirect(w, r, indexURL(parseQuery(r.PostForm), action, done), http.StatusSeeOther)
+}
+
 // postedIDs reads a selection out of a form. Download and the bulk actions post
 // the same checkboxes, so they read them the same way.
 func postedIDs(v url.Values) []int {
@@ -1503,6 +1625,16 @@ func postedIDs(v url.Values) []int {
 		}
 	}
 	return ids
+}
+
+// selectionIDs is which documents a bulk action applies to: the boxes the form
+// posted, or — when the escalation banner was used — every document the same
+// filter matches, which is more than one page can show.
+func (a *App) selectionIDs(ctx context.Context, form url.Values) ([]int, error) {
+	if form.Get("scope") == "filtered" {
+		return a.search.AllIDs(ctx, parseQuery(form), maxBulkDownload)
+	}
+	return postedIDs(form), nil
 }
 
 // indexURL is the way back to a listing after a bulk action, built from
@@ -1542,6 +1674,14 @@ func actionNotice(v url.Values) []Flash {
 		return []Flash{{Text: fmt.Sprintf("%d restored.", n)}}
 	case actionPurge:
 		return []Flash{{Text: fmt.Sprintf("%d deleted permanently.", n)}}
+	// Which tag it was is deliberately absent. The rule indexURL is built on
+	// stands: a URL is not a place to put text that will be shown to whoever
+	// opens it, and a tag is text somebody typed. The tag is on the rows
+	// underneath this line anyway, on exactly the documents it reached.
+	case actionAddTag:
+		return []Flash{{Text: fmt.Sprintf("Tag added to %d document%s.", n, plural(n))}}
+	case actionRemoveTag:
+		return []Flash{{Text: fmt.Sprintf("Tag removed from %d document%s.", n, plural(n))}}
 	}
 	return nil
 }
@@ -1914,29 +2054,22 @@ func (a *App) handleDocThumb(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
-// maxBulkDownload bounds "download everything matching" so a stray click on an
-// unfiltered archive does not start an eight-gigabyte stream. Well above any
-// deliberate selection.
+// maxBulkDownload bounds "everything matching" so a stray click on an
+// unfiltered archive does not start an eight-gigabyte stream or retag the whole
+// archive. Well above any deliberate selection.
 const maxBulkDownload = 2000
 
-// handleDownload streams the selected documents as a zip. Either the ids the
-// form posted, or — when the whole filtered set was asked for — every document
-// the same filter matches, which is more than the page can show.
+// handleDownload streams the selected documents as a zip.
 func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	var ids []int
-	if r.PostFormValue("scope") == "filtered" {
-		var err error
-		if ids, err = a.search.AllIDs(r.Context(), parseQuery(r.PostForm), maxBulkDownload); err != nil {
-			http.Error(w, "search unavailable: "+err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-	} else {
-		ids = postedIDs(r.PostForm)
+	ids, err := a.selectionIDs(r.Context(), r.PostForm)
+	if err != nil {
+		http.Error(w, "search unavailable: "+err.Error(), http.StatusServiceUnavailable)
+		return
 	}
 	if len(ids) == 0 {
 		http.Error(w, "nothing selected", http.StatusBadRequest)

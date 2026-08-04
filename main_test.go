@@ -2396,6 +2396,13 @@ func TestResultsCarriesTheTagRegions(t *testing.T) {
 		`id="tag-browse"`, // the vocabulary, and the foot that counts it
 		`data-tag="escrow"`,
 		"2 tags in these results",
+		// The bulk tag controls and the vocabulary behind them. They live in
+		// the swapped region because their datalist is a list of the tags in
+		// these results, and because the popovers are drawn from the same
+		// count of them that everything else here is.
+		`formaction="/docs/tags/add"`,
+		`formaction="/docs/tags/remove"`,
+		`<datalist id="tag-vocab">`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the fragment is missing %q:\n%s", want, body)
@@ -3191,5 +3198,284 @@ func TestUnlockRefusesWhatItCannotUse(t *testing.T) {
 	// And the original is untouched, which is what makes trying again free.
 	if PDFEncryption(context.Background(), locked) != pdfLocked {
 		t.Error("trying a password rewrote the original")
+	}
+}
+
+// The rig the bulk tag routes need: a real store to write sidecars into, and a
+// stand-in for Typesense that accepts whatever it is sent. The stand-in has to
+// succeed — persist retries an indexing failure until the request's context
+// ends, so a server that answered anything else would hang this file rather
+// than fail it.
+func newTagApp(t *testing.T) (*Store, *http.ServeMux) {
+	t.Helper()
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// 201 with the document echoed back is what an index write answers,
+		// and the client reads the status: anything else is an error to it.
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{}`)
+	}))
+	t.Cleanup(ts.Close)
+
+	a := &App{store: s, search: NewSearch(ts.URL, "test-key", "documents")}
+	mux := http.NewServeMux()
+	a.routes(mux)
+	return s, mux
+}
+
+func postTags(t *testing.T, mux *http.ServeMux, op string, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/docs/tags/"+op, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func tagsOf(t *testing.T, s *Store, id int) []string {
+	t.Helper()
+	doc, err := s.Load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc.Tags
+}
+
+// Filing a stack of documents under one name in one act. The tags already on
+// them are the thing to be careful with: this is an addition, not the tag box
+// on the document page, which replaces the whole list.
+//
+// Both fields are posted, because both always are — the two popovers live
+// inside the index's one form, so every submit carries whatever is sitting in
+// the other one. The add route must read the box it is named for and no other,
+// or "Add tax" would quietly remove whatever was left in the Remove box.
+func TestBulkTagAddsToTheSelectionAndLeavesOtherTagsAlone(t *testing.T) {
+	s, mux := newTagApp(t)
+	for _, doc := range []*Doc{
+		{ID: 1, Status: StatusReady, Title: "Water bill", Tags: []string{"utility"}},
+		{ID: 2, Status: StatusReady, Title: "Dentist receipt", Tags: []string{"medical", "receipt"}},
+		{ID: 3, Status: StatusReady, Title: "Not selected", Tags: []string{"utility"}},
+	} {
+		if err := s.Save(doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := postTags(t, mux, "add", url.Values{
+		"id":         {"1", "2"},
+		"tag-add":    {"tax"},
+		"tag-remove": {"utility"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /docs/tags/add = %d, want a redirect back to the listing:\n%s", rec.Code, rec.Body)
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "done=addtag") || !strings.Contains(loc, "n=2") {
+		t.Errorf("redirected to %q, want the outcome as done=addtag and n=2", loc)
+	}
+
+	if got, want := tagsOf(t, s, 1), []string{"utility", "tax"}; !slices.Equal(got, want) {
+		t.Errorf("DOC-1 tags = %q, want %q", got, want)
+	}
+	if got, want := tagsOf(t, s, 2), []string{"medical", "receipt", "tax"}; !slices.Equal(got, want) {
+		t.Errorf("DOC-2 tags = %q, want %q", got, want)
+	}
+	// The other field rode along and was ignored, which is the whole reason
+	// the two boxes are not both called "tag".
+	if got := tagsOf(t, s, 1); !slices.Contains(got, "utility") {
+		t.Errorf("the add route read the Remove box as well: DOC-1 tags = %q", got)
+	}
+	// A document nobody selected is a document nothing happened to.
+	if got, want := tagsOf(t, s, 3), []string{"utility"}; !slices.Equal(got, want) {
+		t.Errorf("DOC-3 was not selected but its tags are now %q, want %q", got, want)
+	}
+}
+
+// Removing is the same act backwards, with one difference that shows up in the
+// notice: a selection is made by ticking rows, not by knowing which of them
+// carry the tag, so most of these requests reach documents that never had it.
+// Those are not changes and must not be written, journalled or counted — "Tag
+// removed from 40 documents" when three of them had it is a report of work
+// that did not happen.
+func TestBulkTagRemoveOnlyTouchesTheDocumentsThatHadIt(t *testing.T) {
+	s, mux := newTagApp(t)
+	for _, doc := range []*Doc{
+		{ID: 1, Status: StatusReady, Title: "Water bill", Tags: []string{"utility", "tax"}},
+		{ID: 2, Status: StatusReady, Title: "Dentist receipt", Tags: []string{"medical"}},
+		{ID: 3, Status: StatusReady, Title: "Council rates", Tags: []string{"tax"}},
+	} {
+		if err := s.Save(doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.Stat(s.DocPath(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := postTags(t, mux, "remove", url.Values{
+		"id":         {"1", "2", "3"},
+		"tag-remove": {"tax"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /docs/tags/remove = %d, want a redirect:\n%s", rec.Code, rec.Body)
+	}
+	// Three were selected, two of them changed.
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "done=removetag") || !strings.Contains(loc, "n=2") {
+		t.Errorf("redirected to %q, want done=removetag and n=2 — the count is of documents that changed", loc)
+	}
+
+	if got, want := tagsOf(t, s, 1), []string{"utility"}; !slices.Equal(got, want) {
+		t.Errorf("DOC-1 tags = %q, want %q", got, want)
+	}
+	if got, want := tagsOf(t, s, 3), []string{}; !slices.Equal(got, want) {
+		t.Errorf("DOC-3 tags = %q, want the tag gone and nothing else with it", got)
+	}
+	if got, want := tagsOf(t, s, 2), []string{"medical"}; !slices.Equal(got, want) {
+		t.Errorf("DOC-2 never had the tag but its tags are now %q, want %q", got, want)
+	}
+	// Not merely unchanged in content: not rewritten at all, which is what
+	// keeps a bulk remove over a filtered view from touching every sidecar in
+	// the archive.
+	if after, err := os.Stat(s.DocPath(2)); err != nil {
+		t.Fatal(err)
+	} else if !after.ModTime().Equal(before.ModTime()) {
+		t.Error("a document that did not carry the tag was written anyway")
+	}
+	// And the notice says so in words, from the count alone.
+	got := actionNotice(url.Values{"done": {actionRemoveTag}, "n": {"2"}})
+	if len(got) != 1 || got[0].Text != "Tag removed from 2 documents." {
+		t.Errorf("notice = %+v, want one line reading \"Tag removed from 2 documents.\"", got)
+	}
+	if one := actionNotice(url.Values{"done": {actionAddTag}, "n": {"1"}}); len(one) != 1 || one[0].Text != "Tag added to 1 document." {
+		t.Errorf("notice for one document = %+v", one)
+	}
+	// The tag itself is deliberately not in either sentence: it would have to
+	// travel in the URL to get there, and a URL is not a place to put text that
+	// will be shown to whoever opens it.
+	if strings.Contains(rec.Header().Get("Location"), "tax") {
+		t.Errorf("the redirect carries the tag text: %q", rec.Header().Get("Location"))
+	}
+}
+
+// What the two routes refuse, and the state of the archive afterwards, which
+// is the part that matters: every one of these is a request that reached a
+// selection of documents and must leave all of them exactly as they were.
+func TestBulkTagRefusesWhatItCannotFileUnder(t *testing.T) {
+	s, mux := newTagApp(t)
+	if err := s.Save(&Doc{ID: 1, Status: StatusReady, Title: "Water bill", Tags: []string{"utility"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		op   string
+		form url.Values
+	}{
+		// The names the index derives from a document's own state. One written
+		// onto a sidecar would either be ignored or, worse, be believed.
+		{"a reserved tag", "add", url.Values{"id": {"1"}, "tag-add": {"trash"}}},
+		{"a reserved tag, removed", "remove", url.Values{"id": {"1"}, "tag-remove": {TagLocked}}},
+		// An empty box is a button pressed by accident, not an instruction.
+		{"an empty tag", "add", url.Values{"id": {"1"}, "tag-add": {""}}},
+		{"a tag of whitespace", "add", url.Values{"id": {"1"}, "tag-add": {"   "}}},
+		{"a tag of separators", "remove", url.Values{"id": {"1"}, "tag-remove": {" , "}}},
+		// Nothing ticked. Without this the same request would mean the archive.
+		{"nothing selected", "add", url.Values{"tag-add": {"tax"}}},
+		// A hand-made request, or a route that grew a third verb somewhere and
+		// not here.
+		{"an unknown op", "frobnicate", url.Values{"id": {"1"}, "tag-add": {"tax"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postTags(t, mux, tc.op, tc.form)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("POST /docs/tags/%s with %v = %d, want %d\n%s",
+					tc.op, tc.form, rec.Code, http.StatusBadRequest, rec.Body)
+			}
+			if got, want := tagsOf(t, s, 1), []string{"utility"}; !slices.Equal(got, want) {
+				t.Errorf("the refusal still wrote to the document: tags = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// One tag, normalised the way the document page normalises what is typed into
+// its tag box — lowered and trimmed — because "Tax" and "tax" filed as two tags
+// is a vocabulary nobody can search. splitTags is the shared answer, so the two
+// ways into the archive cannot come to disagree about what a tag name is.
+func TestBulkTagNormalisesWhatWasTyped(t *testing.T) {
+	s, mux := newTagApp(t)
+	if err := s.Save(&Doc{ID: 1, Status: StatusReady, Title: "Council rates"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := postTags(t, mux, "add", url.Values{"id": {"1"}, "tag-add": {"  Tax "}}); rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /docs/tags/add = %d\n%s", rec.Code, rec.Body)
+	}
+	if got, want := tagsOf(t, s, 1), []string{"tax"}; !slices.Equal(got, want) {
+		t.Errorf("tags = %q, want %q", got, want)
+	}
+	// And the same spelling takes it off again, which is the point of
+	// normalising on the way in rather than at the point of comparison.
+	if rec := postTags(t, mux, "remove", url.Values{"id": {"1"}, "tag-remove": {"TAX"}}); rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /docs/tags/remove = %d\n%s", rec.Code, rec.Body)
+	}
+	if got := tagsOf(t, s, 1); len(got) != 0 {
+		t.Errorf("tags = %q, want the tag gone", got)
+	}
+}
+
+// The escalation banner, which is how a bulk action comes to mean more than the
+// page it was started from. It replaced a button that only Download read, so
+// the checkbox is the thing to check: it is what every bulk route now reads,
+// it posts by being present rather than by being clicked, and it carries
+// pick-scope rather than pick so that the select-all, the running count and the
+// stylesheet's "is anything selected" all keep ignoring it.
+//
+// One page and it is not offered at all — "all of these" and "all of them" are
+// the same sentence there, and asking would be a question with one answer.
+func TestScopeBannerIsOfferedOnlyWhenThereIsMoreThanOnePage(t *testing.T) {
+	a := &App{}
+	tpl, err := a.templates("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := func(pages int) string {
+		t.Helper()
+		var buf bytes.Buffer
+		data := page{Result: &Result{
+			Found: 4231, Page: 1, Pages: pages,
+			Hits:   []Hit{{Doc: &Doc{ID: 1}}, {Doc: &Doc{ID: 2}}},
+			Facets: map[string][]FacetValue{},
+		}}
+		if err := tpl.ExecuteTemplate(&buf, "results", data); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+
+	body := render(2)
+	for _, want := range []string{
+		`class="pick-scope" name="scope" value="filtered"`, // the whole mechanism
+		"Select all 4,231 matching",                        // the offer
+		"Select only this page",                            // and the way back from it
+		"<strong>2</strong> on this page selected",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the banner is missing %q:\n%s", want, body)
+		}
+	}
+	// The button this replaced posted scope only to Download, so trashing after
+	// pressing it moved one page. Nothing else may post the field.
+	if n := strings.Count(body, `name="scope"`); n != 1 {
+		t.Errorf("the form posts scope from %d places, want exactly one", n)
+	}
+
+	if one := render(1); strings.Contains(one, "scope-bar") {
+		t.Errorf("a single page offers to select every other page too:\n%s", one)
 	}
 }

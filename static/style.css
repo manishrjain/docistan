@@ -676,7 +676,114 @@ button.pill-plain {
   white-space: nowrap;
 }
 
-.rows { list-style: none; margin: 0; padding: 0; }
+/* Adding or removing a tag across the selection. The popover is a <details>,
+   so it opens and closes with no script and with the keyboard; picker.js only
+   adds the courtesies a native popover would come with, such as closing when
+   the reader clicks somewhere else. */
+.bulk-tag { position: relative; }
+/* The marker would sit inside the button and break its shape, and there is no
+   one property that removes it in every browser. */
+.bulk-tag > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.bulk-tag > summary::-webkit-details-marker { display: none; }
+.bulk-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  /* Above the rows and their stretched links, below the filter popover. */
+  z-index: 25;
+  width: 280px;
+  display: flex;
+  gap: var(--space-2);
+  padding: 10px;
+  border: 2px solid var(--color-text);
+  background: var(--color-bg);
+  box-shadow: var(--shadow-lg);
+}
+.bulk-pop input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--color-neutral-400);
+  background: var(--color-paper);
+  font: 400 13px/1.2 var(--font-body);
+  color: var(--color-text);
+}
+.bulk-pop input:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+/* Escalating a selection from this page to everything the filter matches.
+   Only once the whole page is ticked is "and the rest" a question worth
+   asking; and once the answer is yes it stays on screen to say so. Asked of
+   the checkbox itself rather than of anything JavaScript writes, so the strip
+   is correct on the first paint and with scripting off. */
+.picker:not(:has(.pick-scope:checked)):has(.pick:not(.pick-all):not(:checked)) .scope-bar { display: none; }
+.picker:has(.pick-scope:checked) .scope-page { display: none; }
+.picker:not(:has(.pick-scope:checked)) .scope-all { display: none; }
+
+.scope-bar {
+  padding: 10px var(--space-6);
+  border-bottom: 2px solid var(--color-accent);
+  background: var(--color-accent-100);
+  font-size: 13px;
+}
+/* Escalated: the strip inverts, because "all four thousand of them" is a state
+   worth noticing from across the room. */
+.picker:has(.pick-scope:checked) .scope-bar {
+  background: var(--color-accent);
+  color: var(--color-bg);
+}
+/* The label is the control — the whole strip is the target, not the words in
+   it — and it holds the checkbox, which needs a positioned ancestor to be
+   taken out of the flow against. */
+.scope-label {
+  display: block;
+  position: relative;
+  cursor: pointer;
+}
+/* Hidden without display:none, deliberately: a display:none checkbox is
+   unreachable by keyboard, and — the part that matters — a hidden checkbox
+   still posts its value, which is the entire mechanism. scope=filtered rides
+   along with whichever action button is pressed. */
+.scope-label .pick-scope {
+  position: absolute;
+  top: 0;
+  left: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+/* The offer, and the way back from it. Not an <a> — there is nowhere to go —
+   so it is dressed as the link it behaves like. */
+.scope-bar em {
+  font-style: normal;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+/* The box still takes focus — that is why it is hidden this way rather than
+   with display:none — but there is nothing of it to see, so the strip standing
+   in for it wears the ring. */
+.scope-label:has(.pick-scope:focus-visible) {
+  outline: 2px solid var(--color-text);
+  outline-offset: 2px;
+}
+
+/* Two columns where there is room for two, and one where there is not. No
+   media query on purpose: auto-fit with a minimum track means the column count
+   follows the container, not the viewport, so this stays right inside whatever
+   the results are placed in rather than only at the widths someone thought to
+   name. */
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(620px, 1fr));
+}
 
 .row {
   position: relative;
@@ -684,6 +791,7 @@ button.pill-plain {
   gap: 20px;
   padding: 22px var(--space-6);
   border-bottom: 1px solid var(--color-divider);
+  border-right: 1px solid var(--color-divider);
 }
 .row:hover { background: var(--color-neutral-100); }
 
@@ -1556,8 +1664,14 @@ button.pill-plain {
   .sort-dir .dir-full { display: none; }
   .sort-dir .dir-arrow { display: inline; }
   .results-head,
+  .scope-bar,
   .row { padding-inline: var(--space-4); }
-  .row { gap: 14px; padding-block: var(--space-4); }
+  /* One column, said outright. auto-fit only drops to one track when the
+     container can hold one — below the 620px minimum the track keeps its size
+     and the rows hang off the side of a phone instead. The divider between
+     columns goes with the columns. */
+  .rows { grid-template-columns: 1fr; }
+  .row { gap: 14px; padding-block: var(--space-4); border-right: 0; }
   .row .thumb { width: 76px; height: 100px; }
   .row-head h3 { font-size: 16px; line-height: 1.25; }
   .row .snippet,
