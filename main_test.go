@@ -312,6 +312,113 @@ func TestEnrichPromptCurrentState(t *testing.T) {
 	}
 }
 
+// signaturePDF writes a PDF carrying the markers the named case would carry.
+// Both shapes are taken from real documents in the archive: a PAN card
+// application whose signature box nobody ever signed, and a DocuSign envelope
+// whose signature dictionary omits /Type entirely, the spec having made it
+// optional.
+func signaturePDF(t *testing.T, kind string) string {
+	t.Helper()
+	var body string
+	switch kind {
+	case "unsigned-field":
+		// A field to sign, and no signature: no /ByteRange, because that is
+		// written when someone signs.
+		body = "1 0 obj<</FT /Sig /T (Signature1) /Type /Annot>>endobj\n"
+	case "signed":
+		body = "1 0 obj<</FT /Sig /ByteRange [0 345803 353763 567] " +
+			"/SubFilter /adbe.pkcs7.detached /Contents <308206>>>endobj\n"
+	case "plain":
+		body = "1 0 obj<</Type /Page>>endobj\n"
+	default:
+		t.Fatalf("unknown kind %q", kind)
+	}
+	path := filepath.Join(t.TempDir(), kind+".pdf")
+	if err := os.WriteFile(path, []byte("%PDF-1.7\n"+body+"%%EOF\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The byte-scan half of IsSignedPDF, which is what runs wherever pdfsig is not
+// installed. It used to require /Type/Sig and so called a DocuSign envelope
+// unsigned — which would have handed it to ocrmypdf, which refuses signed PDFs
+// and would have failed the ingest outright.
+func TestIsSignedPDFByteScan(t *testing.T) {
+	if _, err := exec.LookPath("pdfsig"); err == nil {
+		t.Skip("pdfsig is installed, so the fallback under test does not run")
+	}
+	for _, tc := range []struct {
+		kind string
+		want bool
+	}{
+		{"signed", true},
+		{"unsigned-field", false},
+		{"plain", false},
+	} {
+		if got := IsSignedPDF(signaturePDF(t, tc.kind)); got != tc.want {
+			t.Errorf("IsSignedPDF(%s) = %v, want %v", tc.kind, got, tc.want)
+		}
+	}
+}
+
+// The same question asked of pdfsig, which is what actually runs in the
+// container. A field is not a signature: pdfsig prints the field's name either
+// way, and only a signed one gets a time and a validation line.
+func TestIsSignedPDFViaPdfsig(t *testing.T) {
+	if _, err := exec.LookPath("pdfsig"); err != nil {
+		t.Skip("pdfsig not installed")
+	}
+	// An empty signature field is the case that matters: hand-built PDFs are
+	// too thin for pdfsig to parse, so this is asserted on the shape of its
+	// output rather than on a fixture it would reject.
+	for _, tc := range []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"empty field", "Signature #1:\n  - Signature Field Name: Signature1\n  The signature form field is not signed.\n", false},
+		{"real signature", "Signature #1:\n  - Signature Field Name: ENVELOPEID_834B\n  - Signing Time: Mar 03 2016 00:36:04\n  - Signature Validation: Signature is Valid.\n", true},
+		{"no fields at all", "Digital Signature Info of: x.pdf\n", false},
+		{"one of each", "Signature #1:\n  The signature form field is not signed.\nSignature #2:\n  - Signature Validation: Signature is Valid.\n", true},
+	} {
+		got := strings.Contains(tc.out, "Signature Validation:") || strings.Contains(tc.out, "Signing Time:")
+		if got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A signed document earns a line in Naturalization saying nothing was done to
+// it, which is the point — it used to be a banner announcing a negative over a
+// document that had been read perfectly well.
+func TestIntakeStageSigned(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		doc     Doc
+		present bool
+		want    string
+	}{
+		{"signed only", Doc{Signed: true}, true, "Digitally signed — kept exactly as it arrived"},
+		{"encrypted only", Doc{Encrypted: true}, true, "Unlocked — password removed from original"},
+		{"both", Doc{Encrypted: true, Signed: true}, true, "Unlocked — archive copy decrypted"},
+		{"neither", Doc{}, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, ok := intakeStage(&tc.doc)
+			if ok != tc.present {
+				t.Fatalf("present = %v, want %v", ok, tc.present)
+			}
+			if ok && s.Name != tc.want {
+				t.Errorf("Name = %q, want %q", s.Name, tc.want)
+			}
+			if ok && s.State != "done" {
+				t.Errorf("State = %q, want done", s.State)
+			}
+		})
+	}
+}
+
 // A title is free text from a model or a person, and it becomes a filename on
 // someone's disk. These are the shapes that break that.
 func TestDownloadName(t *testing.T) {

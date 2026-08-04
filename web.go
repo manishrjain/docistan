@@ -362,25 +362,29 @@ type Stage struct {
 // above this list.
 func (a *App) stagesFor(doc *Doc) []Stage {
 	out := []Stage{landedStage(doc)}
-	// Only documents that arrived locked have anything to say here, which is
-	// why this is a step rather than a fourth fixed row: on every other
-	// document there was no lock and nothing happened.
-	if s, ok := unlockStage(doc); ok {
+	// Only documents that arrived locked or signed have anything to say here,
+	// which is why this is a step rather than a fourth fixed row: on every
+	// other document there was no lock, no signature, and nothing happened.
+	if s, ok := intakeStage(doc); ok {
 		out = append(out, s)
 	}
 	return append(out, readStage(doc), a.taggingStage(doc))
 }
 
-// unlockStage is what happened to a password. It sits between arriving and
-// being read because that is where it happened — nothing could be read until
-// the file opened — and because a timeline is where someone looks to find out
-// why a document is not what they sent.
+// intakeStage is what the file itself made us do before it could be read — a
+// password removed, or a signature that had to survive. It sits between
+// arriving and being read because that is where it happened, and because a
+// timeline is where someone looks to find out why a document is not what they
+// sent.
 //
-// This used to be a banner at the top of the page, which put a paragraph about
-// checksums above a document whose owner wanted to read it. It is the same two
-// facts either way; a step states them where they belong, in the order they
-// occurred.
-func unlockStage(doc *Doc) (Stage, bool) {
+// Both of these used to be banners at the top of the page. The password one put
+// a paragraph about checksums above a document whose owner wanted to read it;
+// the signature one was worse, because it announced a negative — "this document
+// was not OCR'd" — over a document that had been read perfectly well from its
+// own text layer, and left the reader to reconcile that with a step below
+// reporting three thousand characters. They are the same facts either way; a
+// step states them where they belong, in the order they occurred.
+func intakeStage(doc *Doc) (Stage, bool) {
 	// A step is a line in a list, not a paragraph. Each of these says what
 	// happened and then the one fact that outlives it; anything more belongs on
 	// whatever page explains the archive, not on top of a document someone has
@@ -406,6 +410,14 @@ func unlockStage(doc *Doc) (Stage, bool) {
 		return Stage{
 			Key: "unlock", Name: "Unlocked — password removed from original", State: "done",
 			Detail: "Original checksum recorded",
+		}, true
+	case doc.Signed:
+		// Nothing was done to this one, which is the whole point and the reason
+		// it still earns a line: the archive copy is the original byte for
+		// byte, so the text below came out of the layer the signer signed.
+		return Stage{
+			Key: "unlock", Name: "Digitally signed — kept exactly as it arrived", State: "done",
+			Detail: "OCR would have broken the signature",
 		}, true
 	}
 	return Stage{}, false

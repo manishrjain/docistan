@@ -140,19 +140,36 @@ func runCmd(ctx context.Context, timeout time.Duration, name string, args ...str
 // IsSignedPDF reports whether the file carries a digital signature. ocrmypdf
 // refuses to process signed PDFs, and invalidating a signature to gain a text
 // layer is a bad trade, so these skip OCR entirely.
+//
+// The question is whether the document was signed, not whether it has anywhere
+// to sign. Both earlier tests got that wrong, in opposite directions, and the
+// archive holds one specimen of each:
+//
+// A blank form ships with an empty signature box for someone to fill in later,
+// and pdfsig names that field exactly as it names a real one — so matching
+// "Signature Field" called an unsigned PAN card application signed, skipped its
+// OCR, and kept its original needlessly encrypted. What only a signed field has
+// is a time and a validation result, which is what is asked for here.
+//
+// The byte scan then required /Type/Sig, which the spec makes optional and a
+// DocuSign envelope duly leaves out — so with pdfsig missing it would have
+// called a genuinely signed document unsigned and handed it to ocrmypdf, which
+// refuses signed PDFs and would have failed the ingest. /ByteRange is the key
+// that cannot be omitted: it is what a signature is computed over.
 func IsSignedPDF(path string) bool {
-	out, err := runCmd(context.Background(), 30*time.Second, "pdfsig", path)
-	if err == nil && strings.Contains(out, "Signature Field") {
-		return true
+	// pdfsig exits non-zero on a PDF with no signature fields at all, so this
+	// succeeding means it found something and its account is the whole answer.
+	if out, err := runCmd(context.Background(), 30*time.Second, "pdfsig", path); err == nil {
+		return strings.Contains(out, "Signature Validation:") ||
+			strings.Contains(out, "Signing Time:")
 	}
-	// pdfsig is unavailable or unhappy: fall back to scanning for the
-	// signature dictionary, which needs no external tool.
+	// pdfsig is unavailable or could not read the file: fall back to the
+	// signature dictionary's one mandatory entry, which needs no external tool.
 	b, rerr := os.ReadFile(path)
 	if rerr != nil {
 		return false
 	}
-	return bytes.Contains(b, []byte("/ByteRange")) &&
-		(bytes.Contains(b, []byte("/Type/Sig")) || bytes.Contains(b, []byte("/Type /Sig")))
+	return bytes.Contains(b, []byte("/ByteRange"))
 }
 
 // pdfCrypt is what qpdf knows about a PDF's encryption. The three values are
