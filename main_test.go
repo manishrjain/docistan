@@ -914,13 +914,60 @@ func requestWithSession(auth *Auth, s session) *http.Request {
 	return r
 }
 
+// planNav decides prev/next from one page of ids; the cases that matter are
+// the seams — first of a page, last of the archive — because those are where
+// a neighbour lives on a page we have not fetched.
+func TestPlanNav(t *testing.T) {
+	// A partial page is by construction the final page, so the total has to
+	// agree with it: 24 on page 1 plus these 3. (An earlier draft said 51,
+	// and the code rightly planned a fetch of page 3 that the fixture never
+	// meant to exist.)
+	ids := []int{40, 41, 42} // page 2, the last, of a 27-document listing
+	for _, tc := range []struct {
+		name string
+		id   int
+		want navPlan
+	}{
+		{"middle", 41, navPlan{Pos: 26, Total: 27, PrevID: 40, NextID: 42}},
+		{"first of page 2", 40, navPlan{Pos: 25, Total: 27, FetchPrev: 1, NextID: 41}},
+		{"last of the archive", 42, navPlan{Pos: 27, Total: 27, PrevID: 41}},
+	} {
+		got, ok := planNav(ids, 2, 27, tc.id)
+		if !ok || got != tc.want {
+			t.Errorf("%s: got %+v (%v), want %+v", tc.name, got, ok, tc.want)
+		}
+	}
+
+	// Page 1 has no page before it, and a document that fell out of its
+	// listing has no place in it at all.
+	got, ok := planNav([]int{7, 8}, 1, 2, 7)
+	if !ok || got.FetchPrev != 0 || got.PrevID != 0 || got.NextID != 8 {
+		t.Errorf("head of the listing: %+v (%v)", got, ok)
+	}
+	if _, ok := planNav(ids, 2, 51, 99); ok {
+		t.Error("a document missing from its page still got a position")
+	}
+
+	// The last slot of a full page must look ahead: pos 48 of 51 means three
+	// more documents on page 3.
+	full := make([]int, perPage)
+	for i := range full {
+		full[i] = 100 + i
+	}
+	got, ok = planNav(full, 2, 51, 100+perPage-1)
+	if !ok || got.FetchNext != 3 || got.Pos != 2*perPage {
+		t.Errorf("last of a full page: %+v (%v), want FetchNext=3 Pos=%d", got, ok, 2*perPage)
+	}
+}
+
 // The session cookie is the entire authentication state, so what it must
 // survive is exactly what an attacker would try: alteration, expiry, and a
 // signature from some other key.
 func TestSessionCookie(t *testing.T) {
 	auth := testAuth(t)
 	now := time.Now()
-	good := session{Sub: "u1", Name: "Manish", IssuedAt: now.Unix(), Expires: now.Add(time.Hour).Unix()}
+	good := session{Sub: "u1", Name: "Manish", Email: "m@example.com",
+		IssuedAt: now.Unix(), Expires: now.Add(time.Hour).Unix()}
 
 	if got, ok := auth.session(requestWithSession(auth, good)); !ok || got != good {
 		t.Fatalf("round trip: got %+v, %v", got, ok)

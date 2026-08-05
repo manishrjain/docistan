@@ -350,8 +350,45 @@ main {
 
 .topbar nav {
   display: flex;
+  align-items: center;
   gap: var(--space-2);
   flex: none;
+}
+
+/* Icon-square button in the topbar, sized to the mock: 38px, 34 on mobile. */
+.iconbtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border: 1px solid var(--color-divider);
+  color: var(--color-neutral-700);
+  text-decoration: none;
+}
+
+/* The identity: name visible, email as its tooltip. */
+.who {
+  font: 11px ui-monospace, Menlo, monospace;
+  letter-spacing: 0.04em;
+  color: var(--color-neutral-700);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.signout-icon { display: none; }
+
+/* No login configured. Dashed on purpose — provisional, not decoration. */
+.access-chip {
+  font: 10px/1 ui-monospace, Menlo, monospace;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 7px 8px;
+  border: 1px dashed var(--color-neutral-400);
+  color: var(--color-neutral-700);
+  white-space: nowrap;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -992,6 +1029,21 @@ button.pill-plain {
 .doc-head .code { cursor: pointer; }
 .doc-head-title { flex: 1; min-width: 220px; }
 .doc-head-actions { display: flex; gap: var(--space-2); flex: none; }
+
+/* Through the listing, one document at a time. */
+.doc-nav { display: flex; align-items: center; gap: 6px; flex: none; }
+.doc-nav .arrow { padding: 7px 11px; font-size: 13px; }
+.doc-nav .arrow[aria-disabled] { opacity: 0.35; pointer-events: none; }
+.doc-pos {
+  font: 10px ui-monospace, Menlo, monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-neutral-600);
+  white-space: nowrap;
+}
+
+/* Open/Download are words on a desktop and 44px icon squares on a phone. */
+.doc-head-actions .act-icon { display: none; }
 
 /* Editable in place: the heading is the field. The border only appears on
    hover, so the page does not look like a form until you aim at it. */
@@ -1701,8 +1753,24 @@ button.pill-plain {
     gap: 10px;
     padding: var(--space-3) var(--space-4);
   }
+  /* The mock's mobile order: back button, code chip centred, position and
+     arrows at the right; the title on its own line; Open and Download as a
+     right-aligned row of icon squares below it. */
+  .doc-head .code { order: 1; margin: 0 auto; }
+  .doc-nav { order: 2; margin-left: auto; }
+  .doc-nav .arrow { padding: 8px 11px; font-size: 12px; }
+  .doc-nav .doc-pos { order: -1; }
   .doc-head-title { flex-basis: 100%; order: 3; }
-  .doc-head-actions { margin-left: auto; }
+  .doc-head-actions { order: 4; margin-left: auto; }
+  .doc-head-actions .act-label { display: none; }
+  .doc-head-actions .act-icon { display: block; }
+  .doc-head-actions .act { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; padding: 0; }
+  .iconbtn { width: 34px; height: 34px; }
+  .iconbtn svg { width: 16px; height: 16px; }
+  .who { display: none; }
+  .signout-label { display: none; }
+  .signout-icon { display: block; }
+  .signout .btn { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; padding: 0; }
   .tool { width: 44px; height: 44px; }
   .pill-x { font-size: 17px; }
   .page { padding: var(--space-4); }

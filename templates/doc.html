@@ -6,13 +6,31 @@
        navigation that matters here. */}}
   <header class="doc-head">
     <a class="btn btn-secondary" href="{{.BackLink}}">← All results</a>
+    {{/* One document at a time through the listing this one was opened from.
+         Disabled at the ends rather than hidden, so the buttons never move
+         out from under a finger mid-repeat. */}}
+    {{with .Nav}}
+      <nav class="doc-nav" aria-label="Neighbouring documents">
+        {{if .Prev}}<a class="btn btn-secondary arrow" data-prev href="{{.Prev}}" title="Previous document">←</a>
+        {{else}}<span class="btn btn-secondary arrow" aria-disabled="true">←</span>{{end}}
+        {{if .Next}}<a class="btn btn-secondary arrow" data-next href="{{.Next}}" title="Next document">→</a>
+        {{else}}<span class="btn btn-secondary arrow" aria-disabled="true">→</span>{{end}}
+        <span class="doc-pos">{{commaNum .Pos}} of {{commaNum .Total}}</span>
+      </nav>
+    {{end}}
     <span class="code" data-copy="{{docCode $d.ID}}" title="Click to copy the document number">{{docCode $d.ID}}</span>
     <div class="doc-head-title">
       <h1 class="doc-title" data-edits="title" tabindex="0" title="Click to edit">{{$d.Title}}</h1>
     </div>
     <div class="doc-head-actions">
-      <a class="btn btn-secondary" href="/doc/{{$d.ID}}/pdf" target="_blank" rel="noopener">Open ↗</a>
-      <a class="btn btn-secondary" href="/doc/{{$d.ID}}/original">Download</a>
+      <a class="btn btn-secondary act" href="/doc/{{$d.ID}}/pdf" target="_blank" rel="noopener" title="Open in a new tab">
+        <span class="act-label">Open ↗</span>
+        <svg class="act-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+      </a>
+      <a class="btn btn-secondary act" href="/doc/{{$d.ID}}/original" title="Download the original">
+        <span class="act-label">Download</span>
+        <svg class="act-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M4 20h16"/></svg>
+      </a>
     </div>
   </header>
 

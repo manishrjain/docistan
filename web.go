@@ -625,10 +625,17 @@ type page struct {
 	Enriching map[int]bool
 	// Search carries the term that led here, so the PDF viewer can jump
 	// straight to it instead of making the reader find it twice.
-	// User is the signed-in reader's display name, for the topbar. Empty when
-	// no OIDC issuer is configured, which is also what hides the Sign out
-	// button — there is no session to end.
-	User   string
+	// User is the signed-in reader's display name, for the topbar; UserEmail
+	// rides along as the tooltip. Empty when no OIDC issuer is configured,
+	// which is also what hides the Sign out button — there is no session to
+	// end. OpenAccess is that same fact stated positively, for the chip that
+	// says out loud that no login is configured.
+	User       string
+	UserEmail  string
+	OpenAccess bool
+	// Nav walks the listing this document was opened from; nil off the doc
+	// page, and on it when the document has fallen out of its listing.
+	Nav    *DocNav
 	Search string
 	Jobs   []Job
 	// Backlog is what is queued behind Jobs. Its own field rather than part of
@@ -700,8 +707,10 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data p
 	// it is filled in here rather than at five call sites.
 	if a.auth != nil {
 		if s, ok := a.auth.session(r); ok {
-			data.User = s.Name
+			data.User, data.UserEmail = s.Name, s.Email
 		}
+	} else {
+		data.OpenAccess = true
 	}
 	tpl, err := a.templates(name)
 	if err != nil {
@@ -860,6 +869,97 @@ func (p page) BackLink() string {
 		return "/"
 	}
 	return "/?" + v.Encode()
+}
+
+// DocNav is the way through the listing a document was opened from: the
+// neighbouring documents under the same filters and sort, and where this one
+// sits in the whole result set. Nil when the document is not in that listing
+// (trashed since, or the filters no longer match it).
+type DocNav struct {
+	Prev, Next string // hrefs carrying the listing; empty at the ends
+	Pos, Total int    // 1-based position across every page
+}
+
+// navPlan is the pure half of the decision, split from the queries so the
+// edges — first of a page, last of the archive — are testable without a
+// search backend. A neighbour on the same page is answered outright; one on
+// an adjacent page comes back as a page number for the caller to fetch.
+type navPlan struct {
+	Pos, Total           int
+	PrevID, NextID       int // 0 when absent or on another page
+	FetchPrev, FetchNext int // page to fetch for the missing neighbour; 0 when settled
+}
+
+func planNav(ids []int, page, found, id int) (navPlan, bool) {
+	idx := slices.Index(ids, id)
+	if idx < 0 {
+		return navPlan{}, false
+	}
+	p := navPlan{Pos: (page-1)*perPage + idx + 1, Total: found}
+	switch {
+	case idx > 0:
+		p.PrevID = ids[idx-1]
+	case page > 1:
+		p.FetchPrev = page - 1
+	}
+	switch {
+	case idx < len(ids)-1:
+		p.NextID = ids[idx+1]
+	case p.Pos < found:
+		p.FetchNext = page + 1
+	}
+	return p, true
+}
+
+// docNav resolves the plan against the index: at most three ids-only queries,
+// and usually one. Any failure degrades to no navigation rather than an
+// error page — the document itself is what this page is for.
+func (a *App) docNav(ctx context.Context, q Query, id int) *DocNav {
+	q.Page = max(q.Page, 1)
+	ids, found, err := a.search.PageIDs(ctx, q)
+	if err != nil {
+		logf("doc %d: neighbours: %v", id, err)
+		return nil
+	}
+	plan, ok := planNav(ids, q.Page, found, id)
+	if !ok {
+		return nil
+	}
+	edge := func(page int, last bool) (int, int) {
+		eq := q
+		eq.Page = page
+		ids, _, err := a.search.PageIDs(ctx, eq)
+		if err != nil || len(ids) == 0 {
+			return 0, 0
+		}
+		if last {
+			return ids[len(ids)-1], page
+		}
+		return ids[0], page
+	}
+	link := func(docID, page int) string {
+		if docID == 0 {
+			return ""
+		}
+		return listingPage(q, page).DocLink(docID)
+	}
+	nav := &DocNav{Pos: plan.Pos, Total: plan.Total}
+	prevPage, nextPage := q.Page, q.Page
+	if plan.FetchPrev > 0 {
+		plan.PrevID, prevPage = edge(plan.FetchPrev, true)
+	}
+	if plan.FetchNext > 0 {
+		plan.NextID, nextPage = edge(plan.FetchNext, false)
+	}
+	nav.Prev = link(plan.PrevID, prevPage)
+	nav.Next = link(plan.NextID, nextPage)
+	return nav
+}
+
+// listingPage is a page value for link-building alone, at a given listing page.
+func listingPage(q Query, p int) page {
+	q.Page = p
+	return page{Query: q}
 }
 
 // FilterQuery is the same listing as a bare query string, for an action that
@@ -1307,10 +1407,16 @@ func (a *App) handleDoc(w http.ResponseWriter, r *http.Request) {
 	// row carried. Only BackLink reads it — the document itself is the same
 	// document however you arrived at it — but without it "All results" has
 	// nothing to return to but the whole archive.
+	q := parseQuery(r.URL.Query())
 	a.render(w, r, "doc.html", page{
 		Title: doc.Title, Doc: doc, Stages: a.stagesFor(doc),
-		Query:     parseQuery(r.URL.Query()),
+		Query:     q,
 		KnownTags: known, Search: r.URL.Query().Get("q"), URL: r.URL,
+		// The listing the row carried, walked one document at a time. A bare
+		// /doc/47 gets the default listing — the same one BackLink returns to —
+		// because the unfiltered index carries no parameters either, and the
+		// two cases are indistinguishable on purpose.
+		Nav: a.docNav(r.Context(), q, id),
 	})
 }
 

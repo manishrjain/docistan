@@ -395,6 +395,30 @@ func escapeFilterValue(v string) string {
 	return strings.ReplaceAll(v, `"`, `\"`)
 }
 
+// PageIDs is one listing page reduced to document ids plus the total match
+// count — the two facts prev/next navigation needs, at a fraction of the
+// weight of the full page.
+func (s *Search) PageIDs(ctx context.Context, q Query) (ids []int, found int, err error) {
+	res, err := s.query(ctx, q, perPage, true)
+	if err != nil {
+		return nil, 0, err
+	}
+	if res.Found != nil {
+		found = *res.Found
+	}
+	if res.Hits != nil {
+		for _, h := range *res.Hits {
+			if h.Document == nil {
+				continue
+			}
+			if id, ok := hitID(*h.Document); ok {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids, found, nil
+}
+
 func (s *Search) Query(ctx context.Context, q Query) (*Result, error) {
 	res, err := s.query(ctx, q, perPage, false)
 	if err != nil {

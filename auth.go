@@ -107,9 +107,12 @@ func loadSessionKey(dataDir string) ([]byte, error) {
 // --- cookies ---------------------------------------------------------------
 
 // session is what being signed in means: an identity the issuer vouched for.
+// Email is display material — the tooltip on the name — never an authority;
+// the subject is the identity.
 type session struct {
 	Sub      string `json:"sub"`
 	Name     string `json:"name"`
+	Email    string `json:"email,omitempty"`
 	IssuedAt int64  `json:"iat"`
 	Expires  int64  `json:"exp"`
 }
@@ -324,7 +327,7 @@ func (auth *Auth) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	auth.setSession(w, r, session{
-		Sub: who.Sub, Name: who.displayName(),
+		Sub: who.Sub, Name: who.displayName(), Email: who.Email,
 		IssuedAt: now.Unix(), Expires: now.Add(sessionTTL).Unix(),
 	})
 	logf("login: %s (%s)", who.displayName(), who.Sub)

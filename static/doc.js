@@ -773,6 +773,27 @@ document.addEventListener("DOMContentLoaded", () => {
     button.style.pointerEvents = "none";
   });
 
+  // --- neighbours ----------------------------------------------------------
+  // The arrow keys walk the same listing the header arrows do. Only when the
+  // keystroke is plainly navigation: no modifiers, and not while anything
+  // editable has focus — a caret in the title or the tag box owns its arrows.
+  // Keys inside the PDF iframe never reach this document, which is also
+  // right: the viewer uses them to scroll.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const el = document.activeElement;
+    if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
+    // The title and date headings are focusable because they open an editor;
+    // a keyboard on its way in to edit must not be yanked to another
+    // document.
+    if (el && el.closest && el.closest("[data-edits]")) return;
+    const link = document.querySelector(
+      e.key === "ArrowLeft" ? ".doc-nav [data-prev]" : ".doc-nav [data-next]",
+    );
+    if (link) location.href = link.href;
+  });
+
   // --- document number ---------------------------------------------------
   // The number is what gets written on the paper original, so copying it
   // should not mean selecting six pixels of monospace by hand.
