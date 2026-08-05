@@ -643,6 +643,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // replaces that with the panel, which has room to say what happens.
   function guarded(form, run) {
     if (!form) return;
+    // Marked so the sweep below can tell what has already been wired without
+    // naming it by where it posts.
+    form.dataset.guarded = "1";
     const key = form.dataset.confirms;
     const panel = key
       ? document.querySelector(`.confirm[data-confirm="${key}"]`)
@@ -721,8 +724,14 @@ document.addEventListener("DOMContentLoaded", () => {
   // nothing to watch: the panel confirms, then the form posts as it would
   // have. Restore is not here — it needs no confirmation, so it is left as the
   // plain form it already is.
-  for (const sel of ['form[action$="/trash"]', 'form[action$="/delete"]']) {
-    const form = document.querySelector(sel);
+  //
+  // Matched on the attribute that asks for the panel, not on where the form
+  // posts. Matching the action's tail meant that giving trash a query string —
+  // so it could return to the listing it came from — silently stopped it ending
+  // in "/trash", the panel never bound, and the browser's own confirm box was
+  // left to do the job. Which is a real difference in behaviour, appearing only
+  // when a filter was on, from a change that had nothing to do with either.
+  for (const form of document.querySelectorAll("form[data-confirms]:not([data-guarded])")) {
     guarded(form, () => form.submit());
   }
 
