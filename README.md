@@ -4,16 +4,63 @@ A self-hosted document archive: drop files in, get them OCR'd, titled, tagged,
 dated and searchable. Go and Typesense, no database, and the JSON sidecars next
 to your documents are the source of truth.
 
-## Running it
+## Origin
 
-The image carries everything the pipeline shells out to — ocrmypdf, Tesseract,
+First, I (Manish) would like to thank paperless-ngx. I self-host it and it got
+me away from the control of Dropbox and Google Drive, and showed me what's
+possible.
+
+I wrote this after growing unhappy with paperless-ngx: search was slow,
+the quality of results was bad, and the whole interface felt oldschool and
+buggy.
+
+My first attempt was to run Typesense search over paperless-ngx, which produced
+remarkably better results. That's when I decided to build Docovia from scratch.
+
+I used Claude to co-author it over a busy family-oriented weekend and a couple
+of weekdays. My prime focus was on Design, UI/UX, enrichment (LLM) and search
+quality. I didn't get a lot of time to do thorough code reviews upfront, which I
+paid for later, untangling some of the complexity the coding agent brought.
+
+## Naturalization of a Doc in Docovia
+
+Docovia is great because you can just dump your documents without worrying about
+any folder level organization. Once uploaded, Docovia would process a doc as
+follows:
+
+1. Check for duplicates via SHA checksum and reject if it finds one.
+1. Unlock if locked, trying every known password from previous successful
+   unlocks. It would overwrite the original with this unlocked version, while
+   keeping the original's checksum to catch duplicates.
+1. Extract text, either by reading the native text layer or running OCR over
+   them.
+1. Send the extracted text to LLM (OpenAI) to figure out title, document
+   date, tags and summary.
+1. Index the doc in Typesense, which holds everything in RAM - search is
+   instant, scored and full-text.
+1. The Doc is now fully naturalized citizen of Docovia, Welcome!
+
+The UX of Docovia supports text search, tag filters and sort by upload date and
+document date. If a doc is trashed, it stays put for the next 30 days but
+disappears from search results, after which everything about the doc gets
+permanently deleted.
+
+What Docovia doesn't provide is any access control. If you can access Docovia,
+you can access all available docovia.
+
+## Install and Run
+
+Docker is the recommended deployment mechanism for Docovia. The Docker image
+carries everything the pipeline shells out to — ocrmypdf, Tesseract,
 Ghostscript, poppler, qpdf, ImageMagick, LibreOffice — and runs Typesense
 alongside docovia inside the same container. That is deliberate: Typesense keeps
-no state here, because the index is rebuilt from the sidecars on every boot, so
-there is nothing to migrate and bumping it is a rebuild.
+no state here, the index is rebuilt from the sidecars on every boot.
 
 ```sh
+# From Docovia git repo
 docker build -t docovia .
+
+# Create ~/docovia-data and ~/.config/docovia/config
 
 docker run -d --init --name docovia --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
@@ -22,7 +69,8 @@ docker run -d --init --name docovia --restart unless-stopped \
   docovia
 ```
 
-Then http://localhost:8080, and drop files into `~/docovia-data/ingest/`.
+Then http://localhost:8080, drop files into `~/docovia-data/ingest/`, or upload
+via the web interface.
 
 Four details in that command are load-bearing:
 
@@ -50,10 +98,9 @@ filename-derived titles and no tags.
 
 You do **not** need to pass `TYPESENSE_API_KEY`. The entrypoint generates one
 from `/dev/urandom` at start and hands it to both processes through the
-environment — never on the command line, because a container has no process
-table of its own and `ps` on the host would print it in full.
+environment.
 
-### The config file
+### Config
 
 Flat `key = value`, `#` comments. Looked for at `~/.config/docovia/config`,
 then `/etc/docovia/config` (which is where the mount above lands), or wherever
@@ -68,31 +115,35 @@ without them; the uncommented three are a typical prod config in full:
 ```
 # ~/.config/docovia/config           chmod 600 — it holds keys
 
-# ── the model ────────────────────────────────────────────────────────────
-openai_key = sk-...                  # without it: no titles, no tags
-# llm = true                         # false ingests without the model at all
-# llm_model = gpt-5.6-luna
-# enrich_workers = 16                # concurrent model calls; half the cores, min 8
-# ingest_workers = 16                # half the cores, min 8; each spawns ocrmypdf
+# LLM Settings
+openai_key = sk-...           # without it: no titles, no tags
+# llm = true                  # false ingests without the model at all
+# llm_model = gpt-5.6-luna    # defaults to gpt-5.6-luna
+# enrich_workers = 16         # concurrent model calls; defaults to half the cores
 
-# ── login (both or neither; see below) ───────────────────────────────────
-oidc_issuer = https://id.example.com
-oidc_client_id = docovia
+# Doc Processing
+# ingest_workers = 16         # concurrent ocrmypdf calls, defaults to half the cores
+
+# Auth
+# oidc_issuer = https://id.example.com
+# oidc_client_id = docovia
 # oidc_client_secret =               # only for a confidential registration
 
-# ── serving ──────────────────────────────────────────────────────────────
-# listen = 127.0.0.1:8080            # the container's command line passes 0.0.0.0:8080
-# public_origin =                    # e.g. https://docs.example.com, behind a TLS proxy
+# Web
+listen = 127.0.0.1:8080            # the container's command line passes 0.0.0.0:8080
+# public_origin =                    # e.g. https://docovia.example.com, behind a TLS proxy
+
+# Data
 # data = /home/you/docovia-data      # the container's command line passes /data
                                      # (no ~ expansion — spell paths out)
 # pdf_passwords =                    # default <data>/passwords
 
-# ── typesense (the container wires these itself) ─────────────────────────
+# Typesense (Optional)
 # typesense_url = http://localhost:8108
 # typesense_key = docovia-dev-key
 # collection = documents             # give a second instance its own
 
-# ── development ──────────────────────────────────────────────────────────
+# Dev Mode
 # dev = false                        # reload templates and static from disk
 ```
 
@@ -104,11 +155,33 @@ nothing there, and the same file therefore serves a native dev run unchanged.
 but put them here: argv is public — `ps` prints it to every user on the
 machine, and `docker inspect` keeps it for the life of the container.
 
+### Note about LLM Enrichment
+
+Docovia supports OpenAI for LLM enrichment because the Luna model is remarkably
+cheap: $0.20/M tokens in, $1.20/M out as of Aug '26. Docovia truncates (from
+middle, leaving head and tail intact) and sends a doc's extracted text and gets
+metadata: title, date, tags, and summary back. It does NOT send the doc to be
+OCR'd by LLM which would be more expensive. Instead, it relies entirely on local
+tools for text extraction.
+
+Docovia stores the LLM tokens in, out and cost in each doc's JSON sidecar. So
+it's able to accurately tell how much it spent on processing the docs. With this
+mechanism, after processing 8.5K docs, I'm seeing an average cost of 1/10th of a
+cent per doc, overall costing me ~$10, as per Docovia's status page. Not bad!
+
+The docs become searchable the moment they're processed, even before LLM runs.
+So LLM enrichment can be turned off as well, in which case, the doc would remain
+with the original file name as the title, no doc date, tags or summary. All of
+those fields, except summary, can be manually edited at any time.
+
 ### Login, via OIDC
 
 Set `oidc_issuer` and `oidc_client_id` and every request requires login; set
 neither and behavior is exactly the pre-OIDC arrangement, loopback warning
-included. With a provider like [Pocket ID](https://pocket-id.org):
+included. Any OIDC provider works; the one I run and recommend is
+[Pocket ID](https://pocket-id.org) — a single small container, passkey-only
+so there are no passwords to phish or reuse, and per-app allowed groups to
+decide who gets in. To wire it up:
 
 1. Create an OIDC client there. **Public client** with PKCE — no secret needed.
 2. Register the callback URL: `http://your-host:8080/auth/callback` (one per
@@ -121,6 +194,40 @@ not docovia's; there is no user table here. Sessions are HMAC-signed cookies,
 30 days, renewed by use; signing out clears only docovia's session, so with
 the issuer's own session still alive, signing back in is one passkey tap.
 Deleting `<data>/session.key` signs everyone out at once.
+
+### TLS, via Caddy
+
+OIDC answers who is asking; TLS keeps the documents — and the session cookie —
+private on the wire. For production, I recommend putting
+[Caddy](https://caddyserver.com) in front. It obtains
+and renews SSL certs from Let's Encrypt automatically. The entire Caddyfile:
+
+```
+docovia.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+That is not abbreviated. By default Caddy redirects HTTP to HTTPS, passes the
+`Host` header through, and adds `X-Forwarded-Proto` — which are exactly the
+three things Docovia wants from a proxy. The OIDC callback derives itself as
+`https://docovia.example.com/auth/callback` (register that one in Pocket ID) and
+the session cookie turns `Secure` without being told. With nginx or Traefik
+you get to configure those headers by hand.
+
+Two details close the loop. Keep the container published to `127.0.0.1:8080`
+as in the run command above, so Caddy's port 443 is the only door in from
+outside. And set
+
+```
+public_origin = https://docovia.example.com
+```
+
+in the config, which the cross-site request guard uses as its `Origin`
+fallback for browsers too old to send `Sec-Fetch-Site`.
+
+Pocket ID for who, Caddy for the wire, loopback so the proxy is the only way
+in — that trio is the production setup.
 
 ### Checking it came up
 
@@ -140,23 +247,6 @@ listening on http://0.0.0.0:8080
 If a line reads `no openai_key in the config`, the config mount did not land.
 If `indexed 0` is wrong for your archive, neither did the data mount.
 
-### Settings worth knowing
-
-Each is a flag and a config key; the flag spelling is shown. Everything after
-the image name is passed to docovia, replacing the default
-`-data /data -listen 0.0.0.0:8080`.
-
-| flag | default | |
-|---|---|---|
-| `-config` | `~/.config/docovia/config`, then `/etc/docovia/config` | Flag only, for obvious reasons. |
-| `-ingest-workers` | half the cores, min 8 | Ingest workers. Each spawns ocrmypdf with `--jobs 2`, so the real thread count is about twice this. |
-| `-enrich-workers` | half the cores, min 8 | Concurrent model calls. The same figure as `-ingest-workers` for an unrelated reason: OCR is CPU-bound, a model call is latency held down by the API's request allowance. |
-| `-llm` | `true` | `-llm=false` ingests without calling the model at all. |
-| `-llm-model` | `gpt-5.6-luna` | |
-| `-oidc-issuer`, `-oidc-client-id` | — | Both or neither; see Login above. |
-| `-public-origin` | — | e.g. `https://docs.example.com`, for the cross-site check when behind a proxy. |
-| `-pdf-passwords` | `<data>/passwords` | Candidates tried against encrypted PDFs, one per line. |
-
 ### The archive on disk
 
 ```
@@ -171,9 +261,42 @@ the image name is passed to docovia, replacing the default
   session.key   0600, signs login cookies; delete it to sign everyone out
 ```
 
-Back up `originals/` and `docs/`; `archive/` and `thumbs/` are derived and cost
-only a re-OCR to rebuild. Restoring is `restic restore` and a start — the boot
-replay rebuilds the index by itself.
+Back up the entire data directory. You could save space by backing up only
+`originals`, `docs` and `passwords` — search and metadata restore whole from
+the sidecars — but every document's PDF view and thumbnail would then be gone
+until you hit Reprocess on it, which also re-runs the model. Derived data
+costs about as much as the originals; back it all up.
+
+Use [restic](https://restic.net): it encrypts everything client-side before
+upload and deduplicates, so the nightly run ships only what changed. One-time
+setup — create a Backblaze B2 bucket and an application key scoped to it, put
+a strong password in `~/.config/docovia/restic-pass` (chmod 600), then run
+`restic init` with the same variables as below. That password *is* the
+encryption: keep a copy of it somewhere that is not this machine, or the
+backup is noise.
+
+```sh
+#!/bin/sh -e
+# ~/bin/docovia-backup — nightly, from cron or a systemd timer
+export RESTIC_REPOSITORY=s3:s3.us-west-004.backblazeb2.com/your-bucket
+export RESTIC_PASSWORD_FILE=$HOME/.config/docovia/restic-pass
+export AWS_ACCESS_KEY_ID=your-b2-key-id        # B2 calls it keyID
+export AWS_SECRET_ACCESS_KEY=your-b2-app-key   # and applicationKey
+
+restic backup $HOME/docovia-data
+restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune
+```
+
+The S3 endpoint is on your bucket's page in the B2 console — `us-west-004`
+above is just an example. A crontab line to run it at 3am:
+
+```
+0 3 * * * $HOME/bin/docovia-backup
+```
+
+Restoring is two steps: `restic restore latest --target /` puts the directory
+back where it was, and starting the container does the rest — the index
+rebuilds from the sidecars on boot, so there is no import step to remember.
 
 ## Developing
 
