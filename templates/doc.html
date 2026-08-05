@@ -77,10 +77,9 @@
             </button>
           </form>
         {{else}}
-          {{/* The listing rides along on the action, because trashing ends the
-               reason to be on this page: the handler sends you back to the
-               results you came from, and it can only do that if it is told
-               which ones they were. */}}
+          {{/* The listing rides along on the action, because trashing moves
+               you on to the next document in it — and the handler can only
+               find that neighbour if it is told which listing this was. */}}
           <form method="post" action="/doc/{{$d.ID}}/trash{{$.FilterQuery}}" data-confirms="trash"
                 onsubmit="return confirm('Move {{docCode $d.ID}} to the trash? It is purged after 30 days.')">
             <button type="submit" class="tool danger" title="Move to trash">

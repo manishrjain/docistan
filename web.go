@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -1590,6 +1591,17 @@ func (a *App) setTrashed(w http.ResponseWriter, r *http.Request, trash bool) {
 	if !ok {
 		return
 	}
+	// Where to land is decided now, while this document still holds its place
+	// in the listing — one write later it is out of the index and its
+	// neighbours are unfindable. Trashing during a review should keep the
+	// review moving: the next document, the previous at the end of the
+	// listing, and only when this was the last one left, the listing itself.
+	var onward string
+	if trash && !wantsJSON(r) {
+		if nav := a.docNav(r.Context(), parseQuery(r.URL.Query()), doc.ID); nav != nil {
+			onward = cmp.Or(nav.Next, nav.Prev)
+		}
+	}
 	if trash {
 		doc.Trash(time.Now())
 	} else {
@@ -1607,14 +1619,16 @@ func (a *App) setTrashed(w http.ResponseWriter, r *http.Request, trash bool) {
 		writeJSON(w, map[string]any{"trashed": doc.Trashed(), "delete_after_ts": doc.DeleteAfterTS})
 		return
 	}
-	// Trashing is the end of the reason to be reading this document, so it
-	// returns to the listing it was opened from — same filters, same page.
-	// Restoring is the opposite: you are putting it back to look at it, so
-	// that one stays put. The listing is rebuilt from the filters the form
-	// carried rather than followed as a URL, so the only thing that can come
-	// back out is a listing.
+	// Trashing moves on to the neighbour chosen above, or the listing when
+	// there was none. Restoring is the opposite: you are putting the document
+	// back to look at it, so that one stays put. Both destinations are built
+	// here from the filters the form carried, never followed as a URL, so the
+	// only places this can land are a document and a listing.
 	if trash {
-		http.Redirect(w, r, page{Query: parseQuery(r.URL.Query())}.BackLink(), http.StatusSeeOther)
+		if onward == "" {
+			onward = page{Query: parseQuery(r.URL.Query())}.BackLink()
+		}
+		http.Redirect(w, r, onward, http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)
