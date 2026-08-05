@@ -105,16 +105,19 @@ func modelPriced(model string) bool {
 	return ok
 }
 
-// applyUsage records what a call cost on the document that caused it. Tokens
-// are replaced because they describe the run that just happened; cents are
-// added because the money really was spent each time. A call that never
-// reached the model reports no tokens and must leave the previous run's
-// figures alone rather than blanking them.
+// applyUsage records what a call cost on the document that caused it. All three
+// figures accumulate, because all three describe money that was spent: a re-tag
+// pays for its tokens as surely as it pays its cents, and replacing the counts
+// threw away everything the earlier runs had cost.
+//
+// A call that never reached the model reports no tokens and must leave the
+// running totals alone rather than blanking them.
 func applyUsage(doc *Doc, model string, used Usage) {
 	if used.In == 0 && used.Out == 0 {
 		return
 	}
-	doc.LLMIn, doc.LLMOut = used.In, used.Out
+	doc.LLMIn += used.In
+	doc.LLMOut += used.Out
 	doc.LLMCents += llmCents(model, used)
 }
 

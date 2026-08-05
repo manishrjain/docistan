@@ -80,6 +80,65 @@ type App struct {
 	// enrichment queue and request handlers all write to that one file, and
 	// two lines interleaved are two lines lost.
 	journalMu sync.Mutex
+
+	// spend is what each document has cost the model, by id — the only
+	// per-document map this process keeps, and it exists because the index
+	// cannot answer the question.
+	//
+	// It used to: a facet on llm_cents, summed by Typesense. But facet stats
+	// are computed over the facet values it kept rather than over the matching
+	// documents, and with max_facet_values at 1 a thousand documents reported
+	// the total of two of them — half a percent of the real figure, with no
+	// error anywhere. Raising the cap only moves the cliff to however many
+	// distinct values the next archive has.
+	//
+	// One entry per document holding absolutes, so a re-tag overwrites rather
+	// than adds and nothing can drift. Eight thousand documents is a few
+	// hundred kilobytes and a sum of eight thousand floats when somebody opens
+	// the status page.
+	spendMu sync.Mutex
+	spend   map[int]docSpend
+}
+
+// docSpend is what one document has cost, over every call ever made for it.
+// All three accumulate on the document, so summing them here gives the whole
+// archive's spend rather than the sum of its most recent runs.
+type docSpend struct {
+	In, Out int64
+	Cents   float64
+}
+
+// noteSpend records what a document has cost, replacing whatever was there.
+func (a *App) noteSpend(d *Doc) {
+	a.spendMu.Lock()
+	defer a.spendMu.Unlock()
+	if d.LLMIn == 0 && d.LLMOut == 0 && d.LLMCents == 0 {
+		delete(a.spend, d.ID)
+		return
+	}
+	a.spend[d.ID] = docSpend{In: d.LLMIn, Out: d.LLMOut, Cents: d.LLMCents}
+}
+
+// forgetSpend drops a document that has left the archive. The money was still
+// spent, but the document is gone and counting it would be counting a ghost —
+// the same reason the index drops it.
+func (a *App) forgetSpend(id int) {
+	a.spendMu.Lock()
+	defer a.spendMu.Unlock()
+	delete(a.spend, id)
+}
+
+// ArchiveSpend adds it all up, fresh each time rather than kept as a running
+// total: the sum of a map cannot drift from the map.
+func (a *App) ArchiveSpend() (in, out int64, cents float64, docs int) {
+	a.spendMu.Lock()
+	defer a.spendMu.Unlock()
+	for _, s := range a.spend {
+		in += s.In
+		out += s.Out
+		cents += s.Cents
+	}
+	return in, out, cents, len(a.spend)
 }
 
 func main() {
@@ -133,7 +192,7 @@ func run(cfg Config) error {
 	cfg.PasswordFile = resolvePasswordFile(cfg.PasswordFile, store)
 
 	search := NewSearch(cfg.TypesenseURL, cfg.TypesenseKey, cfg.Collection)
-	app := &App{cfg: cfg, store: store, search: search}
+	app := &App{cfg: cfg, store: store, search: search, spend: map[int]docSpend{}}
 
 	passwords, err := pdfPasswords(cfg.PasswordFile)
 	if err != nil {
@@ -326,11 +385,16 @@ func (a *App) persist(ctx context.Context, doc *Doc) error {
 	if err != nil {
 		return err
 	}
+	// The spend map tracks the index: a document that belongs in one belongs in
+	// the other, and this is the single path both go through, so they cannot
+	// come to disagree.
 	if indexOpFor(doc) == indexRemove {
+		a.forgetSpend(doc.ID)
 		return retryUntil(ctx, retryInitial, retryMax, fmt.Sprintf("doc %d: removing from index", doc.ID), func() error {
 			return a.search.Delete(ctx, doc.ID)
 		})
 	}
+	a.noteSpend(doc)
 	return retryUntil(ctx, retryInitial, retryMax, fmt.Sprintf("doc %d: indexing", doc.ID), func() error {
 		return a.search.Upsert(ctx, doc)
 	})
@@ -459,6 +523,9 @@ func (a *App) replaySidecars(ctx context.Context) (indexed int, unfinished []int
 		if d.Status == StatusReady && !d.Enriched && d.Content != "" {
 			a.enrichq.Add(d.ID)
 		}
+		// What this document has cost, on the one pass that already has every
+		// sidecar open. Tombstones returned above, so they are not counted.
+		a.noteSpend(d)
 		batch = append(batch, d)
 		if len(batch) >= batchSize {
 			return flush()

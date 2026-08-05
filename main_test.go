@@ -803,6 +803,102 @@ func TestActiveJobsExcludesWaiting(t *testing.T) {
 	}
 }
 
+// The archive's spend used to come from a Typesense facet on llm_cents, and
+// facet stats sum the facet values Typesense kept rather than the matching
+// documents: a thousand documents reported the total of two, half a percent of
+// the truth, with nothing anywhere reporting an error. It is counted here now,
+// one entry per document.
+func TestArchiveSpendSumsEveryDocument(t *testing.T) {
+	a := &App{spend: map[int]docSpend{}}
+	var wantCents float64
+	for id := 1; id <= 500; id++ {
+		d := &Doc{ID: id, LLMIn: int64(1000 + id), LLMOut: 400, LLMCents: 0.21}
+		a.noteSpend(d)
+		wantCents += d.LLMCents
+	}
+	in, out, cents, docs := a.ArchiveSpend()
+	if docs != 500 {
+		t.Errorf("docs = %d, want 500", docs)
+	}
+	if want := int64(500*1000 + (500 * 501 / 2)); in != want {
+		t.Errorf("in = %d, want %d", in, want)
+	}
+	if out != 500*400 {
+		t.Errorf("out = %d, want %d", out, 500*400)
+	}
+	if diff := cents - wantCents; diff > 0.001 || diff < -0.001 {
+		t.Errorf("cents = %v, want %v", cents, wantCents)
+	}
+}
+
+// A re-tag spends tokens as surely as it spends money, so both accumulate on
+// the document and both reach the archive's totals. The tokens used to be
+// replaced, which meant a reprocessed document forgot what its earlier runs had
+// cost and the archive reported the sum of last runs rather than of all of them.
+func TestArchiveSpendFollowsARetag(t *testing.T) {
+	a := &App{spend: map[int]docSpend{}}
+	doc := &Doc{ID: 1}
+	applyUsage(doc, "gpt-5.6-luna", Usage{In: 2000, Out: 500})
+	a.noteSpend(doc)
+	firstCents := doc.LLMCents
+
+	applyUsage(doc, "gpt-5.6-luna", Usage{In: 3000, Out: 600})
+	a.noteSpend(doc)
+
+	in, out, cents, docs := a.ArchiveSpend()
+	if docs != 1 {
+		t.Errorf("docs = %d, want 1 — a re-tag is not a second document", docs)
+	}
+	if in != 5000 || out != 1100 {
+		t.Errorf("tokens = %d/%d, want 5000/1100 — both runs, not just the last", in, out)
+	}
+	if cents <= firstCents {
+		t.Errorf("cents = %v, want more than the first run's %v", cents, firstCents)
+	}
+}
+
+// A call that never reached the model reports nothing, and must not blank what
+// the document has already spent.
+func TestApplyUsageIgnoresAnUnbilledCall(t *testing.T) {
+	doc := &Doc{ID: 1}
+	applyUsage(doc, "gpt-5.6-luna", Usage{In: 2000, Out: 500})
+	before := *doc
+	applyUsage(doc, "gpt-5.6-luna", Usage{})
+	if doc.LLMIn != before.LLMIn || doc.LLMOut != before.LLMOut || doc.LLMCents != before.LLMCents {
+		t.Errorf("an unbilled call changed the totals: %d/%d/%v -> %d/%d/%v",
+			before.LLMIn, before.LLMOut, before.LLMCents, doc.LLMIn, doc.LLMOut, doc.LLMCents)
+	}
+}
+
+// A purged document leaves the index, and its spend leaves with it — otherwise
+// "documents tagged" counts ghosts.
+func TestArchiveSpendForgetsPurged(t *testing.T) {
+	a := &App{spend: map[int]docSpend{}}
+	a.noteSpend(&Doc{ID: 1, LLMIn: 100, LLMCents: 0.1})
+	a.noteSpend(&Doc{ID: 2, LLMIn: 200, LLMCents: 0.2})
+	a.forgetSpend(1)
+
+	in, _, _, docs := a.ArchiveSpend()
+	if docs != 1 || in != 200 {
+		t.Errorf("after purging DOC-1: docs=%d in=%d, want 1 and 200", docs, in)
+	}
+}
+
+// A document the model never touched is not a tagged document.
+func TestArchiveSpendIgnoresUntouched(t *testing.T) {
+	a := &App{spend: map[int]docSpend{}}
+	a.noteSpend(&Doc{ID: 1})
+	if _, _, _, docs := a.ArchiveSpend(); docs != 0 {
+		t.Errorf("docs = %d, want 0", docs)
+	}
+	// And one that had spend and was somehow cleared drops out again.
+	a.noteSpend(&Doc{ID: 2, LLMIn: 10, LLMCents: 0.1})
+	a.noteSpend(&Doc{ID: 2})
+	if _, _, _, docs := a.ArchiveSpend(); docs != 0 {
+		t.Errorf("docs = %d after clearing, want 0", docs)
+	}
+}
+
 // A title is free text from a model or a person, and it becomes a filename on
 // someone's disk. These are the shapes that break that.
 func TestDownloadName(t *testing.T) {
@@ -1385,7 +1481,7 @@ func TestSidecarStoresDateNotTimestamp(t *testing.T) {
 // place that keeps them apart: the tokens describe the run whose title and tags
 // are currently on display, so a re-tag replaces them, while the cents are the
 // bill, so a re-tag adds to them — the money really was spent twice. A call
-// that never reached the model reports nothing and must leave both alone,
+// that never reached the model reports nothing and must leave them alone,
 // otherwise a network blip would blank the tokens of a document that was
 // tagged perfectly well an hour ago.
 func TestApplyUsage(t *testing.T) {
@@ -1401,11 +1497,12 @@ func TestApplyUsage(t *testing.T) {
 		t.Fatalf("first run recorded %v cents, want a real cost", first)
 	}
 
-	// A second, cheaper run: the tokens are now the second run's alone, but the
-	// bill covers both.
+	// A second, cheaper run. Both the tokens and the bill cover both runs: a
+	// re-tag spent those tokens as surely as it spent the money, and replacing
+	// them lost everything the first run had cost.
 	applyUsage(doc, model, Usage{In: 500, Out: 100})
-	if doc.LLMIn != 500 || doc.LLMOut != 100 {
-		t.Errorf("second run left %d/%d tokens, want the latest 500/100", doc.LLMIn, doc.LLMOut)
+	if doc.LLMIn != 1500 || doc.LLMOut != 300 {
+		t.Errorf("second run left %d/%d tokens, want both runs summed (1500/300)", doc.LLMIn, doc.LLMOut)
 	}
 	if want := first + llmCents(model, Usage{In: 500, Out: 100}); !closeEnough(doc.LLMCents, want) {
 		t.Errorf("cents = %v, want both runs summed (%v)", doc.LLMCents, want)
@@ -1423,8 +1520,8 @@ func TestApplyUsage(t *testing.T) {
 	// the money is unknown, and unknown is zero rather than a guess.
 	unknown := &Doc{LLMIn: 10, LLMOut: 20, LLMCents: 5}
 	applyUsage(unknown, "gpt-9-imaginary", Usage{In: 700, Out: 300})
-	if unknown.LLMIn != 700 || unknown.LLMOut != 300 {
-		t.Errorf("unpriced model left %d/%d tokens, want 700/300", unknown.LLMIn, unknown.LLMOut)
+	if unknown.LLMIn != 710 || unknown.LLMOut != 320 {
+		t.Errorf("unpriced model left %d/%d tokens, want them added on (710/320)", unknown.LLMIn, unknown.LLMOut)
 	}
 	if unknown.LLMCents != 5 {
 		t.Errorf("unpriced model changed the recorded cents to %v, want the earlier 5", unknown.LLMCents)

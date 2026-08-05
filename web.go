@@ -521,8 +521,8 @@ func (a *App) taggingStage(doc *Doc) Stage {
 	case doc.Enriched:
 		s.State = "done"
 		s.Name += " — " + a.cfg.LLMModel
-		// Tokens from the last run, cost from every run — that is what the
-		// document records, and the line says both without explaining itself.
+		// Everything this document has cost, over every run — which is what it
+		// records, so the line says it without explaining itself.
 		if doc.LLMIn > 0 {
 			s.Cost = fmt.Sprintf("%s in · %s out", commaNum(doc.LLMIn), commaNum(doc.LLMOut))
 			if c := centsStr(a.docCents(doc)); c != "" {
@@ -2362,14 +2362,11 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// archive has ever seen rather than only this one — and because each
 		// document banked its own cost when it was tagged, this is recorded
 		// spend rather than today's prices reapplied to old tokens.
-		if allIn, allOut, allCents, docs, err := a.search.TokenTotals(r.Context()); err != nil {
-			logf("token totals: %v", err)
-		} else {
-			spend.AllIn, spend.AllOut, spend.AllDocs = allIn, allOut, docs
-			spend.AllCost = allCents / 100
-			if docs > 0 {
-				spend.AllPer = spend.AllCost / float64(docs)
-			}
+		allIn, allOut, allCents, docs := a.ArchiveSpend()
+		spend.AllIn, spend.AllOut, spend.AllDocs = allIn, allOut, docs
+		spend.AllCost = allCents / 100
+		if docs > 0 {
+			spend.AllPer = spend.AllCost / float64(docs)
 		}
 		spend.Pending, spend.Done, spend.Failed = a.enrichq.Stats()
 		remaining, resetIn, stopped := a.enricher.Budget()

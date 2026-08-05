@@ -108,11 +108,15 @@ func (s *Search) schema() *api.CollectionSchema {
 			// Indexed rather than `stored`: every query filters on this, and
 			// `stored` sets index:false, which makes a field unfilterable.
 			f("delete_after_ts", "int64"),
-			// Faceted purely for the stats Typesense returns with a facet, which
-			// is what lets the archive total outlive the process.
-			f("llm_in", "int64", facet),
-			f("llm_out", "int64", facet),
-			f("llm_cents", "float", facet),
+			// Stored, not indexed. These were faceted so the archive's total
+			// could be read off Typesense's facet stats — which turned out to
+			// sum the facet values it kept rather than the matching documents,
+			// so the total was wrong by two orders of magnitude. Counting them
+			// in the process instead leaves these as what they always were on
+			// the page: numbers to show on a document, one document at a time.
+			f("llm_in", "int64", stored),
+			f("llm_out", "int64", stored),
+			f("llm_cents", "float", stored),
 			f("created_date", "string", stored),
 			f("page_count", "int32", stored),
 			f("file_size", "int64", stored),
@@ -785,48 +789,6 @@ func (s *Search) idsMatching(ctx context.Context, filter string) ([]int, error) 
 			return out, nil
 		}
 	}
-}
-
-// TokenTotals sums model usage across every indexed document. Typesense
-// returns sum/avg alongside a numeric facet, so this is one cheap query rather
-// than a scan — and because it reads the documents rather than a counter in
-// memory, the figure survives a restart and counts work done by earlier runs.
-//
-// The cents are what each document recorded at the time it was tagged, so the
-// total is spend that actually happened rather than today's prices applied to
-// yesterday's tokens: it stays correct even after the price table changes.
-func (s *Search) TokenTotals(ctx context.Context) (in, out int64, cents float64, docs int, err error) {
-	res, err := s.client.Collection(s.collectionName).Documents().Search(ctx, &api.SearchCollectionParams{
-		Q:              pointer.String("*"),
-		QueryBy:        pointer.String("title"),
-		FilterBy:       pointer.String("llm_in:>0"),
-		FacetBy:        pointer.String("llm_in,llm_out,llm_cents"),
-		MaxFacetValues: pointer.Int(1),
-		PerPage:        pointer.Int(0),
-	})
-	if err != nil {
-		return 0, 0, 0, 0, err
-	}
-	if res.Found != nil {
-		docs = *res.Found
-	}
-	if res.FacetCounts == nil {
-		return 0, 0, 0, docs, nil
-	}
-	for _, fc := range *res.FacetCounts {
-		if fc.FieldName == nil || fc.Stats == nil || fc.Stats.Sum == nil {
-			continue
-		}
-		switch *fc.FieldName {
-		case "llm_in":
-			in = int64(*fc.Stats.Sum)
-		case "llm_out":
-			out = int64(*fc.Stats.Sum)
-		case "llm_cents":
-			cents = *fc.Stats.Sum
-		}
-	}
-	return in, out, cents, docs, nil
 }
 
 // Get fetches one document by id. This is a direct lookup, not a search.

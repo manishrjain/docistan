@@ -159,11 +159,11 @@ type Doc struct {
 	Signed    bool   `json:"signed"`
 	Enriched  bool   `json:"enriched"`
 	Content   string `json:"content"`
-	// What the model cost for this one document. The tokens are the most
-	// recent call's, so they describe the run whose title and tags are on
-	// display; the cents are cumulative across every call ever made for this
-	// document, because a re-tag really did spend the money a second time.
-	// Tokens describe the last run; cents remember every run.
+	// What the model has cost this one document, over every call ever made for
+	// it. All three accumulate: the tokens used to be replaced on each run, so
+	// a reprocessed document forgot everything the earlier runs had spent and
+	// the archive's totals were the sum of last runs rather than of all of
+	// them.
 	LLMIn    int64   `json:"llm_in,omitempty"`
 	LLMOut   int64   `json:"llm_out,omitempty"`
 	LLMCents float64 `json:"llm_cents,omitempty"`
