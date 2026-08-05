@@ -288,6 +288,23 @@ func (p *Pipeline) Drain(limit time.Duration) {
 // ActiveJobs returns a snapshot of what is being worked on for the status page.
 // Only the active ones: the waiting are in the same map now, and on a large
 // import there are thousands of them with nothing to say beyond their names.
+// Backlog is how many files have been seen but not yet picked up. The status
+// page listed only the jobs being worked on, which is a fixed handful however
+// much is queued behind them — during an import of eight thousand documents it
+// looked exactly the same as an import of twenty, and the only way to tell
+// them apart was to count the ingest directory by hand.
+func (p *Pipeline) Backlog() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var n int
+	for _, j := range p.jobs {
+		if j.State == jobWaiting {
+			n++
+		}
+	}
+	return n
+}
+
 func (p *Pipeline) ActiveJobs() []Job {
 	p.mu.Lock()
 	defer p.mu.Unlock()

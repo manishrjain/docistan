@@ -4,26 +4,34 @@
 <div class="page">
   <h2>Status</h2>
 
-  {{with .Spend}}
-    <section>
-      <h6>Tagging</h6>
-      {{if .Stopped}}<p class="flash bad">Enrichment stopped: {{.Stopped}}</p>{{end}}
-      <div class="stats">
-        <div class="stat"><span class="k">Waiting</span><span class="v">{{.Pending}}</span></div>
-        <div class="stat"><span class="k">Tagged this session</span><span class="v">{{.Done}}</span></div>
-        <div class="stat"><span class="k">Failed</span><span class="v">{{.Failed}}</span></div>
+  {{/* Both queues together, because a document crosses them in order and
+       "how much is left" is one question, not two. Outside the .Spend block:
+       the local pipeline runs whether or not there is a key to tag with. */}}
+  <section>
+    <h6>Queues</h6>
+    {{with .Spend}}{{if .Stopped}}<p class="flash bad">Enrichment stopped: {{.Stopped}}</p>{{end}}{{end}}
+    <div class="stats">
+      <div class="stat"><span class="k">Waiting for processing</span><span class="v">{{commaNum .Backlog}}</span></div>
+      <div class="stat"><span class="k">Being processed</span><span class="v">{{len .Jobs}}</span></div>
+      {{with .Spend}}
+        <div class="stat"><span class="k">Waiting for tagging</span><span class="v">{{commaNum .Pending}}</span></div>
+        <div class="stat"><span class="k">Failed to tag</span><span class="v">{{commaNum .Failed}}</span></div>
         {{if ge .Budget 0}}
           <div class="stat">
             <span class="k">Requests left{{if .ResetIn}} · resets in {{.ResetIn}}{{end}}</span>
             <span class="v">{{.Budget}}</span>
           </div>
         {{end}}
-      </div>
+      {{end}}
+    </div>
+  </section>
 
+  {{with .Spend}}
+    <section>
       {{/* Summed from the documents themselves, so it covers every run rather
            than only this one — which is the number a backfill is judged on. */}}
       {{if .AllDocs}}
-        <h6 style="margin-top:24px">Spend across the archive</h6>
+        <h6>Spend across the archive</h6>
         <div class="stats">
           {{/* Each document banked its own cost when it was tagged, so this is
                what was really spent rather than today's prices reapplied. It is

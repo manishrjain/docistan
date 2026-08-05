@@ -709,6 +709,38 @@ func TestPipelineEnqueueIsIdempotent(t *testing.T) {
 	}
 }
 
+// Backlog is what the status page shows during an import, so it has to mean
+// "still to come" rather than "in the map" — a claimed job is being worked on,
+// not waiting, and counting it in both places would overstate the queue for as
+// long as the run took.
+func TestPipelineBacklogCountsOnlyWaiting(t *testing.T) {
+	p := NewPipeline(&App{})
+	for _, n := range []string{"a.pdf", "b.pdf", "c.pdf"} {
+		p.Enqueue("/data/ingest/" + n)
+	}
+	if got := p.Backlog(); got != 3 {
+		t.Errorf("backlog = %d, want 3", got)
+	}
+
+	j, ok := p.claim()
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+	if got := p.Backlog(); got != 2 {
+		t.Errorf("backlog with one claimed = %d, want 2", got)
+	}
+	if got := len(p.ActiveJobs()); got != 1 {
+		t.Errorf("active = %d, want 1", got)
+	}
+
+	// A job held back for a retry is waiting again: it has to reappear in the
+	// backlog, or a file that kept colliding would vanish from both numbers.
+	p.retryLater(j)
+	if got := p.Backlog(); got != 3 {
+		t.Errorf("backlog after retryLater = %d, want 3", got)
+	}
+}
+
 // The same edge the enrich queue has: retryLater puts the job back from inside
 // process, and release runs immediately afterwards. If release deleted whatever
 // was under the key, the contended file would be dropped — silently, and only

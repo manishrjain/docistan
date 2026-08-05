@@ -623,8 +623,12 @@ type page struct {
 	Enriching map[int]bool
 	// Search carries the term that led here, so the PDF viewer can jump
 	// straight to it instead of making the reader find it twice.
-	Search  string
-	Jobs    []Job
+	Search string
+	Jobs   []Job
+	// Backlog is what is queued behind Jobs. Its own field rather than part of
+	// SpendSummary because it describes the local pipeline, which runs whether
+	// or not there is an API key to enrich anything with.
+	Backlog int
 	Journal []JournalEvent
 	Failed  []Hit
 	Flash   []Flash
@@ -647,7 +651,6 @@ type SpendSummary struct {
 	AllPer  float64
 
 	Pending int
-	Done    int
 	Failed  int
 	Budget  int
 	ResetIn string
@@ -2347,7 +2350,10 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if docs > 0 {
 			spend.AllPer = spend.AllCost / float64(docs)
 		}
-		spend.Pending, spend.Done, spend.Failed = a.enrichq.Stats()
+		// The queue's "done" count is deliberately dropped: it counted only
+		// what this process had tagged since it started, and a page that
+		// cannot say when the run began cannot say what the number is of.
+		spend.Pending, _, spend.Failed = a.enrichq.Stats()
 		remaining, resetIn, stopped := a.enricher.Budget()
 		spend.Budget, spend.Stopped = remaining, stopped
 		if resetIn > 0 {
@@ -2355,8 +2361,9 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.render(w, "status.html", page{
-		Title: "Status",
-		Jobs:  a.pipeline.ActiveJobs(),
+		Title:   "Status",
+		Jobs:    a.pipeline.ActiveJobs(),
+		Backlog: a.pipeline.Backlog(),
 		// Bounded at both ends: this page is polled every few seconds while
 		// anything is processing, so it reads the tail of the file rather than
 		// the file.

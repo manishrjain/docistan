@@ -652,7 +652,17 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 		return
 	}
 
-	known, _ := q.app.search.Vocabulary(ctx, "tags", 50)
+	// 300 rather than 50, because the point of showing the vocabulary is to
+	// stop the model inventing a near-duplicate, and a tag it is never shown
+	// is one it cannot reuse. Measured on the archive at 1,052 documents: only
+	// 192 of 779 tags had been used more than once, and the pairs that had
+	// fragmented — 1040/form1040, 540/form540, grant/grants — all sat far
+	// below rank 50. The list costs ~800 tokens against a 2,900-token prompt,
+	// so a run over the whole archive pays about a dollar for it. It is capped
+	// rather than sent whole because the vocabulary grows with the archive
+	// (~0.74 new tags per document), and an uncapped list would make the cost
+	// of tagging a document scale with the number of documents already filed.
+	known, _ := q.app.search.Vocabulary(ctx, "tags", 300)
 	// The vocabulary is a facet count of the index, which now carries the
 	// reserved names as well — so the list of tags already in use has to be
 	// filtered before it becomes the list of tags on offer. A model shown
