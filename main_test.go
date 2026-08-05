@@ -1030,6 +1030,7 @@ func TestOIDCLoginFlow(t *testing.T) {
 			"authorization_endpoint": idpURL + "/authorize",
 			"token_endpoint":         idpURL + "/token",
 			"userinfo_endpoint":      idpURL + "/userinfo",
+			"end_session_endpoint":   idpURL + "/logout",
 		})
 	})
 	idp.HandleFunc("GET /authorize", func(w http.ResponseWriter, r *http.Request) {
@@ -1095,6 +1096,25 @@ func TestOIDCLoginFlow(t *testing.T) {
 	direct, _ := http.Get(app.URL + "/auth/callback?code=x&state=y")
 	if direct.StatusCode != http.StatusBadRequest {
 		t.Errorf("bare callback: %d, want 400", direct.StatusCode)
+	}
+
+	// Signing out must end at the issuer's end-session page, not on our own
+	// front page: landing there triggered a login the issuer's still-alive
+	// session answered without asking — sign out, blink, signed back in.
+	noFollow := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	out, err := noFollow.Post(app.URL+"/auth/logout", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loc := out.Header.Get("Location"); loc != idpURL+"/logout?client_id=docovia" {
+		t.Errorf("logout went to %q, want the issuer's end-session endpoint", loc)
+	}
+	// And the cookie is gone: the next request is a stranger's.
+	again, _ := noFollow.Get(app.URL + "/doc/5")
+	if again.StatusCode != http.StatusSeeOther || !strings.Contains(again.Header.Get("Location"), "/auth/login") {
+		t.Errorf("after logout: %d %q, want a fresh login redirect", again.StatusCode, again.Header.Get("Location"))
 	}
 }
 

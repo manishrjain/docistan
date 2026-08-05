@@ -212,6 +212,9 @@ type discovery struct {
 	AuthURL     string `json:"authorization_endpoint"`
 	TokenURL    string `json:"token_endpoint"`
 	UserinfoURL string `json:"userinfo_endpoint"`
+	// EndSessionURL is optional in the spec, so it is allowed to be absent —
+	// logout then falls back to the issuer's own page.
+	EndSessionURL string `json:"end_session_endpoint"`
 }
 
 // discover fetches the issuer's endpoints on first use and keeps them. First
@@ -336,9 +339,18 @@ func (auth *Auth) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 func (auth *Auth) handleLogout(w http.ResponseWriter, r *http.Request) {
 	clearCookie(w, sessionCookie)
-	// Only the local session. The issuer's own session survives, so signing
-	// back in is one tap — that is normal single sign-on, not a bug.
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	// On to the issuer, not back to "/". Landing on our own front page meant
+	// an immediate login redirect, which the issuer's still-alive session
+	// answered without asking — sign out, blink, signed back in. The
+	// end-session endpoint ends the session that was doing that; an issuer
+	// without one still gets the browser, which is at least an honest place
+	// to stop. No post_logout_redirect_uri on purpose: coming back is the
+	// bug this fixes.
+	dest := auth.issuer
+	if disc, err := auth.discover(r.Context()); err == nil && disc.EndSessionURL != "" {
+		dest = disc.EndSessionURL + "?client_id=" + url.QueryEscape(auth.clientID)
+	}
+	http.Redirect(w, r, dest, http.StatusSeeOther)
 }
 
 type claims struct {

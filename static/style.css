@@ -294,9 +294,15 @@ main {
 .brand:hover { color: var(--color-text); }
 
 /* The search field is the one place a 2px ink border is used for emphasis
-   rather than for structure — it is the primary action on the page. */
+   rather than for structure — it is the primary action on the page. Capped
+   rather than edge to edge: in the design the box shares its row with a
+   200px brand and a full identity cluster, and on a sparse topbar an
+   uncapped flex:1 ran the full width and crowded the icons beside it. The
+   leftover space lands between the box and the nav, which is the breathing
+   room the design shows. */
 .searchbox {
   flex: 1;
+  max-width: 700px;
   display: flex;
   min-width: 0;
   border: 2px solid var(--color-text);
@@ -353,9 +359,13 @@ main {
   align-items: center;
   gap: var(--space-2);
   flex: none;
+  /* With the searchbox capped, the leftover width goes here — between the
+     box and the icons — rather than stretching the box to meet them. */
+  margin-left: auto;
 }
 
-/* Icon-square button in the topbar, sized to the mock: 38px, 34 on mobile. */
+/* Icon-square button in the topbar, sized to the mock: 38px, 34 on mobile.
+   Serves both links and buttons, so the button's own chrome is zeroed. */
 .iconbtn {
   display: flex;
   align-items: center;
@@ -363,9 +373,12 @@ main {
   width: 38px;
   height: 38px;
   flex: none;
+  padding: 0;
   border: 1px solid var(--color-divider);
+  background: transparent;
   color: var(--color-neutral-700);
   text-decoration: none;
+  cursor: pointer;
 }
 
 /* The identity: name visible, email as its tooltip. */
@@ -378,7 +391,6 @@ main {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.signout-icon { display: none; }
 
 /* No login configured. Dashed on purpose — provisional, not decoration. */
 .access-chip {
@@ -1768,9 +1780,6 @@ button.pill-plain {
   .iconbtn { width: 34px; height: 34px; }
   .iconbtn svg { width: 16px; height: 16px; }
   .who { display: none; }
-  .signout-label { display: none; }
-  .signout-icon { display: block; }
-  .signout .btn { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; padding: 0; }
   .tool { width: 44px; height: 44px; }
   .pill-x { font-size: 17px; }
   .page { padding: var(--space-4); }
