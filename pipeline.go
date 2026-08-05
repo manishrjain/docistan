@@ -17,38 +17,62 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// Job is the live view of one file moving through the pipeline. It exists only
-// to drive the status page and is deliberately not durable.
+// jobState is where a file is: waiting for a worker, or with one.
+type jobState uint8
+
+const (
+	jobWaiting jobState = iota + 1
+	jobActive
+)
+
+const (
+	// pollInterval is how long a worker with nothing to do waits before looking
+	// again. A worker that just finished something does not wait at all, so
+	// this is only ever the latency on an idle queue.
+	pollInterval = time.Second
+	// retryDelay and maxRetries bound the one case worth waiting on rather than
+	// failing: an identical file already being ingested.
+	retryDelay = 5 * time.Second
+	maxRetries = 12
+)
+
+// Job is one file moving through the pipeline: where it is, how long it has
+// been there, and how many times it has been put back. Not durable — a
+// document interrupted mid-flight is found again by its own sidecar, which
+// still says processing, so this is only ever the live view.
 type Job struct {
 	Path    string
 	Name    string
 	ID      int
 	Stage   string
 	Started time.Time
+
+	State   jobState
+	Retries int
+	// NotBefore holds a contended file back without a goroutine and a timer for
+	// each one: a worker simply does not claim it yet.
+	NotBefore time.Time
 }
 
+// Pipeline is the work still to do, keyed by path.
+//
+// One map, where there used to be a buffered channel of paths and three maps
+// beside it — one for what was in flight, one for what was queued, one counting
+// retries — which between them held the state of a single file in four places
+// and had to agree. The channel is what made that necessary and is also what
+// made it lossy: it held 1024 paths, and Enqueue dropped anything that did not
+// fit, so eight thousand files in the inbox became about a thousand documents
+// and seven thousand log lines. A map has no capacity to exceed.
 type Pipeline struct {
-	app  *App
-	jobs chan string
+	app *App
+	wg  sync.WaitGroup
 
-	wg sync.WaitGroup
-
-	mu     sync.Mutex
-	active map[string]*Job
-	queued map[string]bool
-	// retries counts how often a file has been put back for the same reason,
-	// so contention cannot become a permanent loop.
-	retries map[string]int
+	mu   sync.Mutex
+	jobs map[string]*Job
 }
 
 func NewPipeline(app *App) *Pipeline {
-	return &Pipeline{
-		app:     app,
-		jobs:    make(chan string, 1024),
-		active:  map[string]*Job{},
-		queued:  map[string]bool{},
-		retries: map[string]int{},
-	}
+	return &Pipeline{app: app, jobs: map[string]*Job{}}
 }
 
 func (p *Pipeline) Start(ctx context.Context) error {
@@ -63,24 +87,45 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	return nil
 }
 
-// Enqueue submits a path, ignoring anything already in flight so a duplicate
-// filesystem event can't start the same work twice.
+// Enqueue submits a path, ignoring anything already known so a duplicate
+// filesystem event can't start the same work twice. Nothing is refused: the
+// queue is however many files somebody put in the inbox.
 func (p *Pipeline) Enqueue(path string) {
 	p.mu.Lock()
-	if p.queued[path] {
-		p.mu.Unlock()
+	defer p.mu.Unlock()
+	if p.jobs[path] != nil {
 		return
 	}
-	p.queued[path] = true
-	p.mu.Unlock()
+	p.jobs[path] = &Job{Path: path, Name: filepath.Base(path), State: jobWaiting}
+}
 
-	select {
-	case p.jobs <- path:
-	default:
-		logf("ingest queue full, dropping %s (it will be picked up on restart)", path)
-		p.mu.Lock()
-		delete(p.queued, path)
-		p.mu.Unlock()
+// claim hands a worker the next file that is ready to be worked on, and marks
+// it so no other worker takes it too. Which file that is does not matter —
+// they are all going to be done.
+func (p *Pipeline) claim() (*Job, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	for _, j := range p.jobs {
+		if j.State != jobWaiting || now.Before(j.NotBefore) {
+			continue
+		}
+		j.State = jobActive
+		j.Started = now
+		j.Stage = ""
+		return j, true
+	}
+	return nil, false
+}
+
+// release drops a job its worker has finished with — unless retryLater has
+// already put it back to waiting, in which case it is no longer the worker's
+// to drop and deleting it would throw the retry away.
+func (p *Pipeline) release(j *Job) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.jobs[j.Path] == j && j.State == jobActive {
+		delete(p.jobs, j.Path)
 	}
 }
 
@@ -173,78 +218,54 @@ func waitForStableSize(path string) bool {
 	return false
 }
 
-// retryLater re-queues a file after a pause, for the one case that is worth
+// retryLater puts a file back to waiting after a pause, for the one case worth
 // waiting on rather than failing: an identical file already being ingested.
 // Attempts are counted so a pathological loop cannot outlive the process.
-func (p *Pipeline) retryLater(ctx context.Context, path, name string) {
-	const (
-		delay = 5 * time.Second
-		max   = 12
-	)
+//
+// A timestamp rather than a goroutine and a timer per retry — the worker is
+// already looking at the clock every time it claims.
+func (p *Pipeline) retryLater(j *Job) {
 	p.mu.Lock()
-	n := p.retries[path] + 1
-	p.retries[path] = n
-	p.mu.Unlock()
-
-	if n > max {
-		// Give up by leaving the file where it is. Deleting would be a guess:
+	defer p.mu.Unlock()
+	j.Retries++
+	if j.Retries > maxRetries {
+		// Give up by leaving the file where it is, and by leaving the job
+		// active so release removes it. Deleting the file would be a guess:
 		// unlike the dedup hit, this path has never seen the competing ingest
 		// finish, and that ingest may yet fail and leave nothing behind.
-		logf("%s: still contended after %d attempts, leaving it in the inbox (it will be picked up on restart)", name, max)
+		logf("%s: still contended after %d attempts, leaving it in the inbox (it will be picked up on restart)", j.Name, maxRetries)
 		return
 	}
-	go func() {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(delay):
-		}
-		p.Enqueue(path)
-	}()
+	j.State = jobWaiting
+	j.NotBefore = time.Now().Add(retryDelay)
 }
 
 func (p *Pipeline) worker(ctx context.Context) {
 	defer p.wg.Done()
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		case path := <-p.jobs:
-			p.mu.Lock()
-			before := p.retries[path]
-			p.mu.Unlock()
-
-			p.process(ctx, path)
-
-			p.mu.Lock()
-			delete(p.queued, path)
-			// An unchanged count means process did not put this file back, so
-			// it is resolved and its count has nothing left to guard; dropping
-			// it stops the map growing by one entry per contended file that
-			// later succeeded. A count that did change belongs to a retry still
-			// to come and must survive, or the give-up limit would never be
-			// reached.
-			if p.retries[path] == before {
-				delete(p.retries, path)
-			}
-			p.mu.Unlock()
 		}
+		job, ok := p.claim()
+		if !ok {
+			// Nothing to do. Only an idle worker waits; one that just finished
+			// something comes straight back round for the next file.
+			if !sleepCtx(ctx, pollInterval) {
+				return
+			}
+			continue
+		}
+		p.process(ctx, job)
+		p.release(job)
 	}
 }
 
-// setStage takes the job rather than a job and its own path: the two were
-// passed separately at every call site and had to agree at all of them.
+// setStage records where a job has got to, for the status page. Under the lock
+// because that page reads it from another goroutine.
 func (p *Pipeline) setStage(j *Job, stage string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	j.Stage = stage
-	p.active[j.Path] = j
-}
-
-func (p *Pipeline) clearJob(j *Job) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.active, j.Path)
 }
 
 // Drain waits for workers to finish the document they are on. A document
@@ -264,12 +285,17 @@ func (p *Pipeline) Drain(limit time.Duration) {
 	}
 }
 
-// ActiveJobs returns a snapshot for the status page.
+// ActiveJobs returns a snapshot of what is being worked on for the status page.
+// Only the active ones: the waiting are in the same map now, and on a large
+// import there are thousands of them with nothing to say beyond their names.
 func (p *Pipeline) ActiveJobs() []Job {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make([]Job, 0, len(p.active))
-	for _, j := range p.active {
+	out := make([]Job, 0, len(p.jobs))
+	for _, j := range p.jobs {
+		if j.State != jobActive {
+			continue
+		}
 		out = append(out, *j)
 	}
 	slices.SortFunc(out, func(a, b Job) int { return a.Started.Compare(b.Started) })
@@ -278,11 +304,9 @@ func (p *Pipeline) ActiveJobs() []Job {
 
 // process runs one file through every stage. Stages are idempotent and skip
 // when their output already exists, so a retry costs only the unfinished work.
-func (p *Pipeline) process(ctx context.Context, path string) {
+func (p *Pipeline) process(ctx context.Context, job *Job) {
 	store, search := p.app.store, p.app.search
-	name := filepath.Base(path)
-	job := &Job{Path: path, Name: name, Started: time.Now()}
-	defer p.clearJob(job)
+	path, name := job.Path, job.Name
 
 	fromIngest := filepath.Dir(path) == store.IngestDir()
 
@@ -346,7 +370,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 			// retry is recorded as a duplicate of it, and if it fails the
 			// hash is released and the retry ingests normally.
 			logf("%s: identical bytes already being ingested, retrying shortly", name)
-			p.retryLater(ctx, path, name)
+			p.retryLater(job)
 			return
 		}
 		defer release()

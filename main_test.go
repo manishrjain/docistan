@@ -658,6 +658,151 @@ func TestEnrichQueueNextIsExclusive(t *testing.T) {
 	}
 }
 
+// Eight thousand files in the inbox produced about a thousand documents and
+// seven thousand "ingest queue full, dropping" lines, because the queue was a
+// channel holding 1024 and Enqueue threw away anything that did not fit. A map
+// has no capacity to exceed.
+func TestPipelineQueueDoesNotDrop(t *testing.T) {
+	p := NewPipeline(&App{})
+	const n = 8000
+	for i := range n {
+		p.Enqueue(fmt.Sprintf("/data/ingest/scan_%04d.pdf", i))
+	}
+	p.mu.Lock()
+	got := len(p.jobs)
+	p.mu.Unlock()
+	if got != n {
+		t.Errorf("queued %d of %d", got, n)
+	}
+
+	// And every one of them is claimable, exactly once.
+	seen := map[string]int{}
+	for {
+		j, ok := p.claim()
+		if !ok {
+			break
+		}
+		seen[j.Path]++
+		p.release(j)
+	}
+	if len(seen) != n {
+		t.Errorf("claimed %d distinct files, want %d", len(seen), n)
+	}
+	for path, times := range seen {
+		if times != 1 {
+			t.Fatalf("%s claimed %d times", path, times)
+		}
+	}
+}
+
+// A duplicate filesystem event, or a scan racing the watcher, must not put the
+// same file in twice.
+func TestPipelineEnqueueIsIdempotent(t *testing.T) {
+	p := NewPipeline(&App{})
+	for range 5 {
+		p.Enqueue("/data/ingest/a.pdf")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.jobs) != 1 {
+		t.Errorf("%d jobs, want 1", len(p.jobs))
+	}
+}
+
+// The same edge the enrich queue has: retryLater puts the job back from inside
+// process, and release runs immediately afterwards. If release deleted whatever
+// was under the key, the contended file would be dropped — silently, and only
+// when two identical files arrived together.
+func TestPipelineRetrySurvivesRelease(t *testing.T) {
+	p := NewPipeline(&App{})
+	p.Enqueue("/data/ingest/a.pdf")
+	j, ok := p.claim()
+	if !ok {
+		t.Fatal("nothing to claim")
+	}
+
+	p.retryLater(j) // what process does on a hash collision
+	p.release(j)    // what the worker does next
+
+	p.mu.Lock()
+	still := p.jobs["/data/ingest/a.pdf"]
+	p.mu.Unlock()
+	if still == nil {
+		t.Fatal("the contended file was dropped")
+	}
+	if still.State != jobWaiting {
+		t.Errorf("state = %v, want waiting", still.State)
+	}
+	// And it is held back rather than spun on.
+	if _, ok := p.claim(); ok {
+		t.Error("claimed before the retry delay had passed")
+	}
+
+	// Once the delay is up it is claimable again, and the ordinary path
+	// releases it for good.
+	p.mu.Lock()
+	still.NotBefore = time.Now().Add(-time.Second)
+	p.mu.Unlock()
+	j2, ok := p.claim()
+	if !ok {
+		t.Fatal("not claimable after the delay")
+	}
+	p.release(j2)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.jobs) != 0 {
+		t.Errorf("%d jobs left after a clean finish, want 0", len(p.jobs))
+	}
+}
+
+// Retrying for ever is how a pathological file becomes a busy loop that
+// outlives the process, so the count is a real limit and giving up leaves the
+// job for release to remove.
+func TestPipelineRetryGivesUp(t *testing.T) {
+	p := NewPipeline(&App{})
+	p.Enqueue("/data/ingest/a.pdf")
+	for range maxRetries + 1 {
+		j, ok := p.claim()
+		if !ok {
+			p.mu.Lock()
+			cur := p.jobs["/data/ingest/a.pdf"]
+			if cur != nil {
+				cur.NotBefore = time.Time{}
+			}
+			p.mu.Unlock()
+			if j, ok = p.claim(); !ok {
+				t.Fatal("job vanished mid-retry")
+			}
+		}
+		p.retryLater(j)
+		p.release(j)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.jobs) != 0 {
+		t.Errorf("still queued after %d retries; the limit does not bite", maxRetries)
+	}
+}
+
+// Only what is being worked on belongs on the status page. With the waiting in
+// the same map, a large import would otherwise list every file in the inbox.
+func TestActiveJobsExcludesWaiting(t *testing.T) {
+	p := NewPipeline(&App{})
+	for i := range 5 {
+		p.Enqueue(fmt.Sprintf("/data/ingest/%d.pdf", i))
+	}
+	j, _ := p.claim()
+	p.setStage(j, "ocr")
+
+	active := p.ActiveJobs()
+	if len(active) != 1 {
+		t.Fatalf("%d active, want 1", len(active))
+	}
+	if active[0].Stage != "ocr" || active[0].Path != j.Path {
+		t.Errorf("got %+v", active[0])
+	}
+}
+
 // A title is free text from a model or a person, and it becomes a filename on
 // someone's disk. These are the shapes that break that.
 func TestDownloadName(t *testing.T) {
