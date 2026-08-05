@@ -62,14 +62,45 @@ and a flag given on the command line beats the config. A key the program does
 not know refuses to start, naming the line, so a typo cannot silently mean
 nothing.
 
-```
-# ~/.config/docovia/config          chmod 600 — it holds keys
-openai_key = sk-...
+Every key, with its default where one exists. Commented lines are what you get
+without them; the uncommented three are a typical prod config in full:
 
+```
+# ~/.config/docovia/config           chmod 600 — it holds keys
+
+# ── the model ────────────────────────────────────────────────────────────
+openai_key = sk-...                  # without it: no titles, no tags
+# llm = true                         # false ingests without the model at all
+# llm_model = gpt-5.6-luna
+# enrich_workers = 16                # concurrent model calls; half the cores, min 8
+
+# ── login (both or neither; see below) ───────────────────────────────────
 oidc_issuer = https://id.example.com
 oidc_client_id = docovia
-# oidc_client_secret = ...          only for a confidential registration
+# oidc_client_secret =               # only for a confidential registration
+
+# ── serving ──────────────────────────────────────────────────────────────
+# listen = 127.0.0.1:8080            # the container's command line passes 0.0.0.0:8080
+# public_origin =                    # e.g. https://docs.example.com, behind a TLS proxy
+# data = /home/you/docovia-data      # the container's command line passes /data
+                                     # (no ~ expansion — spell paths out)
+
+# ── the pipeline ─────────────────────────────────────────────────────────
+# workers = 16                       # ingest workers; half the cores, min 8
+# pdf_passwords =                    # default <data>/passwords
+
+# ── typesense (the container wires these itself) ─────────────────────────
+# typesense_url = http://localhost:8108
+# typesense_key = docovia-dev-key
+# collection = documents             # give a second instance its own
+
+# ── development ──────────────────────────────────────────────────────────
+# dev = false                        # reload templates and static from disk
 ```
+
+In the container, `data` and `listen` are already answered by the image's
+command line — flags beat config — so a mounted config that sets them changes
+nothing there, and the same file therefore serves a native dev run unchanged.
 
 `openai_key` and `oidc_client_secret` are also flags for uniformity's sake,
 but put them here: argv is public — `ps` prints it to every user on the
