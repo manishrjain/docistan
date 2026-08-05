@@ -48,6 +48,25 @@ func TestParseConfig(t *testing.T) {
 		t.Errorf("got %+v\nwant %+v", entries, want)
 	}
 
+	// Trailing comments end at a # that opens the value or follows
+	// whitespace; glued to text it belongs to the value. The README example
+	// leans on the first form on nearly every line.
+	trailing, err := parseConfig(
+		"workers = 4    # half the cores\n" +
+			"openai_key = sk-x#y # glued survives, spaced does not\n" +
+			"llm_model = # empty is empty\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTrailing := []configEntry{
+		{"workers", "4", 1},
+		{"openai_key", "sk-x#y", 2},
+		{"llm_model", "", 3},
+	}
+	if !slices.Equal(trailing, wantTrailing) {
+		t.Errorf("trailing comments:\n got %+v\nwant %+v", trailing, wantTrailing)
+	}
+
 	if _, err := parseConfig("listen 0.0.0.0:2020\n"); err == nil ||
 		!strings.Contains(err.Error(), "line 1") {
 		t.Errorf("missing = : err %v, want it to name line 1", err)

@@ -40,6 +40,12 @@ func parseConfig(data string) ([]configEntry, error) {
 			return nil, fmt.Errorf("line %d: %q is not key = value", i+1, line)
 		}
 		key = strings.TrimSpace(key)
+		// A trailing comment: # ends the value when it opens it or follows
+		// whitespace. Glued to text it is part of the value, so the rare
+		// secret containing one survives — write it flush against the text.
+		if cut := trailingComment(value); cut >= 0 {
+			value = value[:cut]
+		}
 		// A duplicate is a file arguing with itself. Taking either value
 		// would mean the other line sits there looking load-bearing.
 		if prev, dup := seen[key]; dup {
@@ -49,6 +55,21 @@ func parseConfig(data string) ([]configEntry, error) {
 		out = append(out, configEntry{Key: key, Value: strings.TrimSpace(value), Line: i + 1})
 	}
 	return out, nil
+}
+
+// trailingComment finds where a value's comment begins, or -1. Split from the
+// loop so the rule is testable by itself: it is exactly the rule a reader
+// assumes, and the README's own example leans on it.
+func trailingComment(value string) int {
+	for i, r := range value {
+		if r != '#' {
+			continue
+		}
+		if i == 0 || value[i-1] == ' ' || value[i-1] == '\t' {
+			return i
+		}
+	}
+	return -1
 }
 
 // configFile resolves which file to read. An explicit -config replaces the
