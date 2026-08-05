@@ -857,6 +857,51 @@ func TestArchiveSpendFollowsARetag(t *testing.T) {
 	}
 }
 
+// The cost shown beside a document is what the document recorded, never a
+// recomputation. Pricing its tokens today would give a different number — and
+// now that tokens accumulate, it would price every run of a document as though
+// they had been one call.
+func TestDocCentsReadsTheRecordOnly(t *testing.T) {
+	a := &App{cfg: Config{LLMModel: "gpt-5.6-luna"}}
+
+	// Deliberately inconsistent: what it recorded is not what its tokens would
+	// price at today, which is exactly the case the fallback used to paper over.
+	doc := &Doc{ID: 1, LLMIn: 18283, LLMOut: 676, LLMCents: 1.3778}
+	if got := a.docCents(doc); got != 1.3778 {
+		t.Errorf("docCents = %v, want the recorded 1.3778", got)
+	}
+	if derived := llmCents(a.cfg.LLMModel, Usage{In: doc.LLMIn, Out: doc.LLMOut}); closeEnough(derived, 1.3778) {
+		t.Fatal("the fixture no longer distinguishes recorded from derived")
+	}
+
+	// A document that never recorded a cost says nothing about its cost.
+	if got := a.docCents(&Doc{ID: 2, LLMIn: 5000, LLMOut: 200}); got != 0 {
+		t.Errorf("docCents = %v for a document with no recorded cost, want 0", got)
+	}
+}
+
+// applyUsage hands back what it banked so the journal reports that figure
+// rather than deriving the same number a second time.
+func TestApplyUsageReturnsWhatItBanked(t *testing.T) {
+	doc := &Doc{}
+	cents := applyUsage(doc, "gpt-5.6-luna", Usage{In: 2000, Out: 500})
+	if !closeEnough(cents, doc.LLMCents) {
+		t.Errorf("returned %v but banked %v", cents, doc.LLMCents)
+	}
+	if cents <= 0 {
+		t.Errorf("returned %v, want a real cost", cents)
+	}
+	// A second run returns only its own cost, not the document's running total.
+	again := applyUsage(doc, "gpt-5.6-luna", Usage{In: 1000, Out: 100})
+	if again >= doc.LLMCents {
+		t.Errorf("returned %v, want only this call's share of %v", again, doc.LLMCents)
+	}
+	// And a call that never happened banked nothing.
+	if got := applyUsage(doc, "gpt-5.6-luna", Usage{}); got != 0 {
+		t.Errorf("an unbilled call returned %v, want 0", got)
+	}
+}
+
 // A call that never reached the model reports nothing, and must not blank what
 // the document has already spent.
 func TestApplyUsageIgnoresAnUnbilledCall(t *testing.T) {

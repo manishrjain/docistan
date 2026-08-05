@@ -564,16 +564,16 @@ func (a *App) taggingStage(doc *Doc) Stage {
 	return s
 }
 
-// docCents is the cost to show beside a document. Sidecars written before the
-// cost was recorded carry tokens but no cents, and a timeline that suddenly
-// went silent about money on every older document would look like a bug; for
-// those the current price table is the best answer available. Display only —
-// it is never written back, because a price table read today is a guess at
-// what a run months ago actually paid, and a guess must not become a record.
+// docCents is the cost to show beside a document: what it recorded at the time,
+// and nothing else.
+//
+// It used to fall back to pricing the document's tokens when the cents were
+// missing, for sidecars written before the cost was recorded. That was a guess
+// dressed as a figure — today's price table applied to a call made months ago —
+// and it got worse when the tokens started accumulating, since it would then
+// have priced every run of a document as though they were one. A document that
+// never recorded what it spent says nothing about what it spent.
 func (a *App) docCents(doc *Doc) float64 {
-	if doc.LLMCents == 0 && doc.LLMIn > 0 {
-		return llmCents(a.cfg.LLMModel, Usage{In: doc.LLMIn, Out: doc.LLMOut})
-	}
 	return doc.LLMCents
 }
 
@@ -2346,14 +2346,15 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	var spend *SpendSummary
 	if a.enricher != nil {
-		calls, in, out := a.enricher.Spend()
-		// The session figures are process counters, so they have to be priced
-		// here from the model in use; the page stays in dollars because a whole
-		// session's spend is a dollar-sized number.
+		// Banked call by call as each was priced, like the documents' own
+		// figures, rather than re-derived here from the session's tokens. The
+		// page stays in dollars because a whole session's spend is a
+		// dollar-sized number.
+		calls, in, out, cents := a.enricher.Spend()
 		spend = &SpendSummary{
 			Calls: calls, In: in, Out: out,
 			Priced: modelPriced(a.cfg.LLMModel),
-			USD:    llmCents(a.cfg.LLMModel, Usage{In: in, Out: out}) / 100,
+			USD:    cents / 100,
 		}
 		if calls > 0 {
 			spend.PerDoc = spend.USD / float64(calls)

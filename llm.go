@@ -112,13 +112,18 @@ func modelPriced(model string) bool {
 //
 // A call that never reached the model reports no tokens and must leave the
 // running totals alone rather than blanking them.
-func applyUsage(doc *Doc, model string, used Usage) {
+// Returns what this call cost, so the journal line can report the figure that
+// was banked rather than work it out a second time from the same tokens. Two
+// derivations of one number are two chances to disagree about it.
+func applyUsage(doc *Doc, model string, used Usage) float64 {
 	if used.In == 0 && used.Out == 0 {
-		return
+		return 0
 	}
+	cents := llmCents(model, used)
 	doc.LLMIn += used.In
 	doc.LLMOut += used.Out
-	doc.LLMCents += llmCents(model, used)
+	doc.LLMCents += cents
+	return cents
 }
 
 // ErrRateLimited means the request budget is spent. Nothing is wrong with the
@@ -203,6 +208,19 @@ type OpenAIEnricher struct {
 	inTokens  atomic.Int64
 	outTokens atomic.Int64
 	calls     atomic.Int64
+	// spentCents is banked call by call, as each one is priced, rather than
+	// worked out afterwards from the session's token totals. The arithmetic
+	// agrees today and would stop agreeing the moment a price or a model
+	// changed under it, and a figure that says what was spent should not be a
+	// multiplication anybody can get wrong later.
+	spentMu    sync.Mutex
+	spentCents float64
+}
+
+func (e *OpenAIEnricher) bank(cents float64) {
+	e.spentMu.Lock()
+	defer e.spentMu.Unlock()
+	e.spentCents += cents
 }
 
 func NewOpenAIEnricher(model, apiKey string) *OpenAIEnricher {
@@ -229,8 +247,10 @@ func NewOpenAIEnricher(model, apiKey string) *OpenAIEnricher {
 	return e
 }
 
-func (e *OpenAIEnricher) Spend() (calls, in, out int64) {
-	return e.calls.Load(), e.inTokens.Load(), e.outTokens.Load()
+func (e *OpenAIEnricher) Spend() (calls, in, out int64, cents float64) {
+	e.spentMu.Lock()
+	defer e.spentMu.Unlock()
+	return e.calls.Load(), e.inTokens.Load(), e.outTokens.Load(), e.spentCents
 }
 
 func (e *OpenAIEnricher) Budget() (remaining int, resetIn time.Duration, stopped string) {
@@ -393,6 +413,7 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 	e.calls.Add(1)
 	e.inTokens.Add(used.In)
 	e.outTokens.Add(used.Out)
+	e.bank(llmCents(e.model, used))
 
 	if len(resp.Choices) == 0 {
 		return meta, used, errors.New("model returned no choices")
@@ -674,7 +695,7 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	})
 	// Whatever the outcome, tokens the model actually billed belong to this
 	// document — a failed parse still cost money.
-	applyUsage(doc, q.app.cfg.LLMModel, used)
+	cents := applyUsage(doc, q.app.cfg.LLMModel, used)
 
 	if errors.Is(err, ErrRateLimited) {
 		q.requeue(id)
@@ -715,7 +736,7 @@ func (q *EnrichQueue) enrichOne(ctx context.Context, id int) {
 	q.mu.Lock()
 	q.done++
 	q.mu.Unlock()
-	q.app.record("enriched", id, "", enrichDetail(doc, used, llmCents(q.app.cfg.LLMModel, used)))
+	q.app.record("enriched", id, "", enrichDetail(doc, used, cents))
 }
 
 // enrichDetail says what the model decided and what it cost. What it decided is
