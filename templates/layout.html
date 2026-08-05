@@ -49,6 +49,13 @@
   <nav>
     <a class="btn btn-secondary" href="/upload">Upload</a>
     <a class="btn btn-secondary" href="/status">Status</a>
+    {{/* Only when someone is actually signed in: without an OIDC issuer there
+         is no session to end, and a Sign out button would be a lie. */}}
+    {{if .User}}
+      <form method="post" action="/auth/logout" class="signout" title="Signed in as {{.User}}">
+        <button type="submit" class="btn btn-secondary">Sign out {{.User}}</button>
+      </form>
+    {{end}}
   </nav>
 </header>
 {{end}}

@@ -44,6 +44,9 @@ document.addEventListener("DOMContentLoaded", () => {
         headers: { "X-Requested-With": "live" },
         cache: "no-store",
       });
+      // Signed out mid-poll. Reloading turns the next request into a
+      // navigation, which is the thing that can follow a login redirect.
+      if (res.status === 401) return location.reload();
       if (res.ok) {
         const fresh = new DOMParser()
           .parseFromString(await res.text(), "text/html")

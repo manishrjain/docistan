@@ -34,15 +34,24 @@ type Config struct {
 	EnrichWorkers int
 	LLMModel      string
 	LLMEnabled    bool
-	// KeyFile is read when OPENAI_API_KEY is unset. A file keeps the key out
-	// of shell history, out of the process listing, and out of any unit file
-	// or script that might get committed. Empty means the usual places, which
-	// keyFiles lists; a value here overrides them rather than adding to them.
-	KeyFile string
-	// PasswordFile holds the passwords for encrypted PDFs, one per line. Same
-	// reasoning as KeyFile and more of it: these are bank passwords, so a flag
-	// or an environment variable would put them in the process listing for
-	// everyone on the machine to read.
+	// OpenAIKey is the key itself, and the config file is where it belongs:
+	// one place, uniformly with every other setting. Empty means no
+	// enrichment — there is deliberately no env var and no secret-file hunt
+	// behind this, because three fallbacks for one value is three places to
+	// wonder which key actually loaded.
+	OpenAIKey string
+	// OIDCIssuer and OIDCClientID turn the login requirement on. Both or
+	// neither: one without the other is a misconfiguration run() refuses to
+	// start on, because half a login story is indistinguishable from none.
+	// OIDCClientSecret stays empty for a public client with PKCE, which is
+	// the intended registration.
+	OIDCIssuer       string
+	OIDCClientID     string
+	OIDCClientSecret string
+	// PasswordFile holds the passwords for encrypted PDFs, one per line. A
+	// file rather than values in the config: these are bank passwords, plural
+	// and appended to from the unlock form, which is a life the config file
+	// does not have.
 	PasswordFile string
 	// PublicOrigin is where this archive answers from as a browser sees it,
 	// which is not what the process itself can observe once a proxy is in
@@ -59,6 +68,10 @@ type App struct {
 	pipeline *Pipeline
 	enricher *OpenAIEnricher
 	enrichq  *EnrichQueue
+	// auth is nil when no OIDC issuer is configured, and every consultation
+	// of it is behind that check: no issuer, no login requirement — which is
+	// the dev loop and the behind-a-proxy deployment, unchanged.
+	auth *Auth
 
 	// pdfPasswords are the candidates tried against an encrypted document, read
 	// once at startup. Re-reading the file per document would put a secret
@@ -160,12 +173,6 @@ func main() {
 	flag.IntVar(&cfg.EnrichWorkers, "enrich-workers", defaultWorkers(), "concurrent model calls")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
-	// Empty rather than a default, because there is more than one default and
-	// flag can only print a string. keyFiles holds the list; the help text has
-	// to state it here.
-	flag.StringVar(&cfg.KeyFile, "openai-key-file", "",
-		"file holding the OpenAI API key, read when OPENAI_API_KEY is unset "+
-			"(default ~/.openai.secret, then "+systemKeyFile+")")
 	// Empty rather than a default, because the default is <data>/passwords and
 	// -data is not parsed yet. resolvePasswordFile settles it once both are
 	// known; the help text has to state the default itself, since there is no
@@ -177,9 +184,24 @@ func main() {
 	// names the site, so there is nothing here to compare against by default.
 	flag.StringVar(&cfg.PublicOrigin, "public-origin", "",
 		"the site's own origin, e.g. https://docs.example.com, for the cross-site check")
+	flag.StringVar(&cfg.OpenAIKey, "openai-key", "",
+		"OpenAI API key — prefer the config file: argv is visible to ps and docker inspect")
+	flag.StringVar(&cfg.OIDCIssuer, "oidc-issuer", "",
+		"OpenID Connect issuer, e.g. https://id.example.com — setting it makes every request require login")
+	flag.StringVar(&cfg.OIDCClientID, "oidc-client-id", "", "client id registered with the OIDC issuer")
+	flag.StringVar(&cfg.OIDCClientSecret, "oidc-client-secret", "",
+		"client secret, only for a confidential registration — prefer the config file; argv is visible to ps")
+	// The config file mirrors every flag above (dashes become underscores),
+	// with the command line winning on any key both name.
+	var configPath string
+	flag.StringVar(&configPath, "config", "",
+		"config file (default ~/.config/docovia/config, then /etc/docovia/config)")
 	flag.BoolVar(&cfg.Dev, "dev", false, "reload templates from disk on each request")
 	flag.Parse()
 
+	if err := applyConfigFile(configPath); err != nil {
+		log.Fatalf("docovia: %v", err)
+	}
 	if err := run(cfg); err != nil {
 		log.Fatalf("docovia: %v", err)
 	}
@@ -198,6 +220,22 @@ func run(cfg Config) error {
 	search := NewSearch(cfg.TypesenseURL, cfg.TypesenseKey, cfg.Collection)
 	app := &App{cfg: cfg, store: store, search: search, spend: map[int]docSpend{}}
 
+	if (cfg.OIDCIssuer == "") != (cfg.OIDCClientID == "") {
+		return errors.New("-oidc-issuer and -oidc-client-id must be set together")
+	}
+	if cfg.OIDCIssuer != "" {
+		key, err := loadSessionKey(cfg.DataDir)
+		if err != nil {
+			return fmt.Errorf("session key: %w", err)
+		}
+		app.auth = NewAuth(cfg.OIDCIssuer, cfg.OIDCClientID, cfg.OIDCClientSecret, key)
+		kind := "public client with PKCE"
+		if cfg.OIDCClientSecret != "" {
+			kind = "confidential client"
+		}
+		logf("every request requires login via %s (%s)", cfg.OIDCIssuer, kind)
+	}
+
 	passwords, err := pdfPasswords(cfg.PasswordFile)
 	if err != nil {
 		// Not fatal. Everything unencrypted still ingests, and a document that
@@ -213,10 +251,9 @@ func run(cfg Config) error {
 	}
 
 	if cfg.LLMEnabled {
-		candidates := keyFiles(cfg.KeyFile)
-		if key, source := openAIKey(candidates...); key != "" {
-			app.enricher = NewOpenAIEnricher(cfg.LLMModel, key)
-			logf("metadata enrichment on, model %s (key from %s)", cfg.LLMModel, source)
+		if cfg.OpenAIKey != "" {
+			app.enricher = NewOpenAIEnricher(cfg.LLMModel, cfg.OpenAIKey)
+			logf("metadata enrichment on, model %s", cfg.LLMModel)
 			// Prices live in a table in code, so a model it has never heard of
 			// still gets tagged but cannot have its spend named. Say so once
 			// here rather than leave a status page quietly reading zero.
@@ -224,10 +261,9 @@ func run(cfg Config) error {
 				logf("no price known for model %s: documents will still be tagged, but costs will not be shown", cfg.LLMModel)
 			}
 		} else {
-			// Every place actually looked in, so this reads as instructions
-			// rather than as a report that something is missing.
-			logf("no OpenAI key in OPENAI_API_KEY or %s: documents will keep filename-derived titles and no tags",
-				strings.Join(candidates, " or "))
+			// Instructions rather than a report: the one place to put the key
+			// is the config, so name it.
+			logf("no openai_key in the config: documents will keep filename-derived titles and no tags")
 		}
 	}
 
@@ -272,7 +308,15 @@ func run(cfg Config) error {
 
 	mux := http.NewServeMux()
 	app.routes(mux)
-	srv := &http.Server{Addr: cfg.Listen, Handler: guard(mux, cfg.PublicOrigin)}
+	// The order of the wrapping: guard's cross-site check runs first, so a
+	// forged POST is refused before it can touch even the logout handler;
+	// then the login gate; then the site.
+	var handler http.Handler = mux
+	if app.auth != nil {
+		app.auth.routes(mux)
+		handler = app.auth.protect(mux)
+	}
+	srv := &http.Server{Addr: cfg.Listen, Handler: guard(handler, cfg.PublicOrigin)}
 
 	go func() {
 		<-ctx.Done()
@@ -284,7 +328,12 @@ func run(cfg Config) error {
 		}
 	}()
 
-	warnIfReachable(cfg.Listen)
+	// The warning is about serving an unauthenticated archive beyond loopback.
+	// With the login gate up it no longer applies — listening wide is now the
+	// point.
+	if app.auth == nil {
+		warnIfReachable(cfg.Listen)
+	}
 	logf("listening on http://%s", cfg.Listen)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -587,35 +636,11 @@ func defaultWorkers() int {
 	return max(8, runtime.NumCPU()/2)
 }
 
-// systemKeyFile is where the key lives when there is no home directory worth
-// the name — which is the normal case in a container, where HOME points at an
-// empty directory that no one ever puts anything in. Mounting the key here
-// means the image needs no flag to find it.
-const systemKeyFile = "/etc/docovia/openai.secret"
-
-// keyFiles is where the key is looked for, in order. An explicit path replaces
-// the list rather than extending it: someone who names a file is answering the
-// question, and quietly reading a different one after theirs turned out to be
-// empty would be the wrong kind of helpful.
-//
-// The home file wins over the system file for the same reason it does in every
-// other tool that reads both — a machine-wide key is the fallback for whoever
-// has not set their own, not an override of it.
-func keyFiles(flagValue string) []string {
-	if flagValue != "" {
-		return []string{flagValue}
-	}
-	var paths []string
-	if home, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(home, ".openai.secret"))
-	}
-	return append(paths, systemKeyFile)
-}
-
 // warnIfReachable says so when this process is listening somewhere other than
-// the loopback address.
+// the loopback address. Only called when no OIDC issuer is configured — with
+// the login gate up, listening wide is the point.
 //
-// There is no authentication in this program. Deployed as intended it sits
+// Without that gate there is no authentication here. Deployed that way it sits
 // behind a proxy that authenticates every request and forwards to 127.0.0.1,
 // and the entire security of that arrangement is the fact that nothing else can
 // reach this port — a listener on 0.0.0.0 does not weaken the proxy, it goes
@@ -809,58 +834,6 @@ func (a *App) rememberPassword(pw string) error {
 		a.pdfPasswords = append(slices.Clone(a.pdfPasswords), pw)
 	}
 	return nil
-}
-
-// openAIKey finds the key, preferring the environment so a one-off run can
-// override the file. It returns where the key came from as well, because
-// "which key is this actually using" is otherwise guesswork.
-func openAIKey(paths ...string) (key, source string) {
-	if v := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); v != "" {
-		return v, "OPENAI_API_KEY"
-	}
-	for _, path := range paths {
-		if path == "" {
-			continue
-		}
-		if key, ok := keyFromFile(path); ok {
-			return key, path
-		}
-	}
-	return "", ""
-}
-
-// keyFromFile reads one candidate. A file that is absent, empty, or nothing but
-// comments is not an answer, so it reports failure and lets the next one try.
-func keyFromFile(path string) (string, bool) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		// A missing file is the ordinary case when several places are tried;
-		// anything else — a key sitting there unreadable, most of all — is
-		// worth saying, because it looks identical from the outside.
-		if !os.IsNotExist(err) {
-			logf("reading %s: %v", path, err)
-		}
-		return "", false
-	}
-
-	// Usually a bare key on one line, but a dotenv-style assignment, an
-	// "export" prefix, wrapping quotes and comment lines are all common
-	// enough to accept rather than fail on.
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
-		if name, value, ok := strings.Cut(line, "="); ok && strings.TrimSpace(name) == "OPENAI_API_KEY" {
-			line = strings.TrimSpace(value)
-		}
-		if key := strings.Trim(line, `"'`); key != "" {
-			warnKeyPerms(path)
-			return key, true
-		}
-	}
-	return "", false
 }
 
 // warnKeyPerms says so once when the key file is readable by anyone else on

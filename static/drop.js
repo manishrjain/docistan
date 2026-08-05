@@ -124,6 +124,10 @@ async function upload(files) {
       body,
       headers: { Accept: "application/json" },
     });
+    if (res.status === 401) {
+      location.reload(); // signed out — reload into login, then drop the files again
+      return;
+    }
     if (!res.ok) throw new Error(`server said ${res.status}`);
     const data = await res.json();
     pending.remove();

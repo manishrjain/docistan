@@ -54,6 +54,7 @@ document.addEventListener("DOMContentLoaded", () => {
         headers: { "X-Requested-With": "search" },
         cache: "no-store",
       });
+      if (res.status === 401) return location.reload(); // signed out — reload into login
       if (!res.ok || ctl.signal.aborted) return;
       const html = await res.text();
       if (ctl.signal.aborted) return;

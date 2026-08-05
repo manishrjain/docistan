@@ -125,12 +125,12 @@ WORKDIR /data
 # else, which is what makes the backup one directory.
 VOLUME ["/data"]
 
-# The OpenAI key is looked for here when OPENAI_API_KEY is unset, so mounting it
-# is the whole configuration:
+# The config is looked for at /etc/docovia/config, so mounting one file is the
+# whole configuration — the OpenAI key, the OIDC settings, all of it:
 #
-#   -v ~/.openai.secret:/etc/docovia/openai.secret:ro
+#   -v ~/docovia.conf:/etc/docovia/config:ro
 #
-# A read-only mount rather than an environment variable, because a variable set
+# A read-only mount rather than environment variables, because a variable set
 # at `docker run` is written into the container's config on disk and stays
 # visible to `docker inspect` for as long as the container exists.
 

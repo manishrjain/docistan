@@ -180,6 +180,14 @@ document.addEventListener("DOMContentLoaded", () => {
           "Content-Type": "application/x-www-form-urlencoded",
         },
       });
+      // Signed out. Reload into the login flow. Anything typed since the last
+      // autosave goes with it — but staying would not keep it either, since
+      // every further save fails the same way; a dead page just loses it
+      // slower.
+      if (res.status === 401) {
+        location.reload();
+        throw new Error("signed out");
+      }
       if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
       const data = await res.json();
       if (heading && data.title && !heading.dataset.editing) {
@@ -554,6 +562,10 @@ document.addEventListener("DOMContentLoaded", () => {
       const res = await fetch(`${location.pathname}/meta`, {
         headers: { Accept: "application/json" },
       });
+      if (res.status === 401) {
+        location.reload(); // signed out — reload into login
+        return null;
+      }
       if (!res.ok) return null;
       return await res.json();
     } catch {
@@ -682,6 +694,10 @@ document.addEventListener("DOMContentLoaded", () => {
         method: "POST",
         headers: { Accept: "application/json" },
       });
+      if (res.status === 401) {
+        location.reload(); // signed out — reload into login
+        return;
+      }
       if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
       const data = await res.json();
       if (onAccepted && onAccepted(data) === false) return;

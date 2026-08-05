@@ -3,12 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -26,129 +31,92 @@ import (
 	"unicode/utf8"
 )
 
-// The key file is hand-written, usually once, often by pasting. These are the
-// shapes that paste produces; getting one of them wrong would send a mangled
-// key to the API and report an authentication failure that looks like a bad
-// key rather than a bad parse.
-func TestOpenAIKeyFromFile(t *testing.T) {
-	cases := []struct {
-		name    string
-		content string
-		want    string
-	}{
-		{"bare", "sk-bare\n", "sk-bare"},
-		{"no trailing newline", "sk-bare", "sk-bare"},
-		{"padded", "  sk-padded  \n", "sk-padded"},
-		{"dotenv", "OPENAI_API_KEY=sk-dotenv\n", "sk-dotenv"},
-		{"dotenv spaced", "OPENAI_API_KEY = sk-dotenv\n", "sk-dotenv"},
-		{"export quoted", "export OPENAI_API_KEY=\"sk-export\"\n", "sk-export"},
-		{"single quoted", "'sk-quoted'\n", "sk-quoted"},
-		{"comment then key", "# personal key\n\nsk-after-comment\n", "sk-after-comment"},
-		{"trailing lines ignored", "sk-first\nsk-second\n", "sk-first"},
-		{"empty", "\n\n  \n", ""},
-		{"comments only", "# nothing here\n", ""},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "key")
-			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			got, source := openAIKey(path)
-			if got != tc.want {
-				t.Errorf("openAIKey(%q) = %q, want %q", tc.content, got, tc.want)
-			}
-			if tc.want != "" && source != path {
-				t.Errorf("source = %q, want %q", source, path)
-			}
-		})
-	}
-}
-
-// A key on the command line or in a unit file should be able to override the
-// one on disk without moving the file out of the way.
-func TestOpenAIKeyEnvWins(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "key")
-	if err := os.WriteFile(path, []byte("sk-from-file\n"), 0o600); err != nil {
+// The config file is hand-written; these are the shapes hands produce. A
+// parse error must name its line, because "config invalid" against a file of
+// twelve lines is a hunt that the parser already knows the answer to.
+func TestParseConfig(t *testing.T) {
+	entries, err := parseConfig("# comment\n\nlisten = 0.0.0.0:2020\nworkers=4\n  openai_key =  sk-test  \n")
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("OPENAI_API_KEY", "sk-from-env")
-
-	key, source := openAIKey(path)
-	if key != "sk-from-env" {
-		t.Errorf("key = %q, want the environment's", key)
+	want := []configEntry{
+		{"listen", "0.0.0.0:2020", 3},
+		{"workers", "4", 4},
+		{"openai_key", "sk-test", 5},
 	}
-	if source != "OPENAI_API_KEY" {
-		t.Errorf("source = %q, want OPENAI_API_KEY", source)
+	if !slices.Equal(entries, want) {
+		t.Errorf("got %+v\nwant %+v", entries, want)
+	}
+
+	if _, err := parseConfig("listen 0.0.0.0:2020\n"); err == nil ||
+		!strings.Contains(err.Error(), "line 1") {
+		t.Errorf("missing = : err %v, want it to name line 1", err)
+	}
+	if _, err := parseConfig("workers = 4\n# fine\nworkers = 8\n"); err == nil ||
+		!strings.Contains(err.Error(), "line 3") || !strings.Contains(err.Error(), "line 1") {
+		t.Errorf("duplicate: err %v, want it to name both lines", err)
 	}
 }
 
-// A blank environment variable is the same as an unset one — otherwise
-// `OPENAI_API_KEY= ./docovia` would silently disable the file fallback.
-func TestOpenAIKeyBlankEnvFallsThrough(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "key")
-	if err := os.WriteFile(path, []byte("sk-from-file\n"), 0o600); err != nil {
-		t.Fatal(err)
+// Precedence is flag > config > default, and a typo'd key refuses to start
+// rather than silently meaning nothing.
+func TestApplyConfig(t *testing.T) {
+	newFS := func() (*flag.FlagSet, *string, *int, *string) {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		listen := fs.String("listen", "127.0.0.1:8080", "")
+		workers := fs.Int("workers", 2, "")
+		key := fs.String("openai-key", "", "")
+		return fs, listen, workers, key
 	}
-	t.Setenv("OPENAI_API_KEY", "  ")
-
-	if key, _ := openAIKey(path); key != "sk-from-file" {
-		t.Errorf("key = %q, want the file's", key)
-	}
-}
-
-func TestOpenAIKeyMissingFile(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "")
-	if key, source := openAIKey(filepath.Join(t.TempDir(), "absent")); key != "" || source != "" {
-		t.Errorf("got (%q, %q), want empty", key, source)
-	}
-}
-
-// The container mounts its key at the system path and passes no flag, so a
-// candidate that is absent — or present but useless — has to fall through to
-// the next one rather than end the search.
-func TestOpenAIKeyFallsThroughToTheNextPath(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "")
-	dir := t.TempDir()
-	system := filepath.Join(dir, "system")
-	if err := os.WriteFile(system, []byte("sk-system\n"), 0o600); err != nil {
-		t.Fatal(err)
+	write := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
 
-	empty := filepath.Join(dir, "empty")
-	if err := os.WriteFile(empty, []byte("# no key here\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	t.Run("config fills what flags left alone", func(t *testing.T) {
+		fs, listen, workers, key := newFS()
+		fs.Parse([]string{"-listen", "127.0.0.1:9999"}) // explicit flag
+		path := write(t, "listen = 0.0.0.0:2020\nworkers = 8\nopenai_key = sk-conf\n")
+		if err := applyConfig(fs, path, true); err != nil {
+			t.Fatal(err)
+		}
+		if *listen != "127.0.0.1:9999" {
+			t.Errorf("listen = %q: the command line lost to the config", *listen)
+		}
+		if *workers != 8 || *key != "sk-conf" {
+			t.Errorf("workers = %d, key = %q: config values did not land", *workers, *key)
+		}
+	})
 
-	for _, tc := range []struct {
-		name  string
-		first string
-	}{
-		{"absent", filepath.Join(dir, "absent")},
-		{"empty", empty},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			key, source := openAIKey(tc.first, system)
-			if key != "sk-system" || source != system {
-				t.Errorf("got (%q, %q), want (%q, %q)", key, source, "sk-system", system)
-			}
-		})
-	}
-}
+	t.Run("unknown key refuses", func(t *testing.T) {
+		fs, _, _, _ := newFS()
+		fs.Parse(nil)
+		err := applyConfig(fs, write(t, "wrokers = 8\n"), true)
+		if err == nil || !strings.Contains(err.Error(), "wrokers") {
+			t.Errorf("err = %v, want it to name the typo", err)
+		}
+	})
 
-// A key in the home file is the one to use even when the machine also has a
-// system-wide one, and naming a file explicitly has to replace the search
-// rather than sit at the front of it.
-func TestKeyFilesOrder(t *testing.T) {
-	t.Setenv("HOME", "/home/somebody")
-	want := []string{"/home/somebody/.openai.secret", systemKeyFile}
-	if got := keyFiles(""); !slices.Equal(got, want) {
-		t.Errorf("keyFiles(\"\") = %v, want %v", got, want)
-	}
-	if got := keyFiles("/tmp/mine"); !slices.Equal(got, []string{"/tmp/mine"}) {
-		t.Errorf("keyFiles(%q) = %v, want just it", "/tmp/mine", got)
-	}
+	t.Run("bad value names the line", func(t *testing.T) {
+		fs, _, _, _ := newFS()
+		fs.Parse(nil)
+		err := applyConfig(fs, write(t, "# hmm\nworkers = many\n"), true)
+		if err == nil || !strings.Contains(err.Error(), "line 2") {
+			t.Errorf("err = %v, want it to name line 2", err)
+		}
+	})
+
+	t.Run("config cannot name the config", func(t *testing.T) {
+		fs, _, _, _ := newFS()
+		fs.Parse(nil)
+		if err := applyConfig(fs, write(t, "config = /elsewhere\n"), true); err == nil {
+			t.Error("want a refusal")
+		}
+	})
 }
 
 // Only a PDF arrives already made; everything else normalize renders itself,
@@ -909,6 +877,231 @@ func TestDocCentsReadsTheRecordOnly(t *testing.T) {
 	// A document that never recorded a cost says nothing about its cost.
 	if got := a.docCents(&Doc{ID: 2, LLMIn: 5000, LLMOut: 200}); got != 0 {
 		t.Errorf("docCents = %v for a document with no recorded cost, want 0", got)
+	}
+}
+
+func testAuth(t *testing.T) *Auth {
+	t.Helper()
+	key, err := loadSessionKey(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewAuth("https://id.example.com", "docovia", "", key)
+}
+
+func requestWithSession(auth *Auth, s session) *http.Request {
+	r := httptest.NewRequest("GET", "/doc/5?q=x", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: auth.sign(s)})
+	return r
+}
+
+// The session cookie is the entire authentication state, so what it must
+// survive is exactly what an attacker would try: alteration, expiry, and a
+// signature from some other key.
+func TestSessionCookie(t *testing.T) {
+	auth := testAuth(t)
+	now := time.Now()
+	good := session{Sub: "u1", Name: "Manish", IssuedAt: now.Unix(), Expires: now.Add(time.Hour).Unix()}
+
+	if got, ok := auth.session(requestWithSession(auth, good)); !ok || got != good {
+		t.Fatalf("round trip: got %+v, %v", got, ok)
+	}
+
+	// Flip one byte anywhere in the value and the cookie is nobody.
+	value := auth.sign(good)
+	tampered := []byte(value)
+	tampered[10]++
+	r := httptest.NewRequest("GET", "/", nil)
+	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: string(tampered)})
+	if _, ok := auth.session(r); ok {
+		t.Error("a tampered cookie verified")
+	}
+
+	expired := good
+	expired.Expires = now.Add(-time.Minute).Unix()
+	if _, ok := auth.session(requestWithSession(auth, expired)); ok {
+		t.Error("an expired session verified")
+	}
+
+	other := testAuth(t) // different random key
+	if _, ok := other.session(requestWithSession(auth, good)); ok {
+		t.Error("a cookie signed with another key verified")
+	}
+}
+
+// The next parameter is attacker-reachable by construction — it arrives on
+// /auth/login?next= — so everything that is not a local path must collapse
+// to "/". An open redirect from a login page is the classic phishing gift.
+func TestSafeNext(t *testing.T) {
+	for in, want := range map[string]string{
+		"/doc/5?q=x&page=2":     "/doc/5?q=x&page=2",
+		"/":                     "/",
+		"":                      "/",
+		"https://evil.example":  "/",
+		"//evil.example":        "/",
+		"/\\evil.example":       "/",
+		"javascript:alert(1)":   "/",
+		"/ok\r\nSet-Cookie: x=": "/",
+	} {
+		if got := safeNext(in); got != want {
+			t.Errorf("safeNext(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The whole login, walked as a browser would: a fake issuer serving
+// discovery, authorize, token and userinfo, and a cookie-jarred client that
+// starts at a filtered URL and must land back on it signed in. The fake
+// checks what a real issuer would: the registered client, S256(verifier)
+// matching the challenge from the authorize step, and the bearer token.
+func TestOIDCLoginFlow(t *testing.T) {
+	var idpURL string
+	var challenge string // captured at authorize, checked at token
+	idp := http.NewServeMux()
+	idp.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"issuer":                 idpURL,
+			"authorization_endpoint": idpURL + "/authorize",
+			"token_endpoint":         idpURL + "/token",
+			"userinfo_endpoint":      idpURL + "/userinfo",
+		})
+	})
+	idp.HandleFunc("GET /authorize", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("client_id") != "docovia" || q.Get("code_challenge_method") != "S256" {
+			http.Error(w, "bad authorize request", http.StatusBadRequest)
+			return
+		}
+		challenge = q.Get("code_challenge")
+		// The user taps their passkey here; then the issuer sends them back.
+		http.Redirect(w, r, q.Get("redirect_uri")+"?code=c0de&state="+url.QueryEscape(q.Get("state")),
+			http.StatusFound)
+	})
+	idp.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		sum := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
+		if r.Form.Get("code") != "c0de" ||
+			base64.RawURLEncoding.EncodeToString(sum[:]) != challenge {
+			http.Error(w, "bad exchange", http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"access_token": "tok-1", "token_type": "Bearer"})
+	})
+	idp.HandleFunc("GET /userinfo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok-1" {
+			http.Error(w, "who?", http.StatusUnauthorized)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"sub": "u1", "name": "Manish"})
+	})
+	idpSrv := httptest.NewServer(idp)
+	defer idpSrv.Close()
+	idpURL = idpSrv.URL
+
+	auth := NewAuth(idpURL, "docovia", "", make([]byte, 32))
+	site := http.NewServeMux()
+	auth.routes(site)
+	site.HandleFunc("GET /doc/{id}", func(w http.ResponseWriter, r *http.Request) {
+		s, _ := auth.session(r)
+		fmt.Fprintf(w, "doc %s for %s, q=%s", r.PathValue("id"), s.Name, r.URL.Query().Get("q"))
+	})
+	app := httptest.NewServer(auth.protect(site))
+	defer app.Close()
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	res, err := client.Get(app.URL + "/doc/5?q=oceanside&page=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+
+	if want := "doc 5 for Manish, q=oceanside"; string(body) != want {
+		t.Errorf("landed on %q, want %q", body, want)
+	}
+	if got := res.Request.URL.Path + "?" + res.Request.URL.RawQuery; got != "/doc/5?q=oceanside&page=2" {
+		t.Errorf("final URL %q: the filters did not survive the trip", got)
+	}
+
+	// A callback that arrives with nothing behind it — no login in flight —
+	// is refused, not processed.
+	direct, _ := http.Get(app.URL + "/auth/callback?code=x&state=y")
+	if direct.StatusCode != http.StatusBadRequest {
+		t.Errorf("bare callback: %d, want 400", direct.StatusCode)
+	}
+}
+
+// protect decides who sees anything at all, so each kind of caller gets the
+// failure it can act on: a browser is sent to login and comes back to the
+// page it asked for, a fetch gets a 401 it can reload on, and a POST is
+// refused without a redirect that would eat its body.
+func TestProtect(t *testing.T) {
+	auth := testAuth(t)
+	var reached bool
+	h := auth.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+	}))
+	do := func(r *http.Request) *httptest.ResponseRecorder {
+		reached = false
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	if w := do(httptest.NewRequest("GET", "/healthz", nil)); !reached || w.Code != 200 {
+		t.Errorf("healthz: reached=%v code=%d, want through untouched", reached, w.Code)
+	}
+
+	w := do(httptest.NewRequest("GET", "/doc/5?q=x", nil))
+	if reached {
+		t.Fatal("an unauthenticated GET reached the site")
+	}
+	if loc := w.Header().Get("Location"); w.Code != http.StatusSeeOther ||
+		loc != "/auth/login?next="+url.QueryEscape("/doc/5?q=x") {
+		t.Errorf("code=%d location=%q, want a login redirect carrying the page", w.Code, loc)
+	}
+
+	// Both spellings of "this is a program": Accept and X-Requested-With.
+	for name, r := range map[string]*http.Request{
+		"json":   httptest.NewRequest("GET", "/doc/5/meta", nil),
+		"poller": httptest.NewRequest("GET", "/", nil),
+	} {
+		if name == "json" {
+			r.Header.Set("Accept", "application/json")
+		} else {
+			r.Header.Set("X-Requested-With", "live")
+		}
+		if w := do(r); reached || w.Code != http.StatusUnauthorized {
+			t.Errorf("%s: reached=%v code=%d, want a plain 401", name, reached, w.Code)
+		}
+	}
+
+	if w := do(httptest.NewRequest("POST", "/doc/5", nil)); reached || w.Code != http.StatusUnauthorized {
+		t.Errorf("POST: reached=%v code=%d, want 401 not a redirect", reached, w.Code)
+	}
+
+	now := time.Now()
+	fresh := session{Sub: "u1", Name: "M", IssuedAt: now.Unix(), Expires: now.Add(sessionTTL).Unix()}
+	if w := do(requestWithSession(auth, fresh)); !reached || len(w.Result().Cookies()) != 0 {
+		t.Errorf("fresh session: reached=%v cookies=%d, want through with no renewal", reached, len(w.Result().Cookies()))
+	}
+
+	// Past the halfway mark the visit itself renews the session.
+	old := fresh
+	old.IssuedAt = now.Add(-16 * 24 * time.Hour).Unix()
+	w = do(requestWithSession(auth, old))
+	if !reached {
+		t.Fatal("an old-but-valid session was refused")
+	}
+	renewed := false
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie && c.Value != "" {
+			renewed = true
+		}
+	}
+	if !renewed {
+		t.Error("a session past half its life was not renewed")
 	}
 }
 

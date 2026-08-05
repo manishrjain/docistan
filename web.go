@@ -625,6 +625,10 @@ type page struct {
 	Enriching map[int]bool
 	// Search carries the term that led here, so the PDF viewer can jump
 	// straight to it instead of making the reader find it twice.
+	// User is the signed-in reader's display name, for the topbar. Empty when
+	// no OIDC issuer is configured, which is also what hides the Sign out
+	// button — there is no session to end.
+	User   string
 	Search string
 	Jobs   []Job
 	// Backlog is what is queued behind Jobs. Its own field rather than part of
@@ -691,7 +695,14 @@ func writeJSON(w http.ResponseWriter, v any) {
 	}
 }
 
-func (a *App) render(w http.ResponseWriter, name string, data page) {
+func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data page) {
+	// Who is reading is a fact about the request, not about any one page, so
+	// it is filled in here rather than at five call sites.
+	if a.auth != nil {
+		if s, ok := a.auth.session(r); ok {
+			data.User = s.Name
+		}
+	}
 	tpl, err := a.templates(name)
 	if err != nil {
 		http.Error(w, "template: "+err.Error(), http.StatusInternalServerError)
@@ -1172,7 +1183,7 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		total = reserved.Archive
 	}
 
-	a.render(w, "index.html", page{
+	a.render(w, r, "index.html", page{
 		Query:     q,
 		Result:    res,
 		Total:     total,
@@ -1296,7 +1307,7 @@ func (a *App) handleDoc(w http.ResponseWriter, r *http.Request) {
 	// row carried. Only BackLink reads it — the document itself is the same
 	// document however you arrived at it — but without it "All results" has
 	// nothing to return to but the whole archive.
-	a.render(w, "doc.html", page{
+	a.render(w, r, "doc.html", page{
 		Title: doc.Title, Doc: doc, Stages: a.stagesFor(doc),
 		Query:     parseQuery(r.URL.Query()),
 		KnownTags: known, Search: r.URL.Query().Get("q"), URL: r.URL,
@@ -2257,7 +2268,7 @@ func uniqueName(used map[string]bool, name string, doc *Doc) string {
 }
 
 func (a *App) handleUploadForm(w http.ResponseWriter, r *http.Request) {
-	a.render(w, "upload.html", page{Title: "Upload", URL: r.URL})
+	a.render(w, r, "upload.html", page{Title: "Upload", URL: r.URL})
 }
 
 // handleUpload streams each file into the inbox while hashing it, so an exact
@@ -2283,7 +2294,7 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"flash": flash})
 		return
 	}
-	a.render(w, "upload.html", page{Title: "Upload", Flash: flash, URL: r.URL})
+	a.render(w, r, "upload.html", page{Title: "Upload", Flash: flash, URL: r.URL})
 }
 
 // acceptUpload writes the file into the inbox while hashing it in the same
@@ -2403,7 +2414,7 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 			spend.TokensIn = shortDuration(b.TokensReset)
 		}
 	}
-	a.render(w, "status.html", page{
+	a.render(w, r, "status.html", page{
 		Title:   "Status",
 		Jobs:    a.pipeline.ActiveJobs(),
 		Backlog: a.pipeline.Backlog(),
