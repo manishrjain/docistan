@@ -851,6 +851,16 @@ func (p page) BackLink() string {
 	return "/?" + v.Encode()
 }
 
+// FilterQuery is the same listing as a bare query string, for an action that
+// has to hand it back to the server rather than follow it. Derived from
+// BackLink so the way back and the way an action returns cannot drift apart.
+func (p page) FilterQuery() string {
+	if link := p.BackLink(); strings.HasPrefix(link, "/?") {
+		return link[1:]
+	}
+	return ""
+}
+
 // DocLink is the way in: a result row carrying the listing it was on, so the
 // document page can offer the way back. Same list again — a row that carried
 // less than BackLink reads would make the return trip lossy no matter how
@@ -1478,6 +1488,16 @@ func (a *App) setTrashed(w http.ResponseWriter, r *http.Request, trash bool) {
 
 	if wantsJSON(r) {
 		writeJSON(w, map[string]any{"trashed": doc.Trashed(), "delete_after_ts": doc.DeleteAfterTS})
+		return
+	}
+	// Trashing is the end of the reason to be reading this document, so it
+	// returns to the listing it was opened from — same filters, same page.
+	// Restoring is the opposite: you are putting it back to look at it, so
+	// that one stays put. The listing is rebuilt from the filters the form
+	// carried rather than followed as a URL, so the only thing that can come
+	// back out is a listing.
+	if trash {
+		http.Redirect(w, r, page{Query: parseQuery(r.URL.Query())}.BackLink(), http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, docPath(doc.ID), http.StatusSeeOther)

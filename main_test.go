@@ -2385,6 +2385,51 @@ func TestReservedPillsAreSeparateFromTheTagPills(t *testing.T) {
 	}
 }
 
+// Trashing a document ends the reason to be reading it, so the handler returns
+// to the listing it was opened from. That round trip is the form's action
+// carrying the filters and the handler parsing them back, so the two have to
+// agree exactly — including the page number, which is the part a reader
+// notices losing.
+func TestFilterQueryRoundTripsTheListing(t *testing.T) {
+	// Both ends of the range are named: an open-ended custom range resolves its
+	// far end to the current month, which would make this test fail with the
+	// calendar rather than with the code.
+	u, err := url.Parse("/doc/42?q=oceanside&tag=realestate&tag=california&sort=created&dir=asc&range=custom&from_y=2025&from_m=03&to_y=2026&to_m=01&page=4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := page{Query: parseQuery(u.Query())}
+
+	// What the trash form posts to, and what the handler makes of it.
+	action := "/doc/42/trash" + from.FilterQuery()
+	posted, err := url.Parse(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back := page{Query: parseQuery(posted.Query())}.BackLink()
+
+	if back != from.BackLink() {
+		t.Errorf("redirect  %s\nwant back %s", back, from.BackLink())
+	}
+	got := parseQuery(mustParseQuery(t, back))
+	want := Query{Q: "oceanside", Tags: []string{"realestate", "california"},
+		Sort: "created", Dir: "asc", Range: "custom", From: "2025-03", To: "2026-01", Page: 4}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("landed on:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// A document opened straight from the archive has no listing behind it, and
+// the action must stay a bare path rather than gaining a stray "?".
+func TestFilterQueryIsEmptyWithoutFilters(t *testing.T) {
+	if got := (page{}).FilterQuery(); got != "" {
+		t.Errorf("FilterQuery() = %q, want empty", got)
+	}
+	if got := (page{}).BackLink(); got != "/" {
+		t.Errorf("BackLink() = %q, want /", got)
+	}
+}
+
 // Clear takes away the tags it stands among — reserved ones included, since
 // they are tags — and leaves the date window alone. That last part was a
 // deliberate fix: reaching for the tags you had and losing the months you had
