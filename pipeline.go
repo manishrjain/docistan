@@ -76,7 +76,7 @@ func NewPipeline(app *App) *Pipeline {
 }
 
 func (p *Pipeline) Start(ctx context.Context) error {
-	for i := 0; i < p.app.cfg.Workers; i++ {
+	for i := 0; i < p.app.cfg.IngestWorkers; i++ {
 		p.wg.Add(1)
 		go p.worker(ctx)
 	}

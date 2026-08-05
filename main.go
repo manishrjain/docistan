@@ -22,14 +22,14 @@ import (
 )
 
 type Config struct {
-	DataDir      string
-	Listen       string
-	TypesenseURL string
-	TypesenseKey string
-	Collection   string
-	Workers      int
+	DataDir       string
+	Listen        string
+	TypesenseURL  string
+	TypesenseKey  string
+	Collection    string
+	IngestWorkers int
 	// EnrichWorkers is how many model calls may be outstanding at once. It
-	// defaults to the same figure as Workers; see the flag for why that is a
+	// defaults to the same figure as IngestWorkers; see the flag for why that is a
 	// coincidence of size rather than a shared reason.
 	EnrichWorkers int
 	LLMModel      string
@@ -162,13 +162,13 @@ func main() {
 	flag.StringVar(&cfg.TypesenseURL, "typesense-url", "http://localhost:8108", "Typesense URL")
 	flag.StringVar(&cfg.TypesenseKey, "typesense-key", cmp.Or(os.Getenv("TYPESENSE_API_KEY"), "docovia-dev-key"), "Typesense API key")
 	flag.StringVar(&cfg.Collection, "collection", "documents", "Typesense collection name; give a second instance its own")
-	flag.IntVar(&cfg.Workers, "workers", defaultWorkers(), "ingest workers")
-	// The same figure as -workers, though for the opposite reason: that one is
+	flag.IntVar(&cfg.IngestWorkers, "ingest-workers", defaultWorkers(), "ingest workers")
+	// The same figure as -ingest-workers, though for the opposite reason: that is
 	// capped by the cores because every ingest worker spawns ocrmypdf, while a
 	// model call is latency and almost no local work. What holds this down is
 	// the API's request allowance, and at four calls in flight a backlog of
 	// thousands drained far below it — the remaining-requests figure never
-	// moved off its ceiling. Matching -workers spends more of the allowance
+	// moved off its ceiling. Matching -ingest-workers spends more of the allowance
 	// without needing a second number to reason about.
 	flag.IntVar(&cfg.EnrichWorkers, "enrich-workers", defaultWorkers(), "concurrent model calls")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
@@ -631,7 +631,7 @@ func defaultDataDir() string {
 // Ghostscript and Tesseract subprocesses more than it runs anything of its own.
 // It is a floor on parallelism, not on memory: eight concurrent ocrmypdf runs
 // want a few GB between them, so a small box that is also short of RAM is the
-// one case for setting -workers by hand.
+// one case for setting -ingest-workers by hand.
 func defaultWorkers() int {
 	return max(8, runtime.NumCPU()/2)
 }

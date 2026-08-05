@@ -73,6 +73,7 @@ openai_key = sk-...                  # without it: no titles, no tags
 # llm = true                         # false ingests without the model at all
 # llm_model = gpt-5.6-luna
 # enrich_workers = 16                # concurrent model calls; half the cores, min 8
+# ingest_workers = 16                # half the cores, min 8; each spawns ocrmypdf
 
 # ── login (both or neither; see below) ───────────────────────────────────
 oidc_issuer = https://id.example.com
@@ -84,9 +85,6 @@ oidc_client_id = docovia
 # public_origin =                    # e.g. https://docs.example.com, behind a TLS proxy
 # data = /home/you/docovia-data      # the container's command line passes /data
                                      # (no ~ expansion — spell paths out)
-
-# ── the pipeline ─────────────────────────────────────────────────────────
-# workers = 16                       # ingest workers; half the cores, min 8
 # pdf_passwords =                    # default <data>/passwords
 
 # ── typesense (the container wires these itself) ─────────────────────────
@@ -151,8 +149,8 @@ the image name is passed to docovia, replacing the default
 | flag | default | |
 |---|---|---|
 | `-config` | `~/.config/docovia/config`, then `/etc/docovia/config` | Flag only, for obvious reasons. |
-| `-workers` | half the cores, min 8 | Ingest workers. Each spawns ocrmypdf with `--jobs 2`, so the real thread count is about twice this. |
-| `-enrich-workers` | half the cores, min 8 | Concurrent model calls. The same figure as `-workers` for an unrelated reason: OCR is CPU-bound, a model call is latency held down by the API's request allowance. |
+| `-ingest-workers` | half the cores, min 8 | Ingest workers. Each spawns ocrmypdf with `--jobs 2`, so the real thread count is about twice this. |
+| `-enrich-workers` | half the cores, min 8 | Concurrent model calls. The same figure as `-ingest-workers` for an unrelated reason: OCR is CPU-bound, a model call is latency held down by the API's request allowance. |
 | `-llm` | `true` | `-llm=false` ingests without calling the model at all. |
 | `-llm-model` | `gpt-5.6-luna` | |
 | `-oidc-issuer`, `-oidc-client-id` | — | Both or neither; see Login above. |
