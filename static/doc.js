@@ -500,12 +500,11 @@ document.addEventListener("DOMContentLoaded", () => {
           menu.hidden = true;
         }
         break;
-      case "Backspace":
-        if (!input.value && tags.length) {
-          tags.pop();
-          sync();
-        }
-        break;
+      // Backspace deliberately does nothing here. The usual tag-input trick of
+      // popping the last tag on backspace-in-an-empty-box destroys a tag from
+      // a keystroke aimed at the text being typed, with nothing on screen
+      // saying it happened — and the tag it takes is whichever was last in the
+      // list, not one anybody pointed at. Removing a tag is the cross.
     }
   });
 

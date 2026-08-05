@@ -129,35 +129,84 @@ func applyUsage(doc *Doc, model string, used Usage) float64 {
 // document; it should simply be tried again after the reset.
 var ErrRateLimited = errors.New("rate limited")
 
-// budget tracks what the API reports about the remaining request allowance so
-// that calls certain to be rejected are never made. Every response carries the
-// current numbers, so this stays accurate without any polling of its own.
-type budget struct {
-	mu        sync.Mutex
+// bucket is one of the two allowances the API meters: requests and tokens.
+// Both are quoted the same way on every response, and either one running dry
+// rejects the next call, so both are tracked the same way.
+type bucket struct {
 	remaining int // -1 until a response tells us
 	resetAt   time.Time
-	// resetWindow is that same figure as the API stated it, kept because the
+	// window is that same figure as the API stated it, kept because the
 	// deadline is useless for display: the request bucket refills in about
 	// 120ms, so resetAt has elapsed long before anyone loads the status page.
-	resetWindow time.Duration
-	blocked     time.Time // hard stop after a 429
-	stopped     string    // non-empty disables enrichment entirely
+	window time.Duration
+}
+
+// observe reads one bucket's pair of headers. Absent or unparseable values
+// leave what was there, because a response that says nothing about the
+// allowance is not a response saying the allowance is gone.
+func (bk *bucket) observe(h http.Header, remainingKey, resetKey string) {
+	if v := h.Get(remainingKey); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			bk.remaining = n
+		}
+	}
+	if v := h.Get(resetKey); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			bk.resetAt = time.Now().Add(d)
+			bk.window = d
+		}
+	}
+}
+
+// hold is how long this bucket says to wait. Zero remaining is the case worth
+// catching: the next call is guaranteed to be rejected, so waiting beats
+// spending a request to discover that.
+func (bk *bucket) hold(now time.Time) time.Duration {
+	if bk.remaining == 0 && bk.resetAt.After(now) {
+		return bk.resetAt.Sub(now)
+	}
+	return 0
+}
+
+// report is the pair the status page shows: what is left, and the window it
+// refills in — live while the deadline is ahead, and otherwise as last quoted.
+func (bk *bucket) report() (int, time.Duration) {
+	d := bk.window
+	if live := time.Until(bk.resetAt); live > 0 {
+		d = live
+	}
+	return bk.remaining, d
+}
+
+// budgetStatus is everything the status page needs to say whether the model is
+// being throttled, and by which limit. Requests were never the binding one:
+// the allowance is 500 a minute and a backlog of thousands never took it below
+// 499, while tokens at 200,000 a minute are what a run of long documents
+// actually spends.
+type budgetStatus struct {
+	Requests      int
+	RequestsReset time.Duration
+	Tokens        int
+	TokensReset   time.Duration
+	Stopped       string
+}
+
+// budget tracks what the API reports about the remaining allowances so that
+// calls certain to be rejected are never made. Every response carries the
+// current numbers, so this stays accurate without any polling of its own.
+type budget struct {
+	mu       sync.Mutex
+	requests bucket
+	tokens   bucket
+	blocked  time.Time // hard stop after a 429
+	stopped  string    // non-empty disables enrichment entirely
 }
 
 func (b *budget) observe(h http.Header) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if v := h.Get("x-ratelimit-remaining-requests"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			b.remaining = n
-		}
-	}
-	if v := h.Get("x-ratelimit-reset-requests"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			b.resetAt = time.Now().Add(d)
-			b.resetWindow = d
-		}
-	}
+	b.requests.observe(h, "x-ratelimit-remaining-requests", "x-ratelimit-reset-requests")
+	b.tokens.observe(h, "x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens")
 }
 
 // Wait reports how long to hold off before another call is worth making, and
@@ -174,19 +223,18 @@ func (b *budget) Wait() (hold time.Duration, stopped string) {
 	if b.blocked.After(now) {
 		return b.blocked.Sub(now), ""
 	}
-	// Zero remaining is the case worth catching: the next call is guaranteed
-	// to be rejected, so waiting beats spending a request to discover that.
-	if b.remaining == 0 && b.resetAt.After(now) {
-		return b.resetAt.Sub(now), ""
-	}
-	return 0, ""
+	// Either allowance running dry rejects the next call, so the wait is the
+	// longer of the two. Tokens are the one this actually catches: at 200,000
+	// a minute against calls of a few thousand each, the token bucket empties
+	// while the request bucket has not moved off its ceiling.
+	return max(b.requests.hold(now), b.tokens.hold(now)), ""
 }
 
 func (b *budget) block(d time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.blocked = time.Now().Add(d)
-	b.remaining = 0
+	b.requests.remaining = 0
 }
 
 func (b *budget) stop(reason string) {
@@ -195,19 +243,14 @@ func (b *budget) stop(reason string) {
 	b.stopped = reason
 }
 
-func (b *budget) status() (remaining int, resetIn time.Duration, stopped string) {
+func (b *budget) status() budgetStatus {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// A live countdown when there is one to give — which is the case that
-	// matters, because it only arises when the allowance is actually spent —
-	// and otherwise the window the API last quoted. Reporting nothing once the
-	// deadline passed meant the page never showed this at all: at four calls a
-	// minute against a 500-a-minute bucket the reset is always in the past.
-	resetIn = b.resetWindow
-	if d := time.Until(b.resetAt); d > 0 {
-		resetIn = d
-	}
-	return b.remaining, resetIn, b.stopped
+	var s budgetStatus
+	s.Requests, s.RequestsReset = b.requests.report()
+	s.Tokens, s.TokensReset = b.tokens.report()
+	s.Stopped = b.stopped
+	return s
 }
 
 type OpenAIEnricher struct {
@@ -218,7 +261,8 @@ type OpenAIEnricher struct {
 
 func NewOpenAIEnricher(model, apiKey string) *OpenAIEnricher {
 	e := &OpenAIEnricher{model: model}
-	e.budget.remaining = -1
+	e.budget.requests.remaining = -1
+	e.budget.tokens.remaining = -1
 
 	opts := []option.RequestOption{
 		// The SDK retries 429s by itself, which against a budget counted in
@@ -240,7 +284,7 @@ func NewOpenAIEnricher(model, apiKey string) *OpenAIEnricher {
 	return e
 }
 
-func (e *OpenAIEnricher) Budget() (remaining int, resetIn time.Duration, stopped string) {
+func (e *OpenAIEnricher) Budget() budgetStatus {
 	return e.budget.status()
 }
 

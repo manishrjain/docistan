@@ -920,34 +920,62 @@ func TestDocCentsReadsTheRecordOnly(t *testing.T) {
 // milliseconds. Header values here are what api.openai.com actually returned.
 func TestBudgetReportsAResetWindow(t *testing.T) {
 	var b budget
-	b.remaining = -1
+	b.requests.remaining, b.tokens.remaining = -1, -1
+	// Exactly what api.openai.com returned for this model.
 	h := http.Header{}
 	h.Set("x-ratelimit-remaining-requests", "499")
 	h.Set("x-ratelimit-reset-requests", "120ms")
+	h.Set("x-ratelimit-remaining-tokens", "197798")
+	h.Set("x-ratelimit-reset-tokens", "660ms")
 	b.observe(h)
 
-	remaining, resetIn, stopped := b.status()
-	if remaining != 499 || stopped != "" {
-		t.Fatalf("status = %d/%q, want 499/\"\"", remaining, stopped)
+	s := b.status()
+	if s.Requests != 499 || s.Tokens != 197798 || s.Stopped != "" {
+		t.Fatalf("status = %+v, want 499 requests and 197798 tokens", s)
 	}
-	if resetIn <= 0 {
-		t.Fatalf("resetIn = %v immediately after observing, want the live countdown", resetIn)
+	if s.RequestsReset <= 0 || s.TokensReset <= 0 {
+		t.Fatalf("reset windows %v/%v immediately after observing, want live countdowns",
+			s.RequestsReset, s.TokensReset)
 	}
 
-	// Once the 120ms is up the page must still have something to show, or the
-	// box disappears for everything except the moments right after a call.
+	// Once those windows are up the page must still have something to show, or
+	// the boxes disappear for everything except the moments right after a call.
 	b.mu.Lock()
-	b.resetAt = time.Now().Add(-time.Minute)
+	b.requests.resetAt = time.Now().Add(-time.Minute)
+	b.tokens.resetAt = time.Now().Add(-time.Minute)
 	b.mu.Unlock()
-	_, resetIn, _ = b.status()
-	if resetIn != 120*time.Millisecond {
-		t.Errorf("resetIn after the deadline = %v, want the last quoted 120ms", resetIn)
+	s = b.status()
+	if s.RequestsReset != 120*time.Millisecond || s.TokensReset != 660*time.Millisecond {
+		t.Errorf("windows after the deadline = %v/%v, want the last quoted 120ms/660ms",
+			s.RequestsReset, s.TokensReset)
 	}
-	if got := shortDuration(resetIn); got != "120ms" {
+	if got := shortDuration(s.RequestsReset); got != "120ms" {
 		t.Errorf("rendered %q, want %q", got, "120ms")
 	}
 	if got := shortDuration(90 * time.Second); got != "1m30s" {
 		t.Errorf("rendered %q, want %q", got, "1m30s")
+	}
+}
+
+// Tokens are the allowance that actually runs out: 200,000 a minute against
+// calls of a few thousand each, while requests sit at 499 of 500 throughout. A
+// budget that watched only requests would keep firing calls guaranteed to 429.
+func TestBudgetHoldsWhenTokensRunOut(t *testing.T) {
+	var b budget
+	b.requests.remaining, b.tokens.remaining = -1, -1
+	h := http.Header{}
+	h.Set("x-ratelimit-remaining-requests", "497")
+	h.Set("x-ratelimit-reset-requests", "360ms")
+	h.Set("x-ratelimit-remaining-tokens", "0")
+	h.Set("x-ratelimit-reset-tokens", "12s")
+	b.observe(h)
+
+	hold, stopped := b.Wait()
+	if stopped != "" {
+		t.Fatalf("stopped = %q, want running", stopped)
+	}
+	if hold < 10*time.Second {
+		t.Errorf("hold = %v, want about the 12s the token bucket asked for", hold)
 	}
 }
 

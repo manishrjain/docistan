@@ -16,12 +16,18 @@
       {{with .Spend}}
         <div class="stat"><span class="k">Waiting for tagging</span><span class="v">{{commaNum .Pending}}</span></div>
         <div class="stat"><span class="k">Failed to tag</span><span class="v">{{commaNum .Failed}}</span></div>
-        {{if ge .Budget 0}}
-          <div class="stat">
-            <span class="k">Requests left{{if .ResetIn}} · resets in {{.ResetIn}}{{end}}</span>
-            <span class="v">{{.Budget}}</span>
-          </div>
-        {{end}}
+        {{/* Always on the page, never hidden. A box that appears only after
+             the first call of the run is missing exactly when someone is
+             asking whether anything is throttled; an em dash says "no response
+             has told us yet", which is a different thing from zero. */}}
+        <div class="stat">
+          <span class="k">LLM requests left{{if .RequestsIn}} · resets in {{.RequestsIn}}{{end}}</span>
+          <span class="v">{{if ge .Requests 0}}{{commaNum .Requests}}{{else}}—{{end}}</span>
+        </div>
+        <div class="stat">
+          <span class="k">LLM tokens left{{if .TokensIn}} · resets in {{.TokensIn}}{{end}}</span>
+          <span class="v">{{if ge .Tokens 0}}{{commaNum .Tokens}}{{else}}—{{end}}</span>
+        </div>
       {{end}}
     </div>
   </section>

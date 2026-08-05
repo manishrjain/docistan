@@ -585,12 +585,14 @@ func (a *App) budgetReason() (stopped bool, reason string) {
 	if a.enricher == nil {
 		return false, ""
 	}
-	remaining, resetIn, halted := a.enricher.Budget()
+	b := a.enricher.Budget()
 	switch {
-	case halted != "":
-		return true, halted
-	case remaining == 0 && resetIn > 0:
-		return false, "rate limit resets in " + resetIn.Round(time.Second).String()
+	case b.Stopped != "":
+		return true, b.Stopped
+	case b.Requests == 0 && b.RequestsReset > 0:
+		return false, "rate limit resets in " + shortDuration(b.RequestsReset)
+	case b.Tokens == 0 && b.TokensReset > 0:
+		return false, "token limit resets in " + shortDuration(b.TokensReset)
 	}
 	return false, ""
 }
@@ -652,9 +654,16 @@ type SpendSummary struct {
 
 	Pending int
 	Failed  int
-	Budget  int
-	ResetIn string
-	Stopped string
+	// Both allowances, because only one of them has ever been the binding
+	// constraint and it is not the one that was on the page: requests sit at
+	// 499 of 500 through a backlog of thousands, while tokens are metered at
+	// 200,000 a minute against calls of a few thousand each. -1 means no
+	// response has told us yet.
+	Requests   int
+	RequestsIn string
+	Tokens     int
+	TokensIn   string
+	Stopped    string
 }
 
 // shortDuration formats a rate-limit window at a precision that survives it.
@@ -2365,10 +2374,13 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// what this process had tagged since it started, and a page that
 		// cannot say when the run began cannot say what the number is of.
 		spend.Pending, _, spend.Failed = a.enrichq.Stats()
-		remaining, resetIn, stopped := a.enricher.Budget()
-		spend.Budget, spend.Stopped = remaining, stopped
-		if resetIn > 0 {
-			spend.ResetIn = shortDuration(resetIn)
+		b := a.enricher.Budget()
+		spend.Requests, spend.Tokens, spend.Stopped = b.Requests, b.Tokens, b.Stopped
+		if b.RequestsReset > 0 {
+			spend.RequestsIn = shortDuration(b.RequestsReset)
+		}
+		if b.TokensReset > 0 {
+			spend.TokensIn = shortDuration(b.TokensReset)
 		}
 	}
 	a.render(w, "status.html", page{
