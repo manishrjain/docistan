@@ -1558,11 +1558,31 @@ func (a *App) purge(ctx context.Context, id int, event, why string) error {
 // handleDocDelete destroys one document. This route has always been the
 // permanent one; what changed is that the button which used to point at it now
 // points at the trash, so reaching it means someone asked for "delete forever".
+// onwardFrom is where an action that removes a document from its listing
+// lands: the next document under the same filters, the previous at the end of
+// the listing, the listing itself when the document was alone in it. Decided
+// before the removal is persisted — one write later the document is out of
+// the index and its neighbours are unfindable. Built from the filters the
+// form carried, never followed as a URL, so the only places this can name are
+// a document and a listing.
+func (a *App) onwardFrom(r *http.Request, id int) string {
+	q := parseQuery(r.URL.Query())
+	if nav := a.docNav(r.Context(), q, id); nav != nil {
+		if next := cmp.Or(nav.Next, nav.Prev); next != "" {
+			return next
+		}
+	}
+	return page{Query: q}.BackLink()
+}
+
 func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
 		return
 	}
+	// Deleting forever happens from inside the trash, and the review being
+	// kept moving there is the trash listing: next stays under tag=trash.
+	onward := a.onwardFrom(r, id)
 	if err := a.purge(r.Context(), id, "deleted", ""); err != nil {
 		// Already deleted is not an error to report, it is a document that is
 		// not there — the same answer its page and every other route that
@@ -1576,7 +1596,7 @@ func (a *App) handleDocDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "deleting document: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, onward, http.StatusSeeOther)
 }
 
 // handleDocTrash and handleDocRestore move one document in and out of the
@@ -1591,16 +1611,9 @@ func (a *App) setTrashed(w http.ResponseWriter, r *http.Request, trash bool) {
 	if !ok {
 		return
 	}
-	// Where to land is decided now, while this document still holds its place
-	// in the listing — one write later it is out of the index and its
-	// neighbours are unfindable. Trashing during a review should keep the
-	// review moving: the next document, the previous at the end of the
-	// listing, and only when this was the last one left, the listing itself.
 	var onward string
 	if trash && !wantsJSON(r) {
-		if nav := a.docNav(r.Context(), parseQuery(r.URL.Query()), doc.ID); nav != nil {
-			onward = cmp.Or(nav.Next, nav.Prev)
-		}
+		onward = a.onwardFrom(r, doc.ID)
 	}
 	if trash {
 		doc.Trash(time.Now())
@@ -1619,15 +1632,10 @@ func (a *App) setTrashed(w http.ResponseWriter, r *http.Request, trash bool) {
 		writeJSON(w, map[string]any{"trashed": doc.Trashed(), "delete_after_ts": doc.DeleteAfterTS})
 		return
 	}
-	// Trashing moves on to the neighbour chosen above, or the listing when
-	// there was none. Restoring is the opposite: you are putting the document
-	// back to look at it, so that one stays put. Both destinations are built
-	// here from the filters the form carried, never followed as a URL, so the
-	// only places this can land are a document and a listing.
+	// Trashing moves on to the neighbour chosen above. Restoring is the
+	// opposite: you are putting the document back to look at it, so that one
+	// stays put.
 	if trash {
-		if onward == "" {
-			onward = page{Query: parseQuery(r.URL.Query())}.BackLink()
-		}
 		http.Redirect(w, r, onward, http.StatusSeeOther)
 		return
 	}
