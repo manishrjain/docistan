@@ -59,7 +59,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	if err := p.watch(ctx); err != nil {
 		return err
 	}
-	go p.scanConsume()
+	go p.scanIngest()
 	return nil
 }
 
@@ -95,8 +95,8 @@ func (p *Pipeline) EnqueueDoc(id int) error {
 	return nil
 }
 
-func (p *Pipeline) scanConsume() {
-	entries, err := os.ReadDir(p.app.store.ConsumeDir())
+func (p *Pipeline) scanIngest() {
+	entries, err := os.ReadDir(p.app.store.IngestDir())
 	if err != nil {
 		return
 	}
@@ -104,7 +104,7 @@ func (p *Pipeline) scanConsume() {
 		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		p.Enqueue(filepath.Join(p.app.store.ConsumeDir(), e.Name()))
+		p.Enqueue(filepath.Join(p.app.store.IngestDir(), e.Name()))
 	}
 }
 
@@ -113,7 +113,7 @@ func (p *Pipeline) watch(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := w.Add(p.app.store.ConsumeDir()); err != nil {
+	if err := w.Add(p.app.store.IngestDir()); err != nil {
 		w.Close()
 		return err
 	}
@@ -284,7 +284,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	job := &Job{Path: path, Name: name, Started: time.Now()}
 	defer p.clearJob(job)
 
-	fromConsume := filepath.Dir(path) == store.ConsumeDir()
+	fromIngest := filepath.Dir(path) == store.IngestDir()
 
 	p.setStage(job, "hash")
 	sum, size, err := hashFile(path)
@@ -303,7 +303,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 		// An unsupported file never becomes a document: no sidecar, no id. The
 		// upload path (acceptUpload in web.go) already refuses these with a
 		// visible flash before they ever reach the inbox, so this branch only
-		// fires for consume-folder drops — and since the file is then deleted,
+		// fires for ingest-folder drops — and since the file is then deleted,
 		// this line is all that says the archive ever saw that name. That is
 		// why the detail carries the deletion too: whoever finds the file gone
 		// has only this to read, whether they read it in the log now or in the
@@ -316,7 +316,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 	// Reuse the existing document when reprocessing something we already own;
 	// only files arriving through the inbox are dedup candidates.
 	var doc *Doc
-	if !fromConsume {
+	if !fromIngest {
 		if id, err := idFromOriginalPath(path); err == nil {
 			if d, err := store.Load(id); err == nil {
 				doc = d
@@ -424,7 +424,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 
 // removeFromInbox deletes a file only if it is actually sitting in the inbox.
 // Both delete paths in the pipeline are reached with a path that is usually a
-// consume-folder drop but can, on a reprocess whose sidecar failed to load, be
+// ingest-folder drop but can, on a reprocess whose sidecar failed to load, be
 // originals/<id>.<ext> — the one copy of a document that cannot be regenerated,
 // because the archive PDF is derived from the original and the original is
 // derived from nothing. The dedup lookup will match such a file against its own
@@ -437,7 +437,7 @@ func (p *Pipeline) process(ctx context.Context, path string) {
 // loud, because getting here means a damaged sidecar or a bug, and it leaves the
 // file exactly where it was either way.
 func (p *Pipeline) removeFromInbox(path, why string) {
-	if filepath.Dir(path) != p.app.store.ConsumeDir() {
+	if filepath.Dir(path) != p.app.store.IngestDir() {
 		logf("refusing to delete %s as %s: it is not in the inbox, so it may be a document's only original — this means a damaged sidecar or a bug; the file has been left alone", path, why)
 		return
 	}

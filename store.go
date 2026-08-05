@@ -246,7 +246,10 @@ type Store struct {
 
 func NewStore(dir string) (*Store, error) {
 	s := &Store{dir: dir, inflight: map[string]bool{}}
-	for _, sub := range []string{"consume", "docs", "originals", "archive", "thumbs"} {
+	if err := renameConsumeToIngest(dir); err != nil {
+		return nil, err
+	}
+	for _, sub := range []string{"ingest", "docs", "originals", "archive", "thumbs"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
 			return nil, err
 		}
@@ -257,6 +260,36 @@ func NewStore(dir string) (*Store, error) {
 	return s, nil
 }
 
+// renameConsumeToIngest carries an archive across the rename of the inbox.
+//
+// Without it the rename is silent and destructive in the quietest way: the new
+// directory is created empty, the old one keeps whatever was waiting in it, and
+// those files are never ingested and never reported — nothing failed, they were
+// simply put somewhere nobody looks any more.
+//
+// It runs before the directories are created, so the ordinary case is a rename
+// of a directory that has not been made yet this boot. An archive with both
+// keeps both: that is not a shape this can produce, so it is somebody having
+// made one by hand, and guessing which they meant is worse than saying so.
+//
+// Deletable once no archive predates the rename, which for one archive means
+// after its next start.
+func renameConsumeToIngest(dir string) error {
+	old, new := filepath.Join(dir, "consume"), filepath.Join(dir, "ingest")
+	if _, err := os.Stat(old); err != nil {
+		return nil
+	}
+	if _, err := os.Stat(new); err == nil {
+		logf("both %s and %s exist; leaving them alone — move anything waiting in consume/ into ingest/ yourself", old, new)
+		return nil
+	}
+	if err := os.Rename(old, new); err != nil {
+		return fmt.Errorf("renaming the inbox from consume to ingest: %w", err)
+	}
+	logf("renamed %s to %s", old, new)
+	return nil
+}
+
 func (s *Store) path(parts ...string) string {
 	return filepath.Join(append([]string{s.dir}, parts...)...)
 }
@@ -264,7 +297,7 @@ func (s *Store) path(parts ...string) string {
 func (s *Store) DocPath(id int) string     { return s.path("docs", strconv.Itoa(id)+".json") }
 func (s *Store) ArchivePath(id int) string { return s.path("archive", strconv.Itoa(id)+".pdf") }
 func (s *Store) ThumbPath(id int) string   { return s.path("thumbs", strconv.Itoa(id)+".jpg") }
-func (s *Store) ConsumeDir() string        { return s.path("consume") }
+func (s *Store) IngestDir() string         { return s.path("ingest") }
 func (s *Store) ArchiveDir() string        { return s.path("archive") }
 func (s *Store) JournalPath() string       { return s.path("journal.jsonl") }
 

@@ -2274,7 +2274,7 @@ func (a *App) acceptUpload(ctx context.Context, fh *multipart.FileHeader) Flash 
 	defer src.Close()
 
 	// The dot prefix keeps the watcher off it until it is fully written.
-	tmp, err := os.CreateTemp(a.store.ConsumeDir(), ".upload-*")
+	tmp, err := os.CreateTemp(a.store.IngestDir(), ".upload-*")
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -2311,7 +2311,7 @@ func (a *App) acceptUpload(ctx context.Context, fh *multipart.FileHeader) Flash 
 		return Flash{Text: fmt.Sprintf("%s is already in the archive", name), DocID: id}
 	}
 
-	dst := uniquePath(a.store.ConsumeDir(), name)
+	dst := uniquePath(a.store.IngestDir(), name)
 	if err := os.Rename(tmpName, dst); err != nil {
 		os.Remove(tmpName)
 		return fail("%v", err)

@@ -24,7 +24,7 @@ docker run -d --init --name docovia --restart unless-stopped \
   docovia
 ```
 
-Then http://localhost:8080, and drop files into `~/docovia-data/consume/`.
+Then http://localhost:8080, and drop files into `~/docovia-data/ingest/`.
 
 Four details in that command are load-bearing:
 
@@ -85,7 +85,7 @@ Everything after the image name is passed to docovia, replacing the default
 
 ```
 ~/docovia-data/
-  consume/      drop files here; the watcher waits for the size to settle
+  ingest/       drop files here; the watcher waits for the size to settle
   originals/    exactly what arrived — the preservation copy
   archive/      derived PDF/A with a text layer — reproducible by re-running OCR
   thumbs/       first-page JPEGs

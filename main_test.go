@@ -658,6 +658,75 @@ func TestEnrichQueueNextIsExclusive(t *testing.T) {
 	}
 }
 
+// The inbox was called consume and is called ingest. An archive that predates
+// the rename has to come with it, files and all — the failure otherwise is the
+// quiet kind: a new empty directory, an old one still holding whatever was
+// waiting, and nothing anywhere saying those documents will never be ingested.
+func TestInboxRenameCarriesWaitingFiles(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "consume")
+	if err := os.MkdirAll(old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	waiting := filepath.Join(old, "scan_001.pdf")
+	if err := os.WriteFile(waiting, []byte("%PDF-1.7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(s.IngestDir()) != "ingest" {
+		t.Errorf("IngestDir() = %q", s.IngestDir())
+	}
+	if _, err := os.Stat(filepath.Join(s.IngestDir(), "scan_001.pdf")); err != nil {
+		t.Errorf("the waiting file did not come across: %v", err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Error("consume/ is still there, so the next start will find it again")
+	}
+}
+
+// A fresh archive has no consume/ and must not grow one, and a second start
+// must not undo the first.
+func TestInboxRenameIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	for i := range 2 {
+		s, err := NewStore(dir)
+		if err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+		if _, err := os.Stat(s.IngestDir()); err != nil {
+			t.Fatalf("start %d: no ingest dir: %v", i, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "consume")); !os.IsNotExist(err) {
+			t.Fatalf("start %d: a consume dir appeared", i)
+		}
+	}
+}
+
+// Both present is not a shape the rename can produce, so it is somebody's hand
+// at work and guessing between them is worse than leaving them alone.
+func TestInboxRenameLeavesBothAlone(t *testing.T) {
+	dir := t.TempDir()
+	for _, sub := range []string{"consume", "ingest"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mine := filepath.Join(dir, "consume", "kept.pdf")
+	if err := os.WriteFile(mine, []byte("%PDF-1.7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mine); err != nil {
+		t.Errorf("the file in consume/ was moved or destroyed: %v", err)
+	}
+}
+
 // A title is free text from a model or a person, and it becomes a filename on
 // someone's disk. These are the shapes that break that.
 func TestDownloadName(t *testing.T) {
@@ -1510,7 +1579,7 @@ func TestNewStoreCreatesOnlyTheDirectoriesItUses(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	want := []string{"archive", "consume", "docs", "originals", "thumbs"}
+	want := []string{"archive", "docs", "ingest", "originals", "thumbs"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("NewStore created %v, want exactly %v", got, want)
 	}
@@ -2392,7 +2461,7 @@ func TestRemoveFromInboxOnlyEverDeletesFromTheInbox(t *testing.T) {
 		path     string
 		survives bool
 	}{
-		{"a consume-folder drop, which is what deletion is for", filepath.Join(s.ConsumeDir(), "scan_001.pdf"), false},
+		{"a ingest-folder drop, which is what deletion is for", filepath.Join(s.IngestDir(), "scan_001.pdf"), false},
 		{"originals/1.pdf, the copy that cannot be regenerated", s.OriginalPath(1, ".pdf"), true},
 		{"a path outside the data directory entirely", filepath.Join(t.TempDir(), "elsewhere.pdf"), true},
 	}
@@ -2439,7 +2508,7 @@ func TestRemoveFromInboxIsLoudOnlyWhenSomethingIsWrong(t *testing.T) {
 	}
 
 	buf.Reset()
-	p.removeFromInbox(filepath.Join(s.ConsumeDir(), "already-gone.pdf"), "duplicate")
+	p.removeFromInbox(filepath.Join(s.IngestDir(), "already-gone.pdf"), "duplicate")
 	if buf.Len() != 0 {
 		t.Errorf("a file that was already gone was reported as a problem:\n%s", buf.String())
 	}
