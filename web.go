@@ -640,16 +640,6 @@ type page struct {
 // the indexed documents, so they cover every run and are what a backfill
 // should be judged on.
 type SpendSummary struct {
-	Calls int64
-	In    int64
-	Out   int64
-	// Priced is false when the configured model is missing from the price
-	// table. The session tokens are still real and still worth showing; the
-	// dollars would be a fiction, so the page shows the counts without them.
-	Priced bool
-	USD    float64
-	PerDoc float64
-
 	AllIn   int64
 	AllOut  int64
 	AllDocs int
@@ -2346,19 +2336,7 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	var spend *SpendSummary
 	if a.enricher != nil {
-		// Banked call by call as each was priced, like the documents' own
-		// figures, rather than re-derived here from the session's tokens. The
-		// page stays in dollars because a whole session's spend is a
-		// dollar-sized number.
-		calls, in, out, cents := a.enricher.Spend()
-		spend = &SpendSummary{
-			Calls: calls, In: in, Out: out,
-			Priced: modelPriced(a.cfg.LLMModel),
-			USD:    cents / 100,
-		}
-		if calls > 0 {
-			spend.PerDoc = spend.USD / float64(calls)
-		}
+		spend = &SpendSummary{}
 		// Summed from the documents themselves, so this covers every run the
 		// archive has ever seen rather than only this one — and because each
 		// document banked its own cost when it was tagged, this is recorded

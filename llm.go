@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -204,23 +203,6 @@ type OpenAIEnricher struct {
 	client openai.Client
 	model  string
 	budget budget
-
-	inTokens  atomic.Int64
-	outTokens atomic.Int64
-	calls     atomic.Int64
-	// spentCents is banked call by call, as each one is priced, rather than
-	// worked out afterwards from the session's token totals. The arithmetic
-	// agrees today and would stop agreeing the moment a price or a model
-	// changed under it, and a figure that says what was spent should not be a
-	// multiplication anybody can get wrong later.
-	spentMu    sync.Mutex
-	spentCents float64
-}
-
-func (e *OpenAIEnricher) bank(cents float64) {
-	e.spentMu.Lock()
-	defer e.spentMu.Unlock()
-	e.spentCents += cents
 }
 
 func NewOpenAIEnricher(model, apiKey string) *OpenAIEnricher {
@@ -245,12 +227,6 @@ func NewOpenAIEnricher(model, apiKey string) *OpenAIEnricher {
 	}
 	e.client = openai.NewClient(opts...)
 	return e
-}
-
-func (e *OpenAIEnricher) Spend() (calls, in, out int64, cents float64) {
-	e.spentMu.Lock()
-	defer e.spentMu.Unlock()
-	return e.calls.Load(), e.inTokens.Load(), e.outTokens.Load(), e.spentCents
 }
 
 func (e *OpenAIEnricher) Budget() (remaining int, resetIn time.Duration, stopped string) {
@@ -410,10 +386,6 @@ func (e *OpenAIEnricher) Enrich(ctx context.Context, in EnrichInput) (Meta, Usag
 	}
 
 	used = Usage{In: resp.Usage.PromptTokens, Out: resp.Usage.CompletionTokens}
-	e.calls.Add(1)
-	e.inTokens.Add(used.In)
-	e.outTokens.Add(used.Out)
-	e.bank(llmCents(e.model, used))
 
 	if len(resp.Choices) == 0 {
 		return meta, used, errors.New("model returned no choices")

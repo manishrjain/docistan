@@ -37,17 +37,6 @@
           <div class="stat"><span class="k">Input tokens</span><span class="v">{{commaNum .AllIn}}</span></div>
           <div class="stat"><span class="k">Output tokens</span><span class="v">{{commaNum .AllOut}}</span></div>
         </div>
-        {{if .Calls}}
-          <p class="quiet" style="margin-top:8px">
-            This session: {{commaNum .In}} in + {{commaNum .Out}} out over
-            {{.Calls}} call{{if ne .Calls 1}}s{{end}}{{if .Priced}}, {{usd .USD}}{{end}}.
-          </p>
-        {{end}}
-      {{else if .Calls}}
-        <p class="quiet" style="margin-top:8px">
-          This session: {{commaNum .In}} in + {{commaNum .Out}} out over
-          {{.Calls}} call{{if ne .Calls 1}}s{{end}}{{if .Priced}}, {{usd .USD}}{{end}}.
-        </p>
       {{end}}
     </section>
   {{end}}
