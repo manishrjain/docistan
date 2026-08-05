@@ -136,8 +136,12 @@ type budget struct {
 	mu        sync.Mutex
 	remaining int // -1 until a response tells us
 	resetAt   time.Time
-	blocked   time.Time // hard stop after a 429
-	stopped   string    // non-empty disables enrichment entirely
+	// resetWindow is that same figure as the API stated it, kept because the
+	// deadline is useless for display: the request bucket refills in about
+	// 120ms, so resetAt has elapsed long before anyone loads the status page.
+	resetWindow time.Duration
+	blocked     time.Time // hard stop after a 429
+	stopped     string    // non-empty disables enrichment entirely
 }
 
 func (b *budget) observe(h http.Header) {
@@ -151,6 +155,7 @@ func (b *budget) observe(h http.Header) {
 	if v := h.Get("x-ratelimit-reset-requests"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			b.resetAt = time.Now().Add(d)
+			b.resetWindow = d
 		}
 	}
 }
@@ -193,8 +198,14 @@ func (b *budget) stop(reason string) {
 func (b *budget) status() (remaining int, resetIn time.Duration, stopped string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.resetAt.After(time.Now()) {
-		resetIn = time.Until(b.resetAt)
+	// A live countdown when there is one to give — which is the case that
+	// matters, because it only arises when the allowance is actually spent —
+	// and otherwise the window the API last quoted. Reporting nothing once the
+	// deadline passed meant the page never showed this at all: at four calls a
+	// minute against a 500-a-minute bucket the reset is always in the past.
+	resetIn = b.resetWindow
+	if d := time.Until(b.resetAt); d > 0 {
+		resetIn = d
 	}
 	return b.remaining, resetIn, b.stopped
 }

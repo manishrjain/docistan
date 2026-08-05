@@ -28,8 +28,9 @@ type Config struct {
 	TypesenseKey string
 	Collection   string
 	Workers      int
-	// EnrichWorkers is how many model calls may be outstanding at once. See the
-	// flag for why it is not Workers.
+	// EnrichWorkers is how many model calls may be outstanding at once. It
+	// defaults to the same figure as Workers; see the flag for why that is a
+	// coincidence of size rather than a shared reason.
 	EnrichWorkers int
 	LLMModel      string
 	LLMEnabled    bool
@@ -149,11 +150,14 @@ func main() {
 	flag.StringVar(&cfg.TypesenseKey, "typesense-key", cmp.Or(os.Getenv("TYPESENSE_API_KEY"), "docovia-dev-key"), "Typesense API key")
 	flag.StringVar(&cfg.Collection, "collection", "documents", "Typesense collection name; give a second instance its own")
 	flag.IntVar(&cfg.Workers, "workers", defaultWorkers(), "ingest workers")
-	// Its own number, deliberately unrelated to -workers. That one is sized to
-	// the cores because every ingest worker spawns ocrmypdf; a model call is
-	// latency and almost no local work, so the right figure here is whatever
-	// the API's request allowance will bear.
-	flag.IntVar(&cfg.EnrichWorkers, "enrich-workers", 4, "concurrent model calls")
+	// The same figure as -workers, though for the opposite reason: that one is
+	// capped by the cores because every ingest worker spawns ocrmypdf, while a
+	// model call is latency and almost no local work. What holds this down is
+	// the API's request allowance, and at four calls in flight a backlog of
+	// thousands drained far below it — the remaining-requests figure never
+	// moved off its ceiling. Matching -workers spends more of the allowance
+	// without needing a second number to reason about.
+	flag.IntVar(&cfg.EnrichWorkers, "enrich-workers", defaultWorkers(), "concurrent model calls")
 	flag.StringVar(&cfg.LLMModel, "llm-model", "gpt-5.6-luna", "LLM model id")
 	flag.BoolVar(&cfg.LLMEnabled, "llm", true, "use the model to title, tag and date documents")
 	// Empty rather than a default, because there is more than one default and

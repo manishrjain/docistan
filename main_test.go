@@ -914,6 +914,43 @@ func TestDocCentsReadsTheRecordOnly(t *testing.T) {
 
 // applyUsage hands back what it banked so the journal reports that figure
 // rather than deriving the same number a second time.
+// The status page showed no reset window at all, for two reasons that both had
+// to be fixed: the deadline had always passed by the time the page was drawn,
+// and the figure was rounded to a second when the API quotes it in
+// milliseconds. Header values here are what api.openai.com actually returned.
+func TestBudgetReportsAResetWindow(t *testing.T) {
+	var b budget
+	b.remaining = -1
+	h := http.Header{}
+	h.Set("x-ratelimit-remaining-requests", "499")
+	h.Set("x-ratelimit-reset-requests", "120ms")
+	b.observe(h)
+
+	remaining, resetIn, stopped := b.status()
+	if remaining != 499 || stopped != "" {
+		t.Fatalf("status = %d/%q, want 499/\"\"", remaining, stopped)
+	}
+	if resetIn <= 0 {
+		t.Fatalf("resetIn = %v immediately after observing, want the live countdown", resetIn)
+	}
+
+	// Once the 120ms is up the page must still have something to show, or the
+	// box disappears for everything except the moments right after a call.
+	b.mu.Lock()
+	b.resetAt = time.Now().Add(-time.Minute)
+	b.mu.Unlock()
+	_, resetIn, _ = b.status()
+	if resetIn != 120*time.Millisecond {
+		t.Errorf("resetIn after the deadline = %v, want the last quoted 120ms", resetIn)
+	}
+	if got := shortDuration(resetIn); got != "120ms" {
+		t.Errorf("rendered %q, want %q", got, "120ms")
+	}
+	if got := shortDuration(90 * time.Second); got != "1m30s" {
+		t.Errorf("rendered %q, want %q", got, "1m30s")
+	}
+}
+
 func TestApplyUsageReturnsWhatItBanked(t *testing.T) {
 	doc := &Doc{}
 	cents := applyUsage(doc, "gpt-5.6-luna", Usage{In: 2000, Out: 500})

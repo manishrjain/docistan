@@ -75,7 +75,7 @@ Everything after the image name is passed to docovia, replacing the default
 | flag | default | |
 |---|---|---|
 | `-workers` | half the cores, min 8 | Ingest workers. Each spawns ocrmypdf with `--jobs 2`, so the real thread count is about twice this. |
-| `-enrich-workers` | 4 | Concurrent model calls. Unrelated to `-workers` on purpose: OCR is CPU-bound, a model call is latency. |
+| `-enrich-workers` | half the cores, min 8 | Concurrent model calls. The same figure as `-workers` for an unrelated reason: OCR is CPU-bound, a model call is latency held down by the API's request allowance. |
 | `-llm` | `true` | `-llm=false` ingests without calling the model at all. |
 | `-llm-model` | `gpt-5.6-luna` | |
 | `-public-origin` | — | e.g. `https://docs.example.com`, for the cross-site check when behind a proxy. |

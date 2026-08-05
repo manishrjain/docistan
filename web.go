@@ -657,6 +657,17 @@ type SpendSummary struct {
 	Stopped string
 }
 
+// shortDuration formats a rate-limit window at a precision that survives it.
+// Rounding to the second was hiding the figure it was meant to show: the
+// request bucket refills in about 120ms, and 120ms to the nearest second is
+// zero, which the template reads as nothing to say.
+func shortDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
+}
+
 // wantsJSON reports whether the caller is our own JavaScript rather than a
 // browser following a form. Spelled once so every background action agrees on
 // what counts as an asynchronous request.
@@ -2357,7 +2368,7 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		remaining, resetIn, stopped := a.enricher.Budget()
 		spend.Budget, spend.Stopped = remaining, stopped
 		if resetIn > 0 {
-			spend.ResetIn = resetIn.Round(time.Second).String()
+			spend.ResetIn = shortDuration(resetIn)
 		}
 	}
 	a.render(w, "status.html", page{
