@@ -1,6 +1,4 @@
-# docovia
-
-The Holy Land for Docs.
+# Docovia - The Land For Docs
 
 A self-hosted document archive: drop files in, get them OCR'd, titled, tagged,
 dated and searchable. Go and Typesense, no database, and the JSON sidecars next
