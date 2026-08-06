@@ -6,11 +6,6 @@ to your documents are the source of truth.
 
 ![Docovia's main grid — every document OCR'd, titled, tagged, dated and summarized](screenshots/index.png)
 
-*The archive in these screenshots is demo data — public-domain government
-documents, the CFPB's deliberately fictional mortgage samples, and two
-fabricated "scans" — so what you see is exactly what the pipeline produced,
-with nobody's real paperwork on display.*
-
 ## Origin
 
 First, I (Manish) would like to thank paperless-ngx. I self-host it and it got
