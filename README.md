@@ -29,8 +29,16 @@ the coding agent brought.
 ## Naturalization Process
 
 Docovia is great because you can just dump your documents without worrying about
-any folder level organization. Once uploaded, Docovia would process a doc as
-follows:
+any folder level organization.
+
+It accepts PDFs, images (jpg, png, tiff, webp), plain text and Markdown, and
+the mainstream office formats — Word, Excel, PowerPoint, their OpenDocument
+cousins and RTF, converted via LibreOffice. Whatever arrives is normalized
+into a PDF with a text layer, so a spreadsheet and a phone photo of a receipt
+end up equally searchable. Anything else is refused out loud — a failed doc
+you can see and retry — rather than silently ignored.
+
+Once uploaded, Docovia would process a doc as follows:
 
 1. Check for duplicates via SHA checksum and reject if it finds one.
 1. Unlock if locked, trying every known password from previous successful
@@ -262,9 +270,9 @@ If `indexed 0` is wrong for your archive, neither did the data mount.
   ingest/       drop files here; the watcher waits for the size to settle
   originals/    exactly what arrived — the preservation copy
   archive/      derived PDF/A with a text layer — reproducible by re-running OCR
-  thumbs/       first-page JPEGs
-  docs/         one JSON sidecar per document; the source of truth
-  journal.jsonl what happened to what, and what it cost
+  thumbs/       generated thumbnail JPEG per doc
+  docs/         JSON metadata per document
+  journal.jsonl structured log per doc to show in status page
   passwords     0600, one password per line
   session.key   0600, signs login cookies; delete it to sign everyone out
 ```
