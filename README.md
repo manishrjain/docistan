@@ -1,15 +1,16 @@
-# Docovia - The Land For Docs
+# Docovia - The Land For Your Docs
 
-A self-hosted document archive: drop files in, get them OCR'd, titled, tagged,
-dated and searchable. Go and Typesense, no database, and the JSON sidecars next
-to your documents are the source of truth.
+Docovia is the land for your docs. An open-source, self-hosted document
+librarian: drop files in, get them OCR'd, titled, tagged, dated and searchable.
+Docovia uses Javascript, Go and Typesense, no database, and the JSON sidecars
+next to your documents are the source of truth.
 
 ![Docovia's main grid — every document OCR'd, titled, tagged, dated and summarized](screenshots/index.png)
 
 ## Origin
 
-First, I (Manish) would like to thank paperless-ngx. I self-host it and it got
-me away from the control of Dropbox and Google Drive, and showed me what's
+First, I (Manish) would like to thank paperless-ngx. I self-host it. It got me
+away from the control of Dropbox and Google Drive, and showed me what's
 possible.
 
 After months of usage, I grew unhappy with paperless-ngx: search was slow,
@@ -28,6 +29,13 @@ the coding agent brought.
 
 ## Naturalization Process
 
+> I pledge allegiance to the land of Docovia,
+> and to the JSON sidecar in which I stand:
+> one document, under OCR, enriched,
+> with titles, summaries and tags for all.
+>
+> -- Docs when they land in Docovia, maybe
+
 Docovia is great because you can just dump your documents without worrying about
 any folder level organization.
 
@@ -35,15 +43,15 @@ It accepts PDFs, images (jpg, png, tiff, webp), plain text and Markdown, and
 the mainstream office formats — Word, Excel, PowerPoint, their OpenDocument
 cousins and RTF, converted via LibreOffice. Whatever arrives is normalized
 into a PDF with a text layer, so a spreadsheet and a phone photo of a receipt
-end up equally searchable. Anything else is refused out loud — a failed doc
-you can see and retry — rather than silently ignored.
+end up equally searchable. Anything else is refused out loud.
 
 Once uploaded, Docovia would process a doc as follows:
 
 1. Check for duplicates via SHA checksum and reject if it finds one.
-1. Unlock if locked, trying every known password from previous successful
-   unlocks. Overwrite the original with this unlocked version, while
-   keeping the original's checksum to catch duplicates.
+1. Unlock if locked PDF, trying every known password from previous successful
+   unlocks. Overwrite the original with this unlocked version (never having to
+   deal with locked PDFs is a feature), while keeping the original's checksum
+   to catch duplicates.
 1. Extract text, either by reading the native text layer or running OCR over
    them.
 1. Send extracted text to LLM (OpenAI) to determine title, document
@@ -59,10 +67,10 @@ document date. If a doc is trashed, it stays put for the next 30 days but
 disappears from search results, after which everything about the doc gets
 permanently deleted.
 
-![Searching for "tax": scored results with highlighted snippets, tag filters and date ranges](screenshots/search-tax.png)
-
 What Docovia doesn't provide is any access control. If you can access Docovia,
 you can access all available docs.
+
+![Searching for "tax": scored results with highlighted snippets, tag filters and date ranges](screenshots/search-tax.png)
 
 ## Install and Run
 
