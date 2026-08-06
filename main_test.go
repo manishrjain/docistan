@@ -1535,7 +1535,7 @@ func TestCrossSiteWritesAreRefused(t *testing.T) {
 	}
 	for _, c := range cases {
 		reached := false
-		h := guard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }), public)
+		h := guard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }), public, false)
 		req := httptest.NewRequest(c.method, "/doc/5/delete", nil)
 		for k, v := range c.headers {
 			req.Header.Set(k, v)
@@ -1564,7 +1564,7 @@ func TestWithoutAPublicOriginTheHeaderStillDecides(t *testing.T) {
 		{"an origin alone cannot be judged", map[string]string{"Origin": "https://evil.example"}, true},
 	} {
 		reached := false
-		h := guard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }), "")
+		h := guard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }), "", false)
 		req := httptest.NewRequest("POST", "/upload", nil)
 		for k, v := range c.hdr {
 			req.Header.Set(k, v)
@@ -1572,6 +1572,39 @@ func TestWithoutAPublicOriginTheHeaderStillDecides(t *testing.T) {
 		h.ServeHTTP(httptest.NewRecorder(), req)
 		if reached != c.allow {
 			t.Errorf("%s: handler reached = %v, want %v", c.name, reached, c.allow)
+		}
+	}
+}
+
+// Read-only refuses every method that could change something, whoever sends
+// it and however same-origin it is — and leaves reading and the auth routes
+// alone, because a demo you cannot sign out of is a trap.
+func TestReadOnlyRefusesChanges(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		method string
+		path   string
+		allow  bool
+	}{
+		{"reading the archive", "GET", "/doc/5", true},
+		{"a same-origin edit", "POST", "/doc/5", false},
+		{"an upload", "POST", "/upload", false},
+		{"delete forever", "POST", "/doc/5/delete", false},
+		{"enrich, which spends money", "POST", "/doc/5/enrich", false},
+		{"signing out", "POST", "/auth/logout", true},
+	} {
+		reached := false
+		h := guard(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }), "", true)
+		req := httptest.NewRequest(c.method, c.path, nil)
+		// Same-origin per the browser itself: read-only must refuse anyway.
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if reached != c.allow {
+			t.Errorf("%s: handler reached = %v, want %v", c.name, reached, c.allow)
+		}
+		if !c.allow && rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status %d, want %d", c.name, rec.Code, http.StatusForbidden)
 		}
 	}
 }

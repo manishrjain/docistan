@@ -57,7 +57,13 @@ type Config struct {
 	// which is not what the process itself can observe once a proxy is in
 	// front. Empty leaves the cross-site check resting on Sec-Fetch-Site alone.
 	PublicOrigin string
-	Dev          bool
+	// ReadOnly rejects every change arriving over the web — uploads, edits,
+	// tags, trash, delete, reprocess, enrich — so a public demo can be left
+	// open without anyone rearranging it or spending the model budget. The
+	// ingest folder is deliberately not covered: it is filesystem access,
+	// which the web's visitors do not have and the operator already does.
+	ReadOnly bool
+	Dev      bool
 }
 
 // App holds everything the handlers and the pipeline need.
@@ -191,6 +197,8 @@ func main() {
 	flag.StringVar(&cfg.OIDCClientID, "oidc-client-id", "", "client id registered with the OIDC issuer")
 	flag.StringVar(&cfg.OIDCClientSecret, "oidc-client-secret", "",
 		"client secret, only for a confidential registration — prefer the config file; argv is visible to ps")
+	flag.BoolVar(&cfg.ReadOnly, "read-only", false,
+		"reject every change from the web — for running a public demo")
 	// The config file mirrors every flag above (dashes become underscores),
 	// with the command line winning on any key both name.
 	var configPath string
@@ -316,7 +324,7 @@ func run(cfg Config) error {
 		app.auth.routes(mux)
 		handler = app.auth.protect(mux)
 	}
-	srv := &http.Server{Addr: cfg.Listen, Handler: guard(handler, cfg.PublicOrigin)}
+	srv := &http.Server{Addr: cfg.Listen, Handler: guard(handler, cfg.PublicOrigin, cfg.ReadOnly)}
 
 	go func() {
 		<-ctx.Done()

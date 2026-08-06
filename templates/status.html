@@ -87,7 +87,7 @@
               <td><a href="/doc/{{$d.ID}}">{{docCode $d.ID}}</a> {{$d.OriginalName}}</td>
               <td>{{$d.FailedStage}}</td>
               <td>{{$d.Error}}</td>
-              <td><form method="post" action="/doc/{{$d.ID}}/retry"><button type="submit" class="btn btn-secondary btn-sm">Retry</button></form></td>
+              <td>{{if not $.ReadOnly}}<form method="post" action="/doc/{{$d.ID}}/retry"><button type="submit" class="btn btn-secondary btn-sm">Retry</button></form>{{end}}</td>
             </tr>
           {{end}}
         </tbody>

@@ -322,11 +322,20 @@ func sameOrigin(r *http.Request, public string) bool {
 // list of those is twelve long today and every future one would have to
 // remember to join it; wrapping the router means a new route is covered by
 // existing code rather than by whoever writes it.
-func guard(next http.Handler, public string) http.Handler {
+//
+// The same reasoning gives read-only mode its home here: it is the same
+// question — "is this request allowed to change anything?" — answered a step
+// earlier. Only /auth/ is exempt, because signing out is a POST and ending
+// your own session changes nothing about the archive.
+func guard(next http.Handler, public string, readOnly bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 		default:
+			if readOnly && !strings.HasPrefix(r.URL.Path, "/auth/") {
+				http.Error(w, "this archive is read-only", http.StatusForbidden)
+				return
+			}
 			if !sameOrigin(r, public) {
 				// No detail: the page that sent this is not one of ours, and
 				// what it learns from the reply should be nothing.
@@ -634,6 +643,10 @@ type page struct {
 	User       string
 	UserEmail  string
 	OpenAccess bool
+	// ReadOnly hides every affordance that would only lead to a refused
+	// request: the server enforces the mode in guard, the templates just
+	// stop offering what it will not accept.
+	ReadOnly bool
 	// Nav walks the listing this document was opened from; nil off the doc
 	// page, and on it when the document has fallen out of its listing.
 	Nav    *DocNav
@@ -713,6 +726,7 @@ func (a *App) render(w http.ResponseWriter, r *http.Request, name string, data p
 	} else {
 		data.OpenAccess = true
 	}
+	data.ReadOnly = a.cfg.ReadOnly
 	tpl, err := a.templates(name)
 	if err != nil {
 		http.Error(w, "template: "+err.Error(), http.StatusInternalServerError)

@@ -195,8 +195,10 @@
 
   <div class="results-head">
     <div class="picked">
+      {{if not .ReadOnly}}
       <label class="pick-hit"><input type="checkbox" class="pick pick-all"
              aria-label="Select every document on this page"></label>
+      {{end}}
       <p class="count">
         <strong>{{commaNum .Result.Found}}</strong>
         {{if .Query.Q}}
@@ -207,6 +209,7 @@
       </p>
       {{/* Always in the layout so selecting something does not shove the
            results down; picker.js makes it invisible rather than absent. */}}
+      {{if not .ReadOnly}}
       <div class="picker-actions">
         <span class="picked-count" data-total="{{.Result.Found}}"></span>
         {{/* Filing a stack of documents under one name, without opening any of
@@ -246,6 +249,7 @@
         {{end}}
         <button type="button" class="pill-plain picker-clear">Clear</button>
       </div>
+      {{end}}
     </div>
     <div class="sort">
       <span class="micro">Sort</span>
@@ -299,7 +303,11 @@
       {{else if .Query.Q}}
         <p>Nothing matched “{{.Query.Q}}”.</p>
       {{else}}
+        {{if .ReadOnly}}
+        <p>Nothing here yet.</p>
+        {{else}}
         <p>Drop a file anywhere on this page, or <a href="/upload">upload some</a>.</p>
+        {{end}}
       {{end}}
     </div>
   {{end}}
@@ -312,8 +320,10 @@
            second lookup to confirm what it just rendered. */}}
       <li class="row" data-doc-id="{{$d.ID}}">
         {{/* The label is the target, not the 18px box: see .pick-hit. */}}
+        {{if not $page.ReadOnly}}
         <label class="pick-hit"><input type="checkbox" class="pick" name="id" value="{{$d.ID}}"
                aria-label="Select {{docCode $d.ID}}"></label>
+        {{end}}
         <span class="thumb">
           <img src="/doc/{{$d.ID}}/thumb" alt="" loading="lazy">
         </span>

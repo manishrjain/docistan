@@ -20,7 +20,11 @@
     {{end}}
     <span class="code" data-copy="{{docCode $d.ID}}" title="Click to copy the document number">{{docCode $d.ID}}</span>
     <div class="doc-head-title">
+      {{if $.ReadOnly}}
+      <h1 class="doc-title">{{$d.Title}}</h1>
+      {{else}}
       <h1 class="doc-title" data-edits="title" tabindex="0" title="Click to edit">{{$d.Title}}</h1>
+      {{end}}
     </div>
     <div class="doc-head-actions">
       <a class="btn btn-secondary act" href="/doc/{{$d.ID}}/pdf" target="_blank" rel="noopener" title="Open in a new tab">
@@ -46,6 +50,7 @@
     </section>
 
     <aside class="doc-side">
+      {{if not $.ReadOnly}}
       <div class="tools">
         {{/* Each is a plain form, so every action still works without
              JavaScript — with the browser's own confirm rather than the
@@ -96,6 +101,7 @@
              and a page that reloads, which says the same thing by arriving. */}}
         <span class="saved" hidden aria-live="polite">✓ Saved</span>
       </div>
+      {{end}}
 
       {{/* Revealed by doc.js in place of the browser's confirm dialog. */}}
       <div class="confirm" data-confirm="trash" hidden>
@@ -140,6 +146,26 @@
            warning — a negative sentence over a document that was perfectly
            well read, from its own text layer, as the step below says. */}}
 
+      {{if $.ReadOnly}}
+      {{/* The same panel with nothing to press: the date and tags as facts.
+           No .doc-form means doc.js wires no editors — the read-only page
+           carries no promise the server would refuse. */}}
+      <h6>Date</h6>
+      <div class="doc-date-wrap">
+        <span class="doc-date{{if not $d.CreatedDate}} unset{{end}}">
+          {{if $d.CreatedDate}}{{monthLabel $d.CreatedDate}}{{else}}No date{{end}}
+        </span>
+      </div>
+      <hr class="hr">
+      <h6>Tags</h6>
+      {{if $d.Tags}}
+      <div class="tag-editor">
+        {{range $d.Tags}}<span class="pill"><span>{{.}}</span></span>{{end}}
+      </div>
+      {{else}}
+      <p class="doc-summary none">No tags.</p>
+      {{end}}
+      {{else}}
       <form class="doc-form" method="post" action="/doc/{{$d.ID}}">
         <h6>Date</h6>
         <div class="doc-date-wrap">
@@ -168,11 +194,14 @@
         {{/* Removed by doc.js once autosave is active. */}}
         <button type="submit" class="btn btn-primary" style="margin-top:12px">Save</button>
       </form>
+      {{end}}
 
       <hr class="hr">
       <h6>AI summary</h6>
       {{if $d.Summary}}
         <p class="doc-summary">{{$d.Summary}}</p>
+      {{else if $.ReadOnly}}
+        <p class="doc-summary none">No summary.</p>
       {{else}}
         <p class="doc-summary none">No summary yet — use Re-tag with AI.</p>
       {{end}}
@@ -197,7 +226,7 @@
             <p>{{if $d.Error}}{{$d.Error}}{{else}}{{$d.FailReason}}{{end}}</p>
           {{end}}
 
-          {{if $d.Locked}}
+          {{if and $d.Locked (not $.ReadOnly)}}
             {{/* A plain POST form, like every other action on this page, so it
                  works with scripting off; doc.js only swaps the button's label
                  while the request is out. The field is never given a value —

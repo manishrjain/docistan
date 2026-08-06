@@ -14,7 +14,9 @@
 <script src="/static/live.js" defer></script>
 {{block "head" .}}{{end}}
 </head>
-<body>
+{{/* data-readonly is how the scripts learn the mode without a request:
+     doc.js skips wiring the editors, drop.js never arms drag-and-drop. */}}
+<body{{if .ReadOnly}} data-readonly{{end}}>
 {{block "content" .}}{{end}}
 </body>
 </html>{{end}}
@@ -47,7 +49,7 @@
     <button type="submit">Search</button>
   </form>
   <nav>
-    <a class="btn btn-secondary" href="/upload">Upload</a>
+    {{if not .ReadOnly}}<a class="btn btn-secondary" href="/upload">Upload</a>{{end}}
     <a class="iconbtn" href="/status" title="Status">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 3 12 2-6h5"/></svg>
     </a>
@@ -68,6 +70,9 @@
          issuer is also the legitimate behind-a-proxy deployment. */}}
     {{if .OpenAccess}}
       <span class="access-chip" title="No login is configured — anyone who can reach this address has full access">Open access</span>
+    {{end}}
+    {{if .ReadOnly}}
+      <span class="access-chip" title="This archive rejects all changes — browsing and reading only">Read-only</span>
     {{end}}
   </nav>
 </header>

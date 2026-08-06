@@ -57,7 +57,10 @@ permanently deleted.
 ![Searching for "tax": scored results with highlighted snippets, tag filters and date ranges](screenshots/search-tax.png)
 
 What Docovia doesn't provide is any access control. If you can access Docovia,
-you can access all available docovia.
+you can access all available docs. The one exception is `read_only = true`,
+which turns the whole archive into a browsing copy — every change arriving
+over the web is refused, uploads included — so a public demo can be left open
+without anyone rearranging it.
 
 ## Install and Run
 
@@ -143,6 +146,7 @@ openai_key = sk-...           # without it: no titles, no tags
 # Web
 listen = 127.0.0.1:8080            # the container's command line passes 0.0.0.0:8080
 # public_origin =                    # e.g. https://docovia.example.com, behind a TLS proxy
+# read_only =                        # true rejects every change from the web — for a public demo
 
 # Data
 # data = /home/you/docovia-data      # the container's command line passes /data

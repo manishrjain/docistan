@@ -30,7 +30,13 @@ picker.type = "file";
 picker.multiple = true;
 picker.className = "hidden";
 
+// A read-only archive accepts no uploads, so nothing here gets wired: no
+// overlay, no link takeover, and drags stay the browser's business. The
+// server refuses the POST regardless; this keeps the page from offering it.
+const readOnly = document.body.hasAttribute("data-readonly");
+
 document.addEventListener("DOMContentLoaded", () => {
+  if (readOnly) return;
   document.body.append(overlay, picker);
 
   // The Upload button is a real link, so this only takes it over once there is
@@ -75,7 +81,7 @@ picker.addEventListener("change", () => {
 
 // Only react to an actual file drag, not to text or link dragging.
 const draggingFiles = (e) =>
-  e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+  !readOnly && e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
 
 // dragenter/dragleave fire for every child element crossed, so nesting is
 // counted rather than toggled — otherwise the overlay flickers.
