@@ -5,6 +5,8 @@ librarian: drop files in, get them OCR'd, titled, tagged, dated and searchable.
 Docovia uses Javascript, Go and Typesense, no database, and the JSON sidecars
 next to your documents are the source of truth.
 
+You can play with a read-only demo at [docovia-demo.manishrjain.com](https://docovia-demo.manishrjain.com).
+
 ![Docovia's main grid — every document OCR'd, titled, tagged, dated and summarized](screenshots/index.png)
 
 ## Origin
