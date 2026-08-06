@@ -4,6 +4,13 @@ A self-hosted document archive: drop files in, get them OCR'd, titled, tagged,
 dated and searchable. Go and Typesense, no database, and the JSON sidecars next
 to your documents are the source of truth.
 
+![Docovia's main grid — every document OCR'd, titled, tagged, dated and summarized](screenshots/index.png)
+
+*The archive in these screenshots is demo data — public-domain government
+documents, the CFPB's deliberately fictional mortgage samples, and two
+fabricated "scans" — so what you see is exactly what the pipeline produced,
+with nobody's real paperwork on display.*
+
 ## Origin
 
 First, I (Manish) would like to thank paperless-ngx. I self-host it and it got
@@ -40,10 +47,14 @@ follows:
    instant, scored and full-text.
 1. The Doc is now fully naturalized citizen of Docovia, Welcome!
 
+![A naturalized document: an OCR'd 1997 utility bill with its date, tags, AI summary and the naturalization timeline](screenshots/doc-view.png)
+
 The UX of Docovia supports text search, tag filters and sort by upload date and
 document date. If a doc is trashed, it stays put for the next 30 days but
 disappears from search results, after which everything about the doc gets
 permanently deleted.
+
+![Searching for "tax": scored results with highlighted snippets, tag filters and date ranges](screenshots/search-tax.png)
 
 What Docovia doesn't provide is any access control. If you can access Docovia,
 you can access all available docovia.
