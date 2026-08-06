@@ -59,10 +59,7 @@ permanently deleted.
 ![Searching for "tax": scored results with highlighted snippets, tag filters and date ranges](screenshots/search-tax.png)
 
 What Docovia doesn't provide is any access control. If you can access Docovia,
-you can access all available docs. The one exception is `read_only = true`,
-which turns the whole archive into a browsing copy — every change arriving
-over the web is refused, uploads included — so a public demo can be left open
-without anyone rearranging it.
+you can access all available docs.
 
 ## Install and Run
 
@@ -132,13 +129,13 @@ without them; the uncommented three are a typical prod config in full:
 # ~/.config/docovia/config           chmod 600 — it holds keys
 
 # LLM Settings
-openai_key = sk-...           # without it: no titles, no tags
-# llm = true                  # false ingests without the model at all
-# llm_model = gpt-5.6-luna    # defaults to gpt-5.6-luna
-# enrich_workers = 16         # concurrent model calls; defaults to half the cores
+openai_key = sk-...        # without it: no titles, no tags
+# llm = true               # false ingests without the model at all
+# llm_model = gpt-5.6-luna # defaults to gpt-5.6-luna
+# enrich_workers = 16      # concurrent model calls; defaults to half the cores
 
 # Doc Processing
-# ingest_workers = 16         # concurrent ocrmypdf calls, defaults to half the cores
+# ingest_workers = 16      # concurrent ocrmypdf calls, defaults to half the cores
 
 # Auth
 # oidc_issuer = https://id.example.com
@@ -146,9 +143,9 @@ openai_key = sk-...           # without it: no titles, no tags
 # oidc_client_secret =               # only for a confidential registration
 
 # Web
-listen = 127.0.0.1:8080            # the container's command line passes 0.0.0.0:8080
-# public_origin =                    # e.g. https://docovia.example.com, behind a TLS proxy
-# read_only =                        # true rejects every change from the web — for a public demo
+listen = 127.0.0.1:8080 # the container's command line passes 0.0.0.0:8080
+# public_origin =       # e.g. https://docovia.example.com, behind a TLS proxy
+# read_only =           # true rejects every change from the web — for a public demo
 
 # Data
 # data = /home/you/docovia-data      # the container's command line passes /data
@@ -175,11 +172,10 @@ machine, and `docker inspect` keeps it for the life of the container.
 ### Note about LLM Enrichment
 
 Docovia supports OpenAI for LLM enrichment because the Luna model is remarkably
-cheap: $0.20/M tokens in, $1.20/M out as of Aug '26. Docovia truncates (from
-middle, leaving head and tail intact) and sends a doc's extracted text and gets
-metadata: title, date, tags, and summary back. It does NOT send the doc to be
-OCR'd by LLM which would be more expensive. Instead, it relies entirely on local
-tools for text extraction.
+cheap. Docovia truncates (from middle, leaving head and tail intact) and sends a
+doc's extracted text and gets metadata: title, date, tags, and summary back. It
+does NOT send the doc to be OCR'd by LLM which would be more expensive. Instead,
+it relies entirely on local tools for text extraction.
 
 Docovia stores the LLM tokens in, out and cost in each doc's JSON sidecar. So
 it's able to accurately tell how much it spent on processing the docs. With this
