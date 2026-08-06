@@ -267,7 +267,7 @@ main {
 .topbar {
   display: flex;
   align-items: center;
-  gap: var(--space-6);
+  gap: var(--space-4);
   padding: 14px var(--space-6);
   border-bottom: 2px solid var(--color-divider);
 }
@@ -294,15 +294,11 @@ main {
 .brand:hover { color: var(--color-text); }
 
 /* The search field is the one place a 2px ink border is used for emphasis
-   rather than for structure — it is the primary action on the page. Capped
-   rather than edge to edge: in the design the box shares its row with a
-   200px brand and a full identity cluster, and on a sparse topbar an
-   uncapped flex:1 ran the full width and crowded the icons beside it. The
-   leftover space lands between the box and the nav, which is the breathing
-   room the design shows. */
+   rather than for structure — it is the primary action on the page, and per
+   the mock it takes every pixel between the brand and the buttons, at any
+   width. (It was briefly capped at 700px; the design moved on.) */
 .searchbox {
   flex: 1;
-  max-width: 700px;
   display: flex;
   min-width: 0;
   border: 2px solid var(--color-text);
@@ -359,9 +355,6 @@ main {
   align-items: center;
   gap: var(--space-2);
   flex: none;
-  /* With the searchbox capped, the leftover width goes here — between the
-     box and the icons — rather than stretching the box to meet them. */
-  margin-left: auto;
 }
 
 /* Icon-square button in the topbar, sized to the mock: 38px, 34 on mobile.
@@ -700,6 +693,8 @@ main {
   align-items: center;
   gap: var(--space-2);
 }
+/* The short spellings exist for phones; here the full ones speak. */
+.bulk-short { display: none; }
 /* Invisible, not absent: removing it would shove the results down and back
    every time the first box is ticked.
    Asked of the checkboxes themselves rather than of a count JavaScript writes
@@ -1598,7 +1593,10 @@ button.pill-plain {
     padding: var(--space-3) var(--space-4);
   }
   .searchbox { order: 3; flex-basis: 100%; }
-  .topbar nav { margin-left: auto; }
+  /* The nav takes the rest of the brand's row so the name can stretch and
+     truncate inside it; flex-end keeps the buttons on the right edge when
+     nobody is signed in and there is no name to do the stretching. */
+  .topbar nav { flex: 1; min-width: 0; justify-content: flex-end; }
 
   /* One line in place of the whole bar: a row of tag pills beside a
      five-segment date control does not fit, and wrapping them both just
@@ -1732,6 +1730,19 @@ button.pill-plain {
     align-items: center;
     gap: 10px;
   }
+  /* Per the mock: count on the left, sort on the right, and the bulk actions
+     on a whole line under both instead of squeezing beside the count.
+     display:contents lifts the group's children into the results-head row,
+     so the actions' 100% is the whole bar rather than the sliver the sort
+     control leaves over. Display none rather than the desktop's visibility
+     hidden: an invisible row that still reserved its line would put a
+     permanent blank stripe under every phone's result count. */
+  .picked { display: contents; }
+  .picked .count { margin-right: auto; }
+  .picker-actions { order: 5; flex-basis: 100%; flex-wrap: wrap; row-gap: 6px; }
+  .picker:not(:has(.pick:not(.pick-all):checked)) .picker-actions { display: none; }
+  .bulk-long { display: none; }
+  .bulk-short { display: inline; }
   .results-head .sort { flex-wrap: wrap; gap: 6px; }
   .results-head .sort > .micro { display: none; }
   .sort-dir .dir-full { display: none; }
@@ -1779,7 +1790,17 @@ button.pill-plain {
   .doc-head-actions .act { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; padding: 0; }
   .iconbtn { width: 34px; height: 34px; }
   .iconbtn svg { width: 16px; height: 16px; }
-  .who { display: none; }
+  /* Per the mock: the name rides between the brand and the buttons,
+     stretched and ellipsized rather than hidden. order pulls it ahead of
+     Upload — in the DOM it sits next to Sign out, which it belongs to. */
+  .who {
+    order: -1;
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+    font-size: 10px;
+    text-align: left;
+  }
   .tool { width: 44px; height: 44px; }
   .pill-x { font-size: 17px; }
   .page { padding: var(--space-4); }

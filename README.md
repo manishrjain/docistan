@@ -17,19 +17,21 @@ First, I (Manish) would like to thank paperless-ngx. I self-host it and it got
 me away from the control of Dropbox and Google Drive, and showed me what's
 possible.
 
-I wrote this after growing unhappy with paperless-ngx: search was slow,
+After months of usage, I grew unhappy with paperless-ngx: search was slow,
 the quality of results was bad, and the whole interface felt oldschool and
 buggy.
 
 My first attempt was to run Typesense search over paperless-ngx, which produced
-remarkably better results. That's when I decided to build Docovia from scratch.
+remarkably better results. Emboldened by that, I decided to build Docovia from
+scratch.
 
-I used Claude to co-author it over a busy family-oriented weekend and a couple
-of weekdays. My prime focus was on Design, UI/UX, enrichment (LLM) and search
-quality. I didn't get a lot of time to do thorough code reviews upfront, which I
-paid for later, untangling some of the complexity the coding agent brought.
+I used Claude to co-author it over a busy family-oriented weekend and 3
+weekdays. My prime focus was on Design, UI/UX over both desktop and mobile,
+enrichment (LLM) and search quality. I didn't get a lot of time to do thorough
+code reviews upfront, which I paid for later, untangling some of the complexity
+the coding agent brought.
 
-## Naturalization of a Doc in Docovia
+## Naturalization Process
 
 Docovia is great because you can just dump your documents without worrying about
 any folder level organization. Once uploaded, Docovia would process a doc as
@@ -37,15 +39,15 @@ follows:
 
 1. Check for duplicates via SHA checksum and reject if it finds one.
 1. Unlock if locked, trying every known password from previous successful
-   unlocks. It would overwrite the original with this unlocked version, while
+   unlocks. Overwrite the original with this unlocked version, while
    keeping the original's checksum to catch duplicates.
 1. Extract text, either by reading the native text layer or running OCR over
    them.
-1. Send the extracted text to LLM (OpenAI) to figure out title, document
+1. Send extracted text to LLM (OpenAI) to determine title, document
    date, tags and summary.
 1. Index the doc in Typesense, which holds everything in RAM - search is
    instant, scored and full-text.
-1. The Doc is now fully naturalized citizen of Docovia, Welcome!
+1. The Doc is now fully naturalized citizen of Docovia. Welcome!
 
 ![A naturalized document: an OCR'd 1997 utility bill with its date, tags, AI summary and the naturalization timeline](screenshots/doc-view.png)
 

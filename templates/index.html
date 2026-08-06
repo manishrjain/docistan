@@ -218,15 +218,17 @@
              both are inside this one form and both post on every submit; a
              second field called "tag" would be read instead of the one that
              was typed into. */}}
+        {{/* Two spellings per label: the mock shortens them on a phone, where
+             "Move to trash" costs the row a second line. CSS shows one. */}}
         <details class="bulk-tag">
-          <summary class="btn btn-secondary btn-sm">Add tag</summary>
+          <summary class="btn btn-secondary btn-sm"><span class="bulk-long">Add tag</span><span class="bulk-short">+ Tag</span></summary>
           <div class="bulk-pop">
             <input type="text" name="tag-add" list="tag-vocab" placeholder="Search tags…" autocomplete="off">
             <button type="submit" formaction="/docs/tags/add" class="btn btn-primary btn-sm">Add</button>
           </div>
         </details>
         <details class="bulk-tag">
-          <summary class="btn btn-secondary btn-sm">Remove tag</summary>
+          <summary class="btn btn-secondary btn-sm"><span class="bulk-long">Remove tag</span><span class="bulk-short">&minus; Tag</span></summary>
           <div class="bulk-pop">
             <input type="text" name="tag-remove" list="tag-vocab" placeholder="Search tags…" autocomplete="off">
             <button type="submit" formaction="/docs/tags/remove" class="btn btn-primary btn-sm">Remove</button>
@@ -242,10 +244,10 @@
                   class="btn btn-primary btn-sm">Restore</button>
           <button type="submit" formaction="/docs/action" name="action" value="purge"
                   class="btn btn-ghost btn-sm"
-                  onclick="return confirm('Delete the selected documents forever? The files are removed and cannot be restored.')">Delete forever</button>
+                  onclick="return confirm('Delete the selected documents forever? The files are removed and cannot be restored.')"><span class="bulk-long">Delete forever</span><span class="bulk-short">Delete</span></button>
         {{else}}
           <button type="submit" formaction="/docs/action" name="action" value="trash"
-                  class="btn btn-primary btn-sm">Move to trash</button>
+                  class="btn btn-primary btn-sm"><span class="bulk-long">Move to trash</span><span class="bulk-short">Trash</span></button>
         {{end}}
         <button type="button" class="pill-plain picker-clear">Clear</button>
       </div>
