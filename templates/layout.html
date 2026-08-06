@@ -44,7 +44,10 @@
     </span>
     <input type="search" name="q" value="{{.Query.Q}}" autocomplete="off"
            aria-label="Search documents"
-           placeholder="{{if .Total}}Search {{commaNum .Total}} document{{if ne .Total 1}}s{{end}}{{else}}Search documents…{{end}}">
+           {{/* The @47 example is the whole documentation of number search:
+                an example teaches the syntax faster than naming it, and the
+                placeholder is the one string every visitor reads. */}}
+           placeholder="{{if .Total}}Search {{commaNum .Total}} document{{if ne .Total 1}}s{{end}}, or @47 by number{{else}}Search documents, or @47 by number{{end}}">
     {{if .Query.Q}}<a class="clear" href="{{.WithParam "q" ""}}">CLEAR</a>{{end}}
     <button type="submit">Search</button>
   </form>
