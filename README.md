@@ -1,11 +1,12 @@
-# Docovia - The Land For Your Docs
+# Docovia - The Land for Your Docs
 
 Docovia is the land for your docs. An open-source, self-hosted document
 librarian: drop files in, get them OCR'd, titled, tagged, dated and searchable.
 Docovia uses Javascript, Go and Typesense, no database, and the JSON sidecars
 next to your documents are the source of truth.
 
-You can play with a read-only demo at [docovia-demo.manishrjain.com](https://docovia-demo.manishrjain.com).
+You can play with a read-only demo at [docovia-demo.manishrjain.com](https://docovia-demo.manishrjain.com),
+and read the [launch blog post](https://manishrjain.com/launching-docovia) for the full story.
 
 ![Docovia's main grid — every document OCR'd, titled, tagged, dated and summarized](screenshots/index.png)
 
